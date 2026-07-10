@@ -1,0 +1,39 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    env_file:
+      - /etc/bridgeguard/bridgeguard.env
+    environment:
+      BRIDGEGUARD_ENV: production
+      BRIDGEGUARD_COOKIE_SECURE: "true"
+      BRIDGEGUARD_DATA_DIR: /data
+      FRONTEND_DIST: /app/static
+      PORT: "8000"
+    volumes:
+      - /srv/bridgeguard/data:/data
+    restart: unless-stopped
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2.10-alpine
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+

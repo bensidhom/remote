@@ -1,0 +1,15 @@
+[project]
+name = "snbi-bridge-backend"
+version = "1.0.0"
+description = "SNBI Bridge FastAPI Backend"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "pandas",
+    "Pillow",
+    "pytesseract",
+    "pypdf",
+    "openai",
+]

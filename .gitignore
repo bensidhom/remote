@@ -1,0 +1,26 @@
+# ---- Node / frontend ----
+node_modules/
+dist/
+
+# ---- Python ----
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- Environment / secrets ----
+.env
+backend/.env
+
+# ---- Logs ----
+*.log
+
+# ---- App data (DBs, uploads, usage state, samples and RAG artifacts) ----
+# Production data is transferred to the persistent cloud volume separately.
+backend/data/
+
+# ---- Built frontend staged into the backend ----
+backend/static/
+
+# ---- OS ----
+.DS_Store

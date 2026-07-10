@@ -1,0 +1,16 @@
+services:
+  app:
+    build:
+      context: .
+    env_file:
+      - backend/.env
+    environment:
+      BRIDGEGUARD_DATA_DIR: /data
+      FRONTEND_DIST: /app/static
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/data
+    restart: unless-stopped
+
