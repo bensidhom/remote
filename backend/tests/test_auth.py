@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app.auth import (
     AuthMiddleware,
@@ -12,6 +13,7 @@ from app.auth import (
     issue_session,
     role_for_email,
     router,
+    verify_cloudflare_request,
     verify_session,
 )
 
@@ -78,6 +80,41 @@ class AuthTests(unittest.TestCase):
             self.assertIn("bridgeguard_session", client.cookies)
             self.assertEqual(client.get("/api/map-data").status_code, 200)
             self.assertEqual(client.get("/api/tables").status_code, 403)
+
+    def test_cloudflare_jwt_claims_are_mapped_to_roles(self):
+        cloudflare_env = {
+            **ENV,
+            "BRIDGEGUARD_AUTH_MODE": "cloudflare",
+            "CLOUDFLARE_ACCESS_TEAM_DOMAIN": "bridgeguard.cloudflareaccess.com",
+            "CLOUDFLARE_ACCESS_AUD": "test-audience",
+        }
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/api/auth/me",
+            "headers": [(b"cf-access-jwt-assertion", b"signed-token")],
+        })
+
+        class FakeKey:
+            key = "public-key"
+
+        class FakeClient:
+            def get_signing_key_from_jwt(self, token):
+                self.token = token
+                return FakeKey()
+
+        with patch.dict(os.environ, cloudflare_env, clear=True), \
+             patch("app.auth._jwks_client", return_value=FakeClient()), \
+             patch("app.auth.jwt.decode", return_value={"email": "admin@example.com"}) as decode:
+            self.assertEqual(
+                verify_cloudflare_request(request),
+                AuthUser("admin@example.com", "admin"),
+            )
+            self.assertEqual(decode.call_args.kwargs["audience"], "test-audience")
+            self.assertEqual(
+                decode.call_args.kwargs["issuer"],
+                "https://bridgeguard.cloudflareaccess.com",
+            )
 
 
 if __name__ == "__main__":

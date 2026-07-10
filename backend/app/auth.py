@@ -1,10 +1,8 @@
-"""Minimal, server-enforced authentication for BridgeGuard deployments.
+"""Server-enforced authentication and authorization for BridgeGuard.
 
-The implementation deliberately uses only the Python standard library: a shared
-deployment password authenticates an allowlisted email, and the server issues a
-short-lived, HMAC-signed HttpOnly cookie.  It is intended as a secure MVP bridge
-to an external OIDC provider (for example Supabase Auth) without putting any
-credential or authorization decision in the React bundle.
+Production can verify Cloudflare Access application JWTs on every request. A
+signed-cookie password mode remains available for local and non-Cloudflare
+deployments. In both modes, roles are resolved from server-side email lists.
 """
 
 from __future__ import annotations
@@ -20,7 +18,9 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
+import jwt
 from fastapi import APIRouter, HTTPException, Request, Response
+from jwt import PyJWKClient
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -58,6 +58,15 @@ class LoginBody(BaseModel):
 
 def auth_disabled() -> bool:
     return _truthy("BRIDGEGUARD_AUTH_DISABLED")
+
+
+def auth_mode() -> str:
+    if auth_disabled():
+        return "disabled"
+    mode = os.getenv("BRIDGEGUARD_AUTH_MODE", "password").strip().lower()
+    if mode not in {"password", "cloudflare"}:
+        raise RuntimeError("BRIDGEGUARD_AUTH_MODE must be 'password' or 'cloudflare'")
+    return mode
 
 
 def _secret() -> bytes:
@@ -134,6 +143,62 @@ def verify_session(token: str, now: int | None = None) -> AuthUser | None:
         return None
 
 
+_jwks_lock = threading.Lock()
+_jwks_clients: dict[str, PyJWKClient] = {}
+
+
+def _cloudflare_settings() -> tuple[str, str]:
+    team_domain = os.getenv("CLOUDFLARE_ACCESS_TEAM_DOMAIN", "").strip().lower()
+    team_domain = team_domain.removeprefix("https://").rstrip("/")
+    audience = os.getenv("CLOUDFLARE_ACCESS_AUD", "").strip()
+    if not team_domain.endswith(".cloudflareaccess.com") or not audience:
+        raise RuntimeError(
+            "CLOUDFLARE_ACCESS_TEAM_DOMAIN and CLOUDFLARE_ACCESS_AUD are required"
+        )
+    return team_domain, audience
+
+
+def _jwks_client(team_domain: str) -> PyJWKClient:
+    with _jwks_lock:
+        client = _jwks_clients.get(team_domain)
+        if client is None:
+            client = PyJWKClient(
+                f"https://{team_domain}/cdn-cgi/access/certs",
+                cache_keys=True,
+                lifespan=3600,
+            )
+            _jwks_clients[team_domain] = client
+        return client
+
+
+def verify_cloudflare_request(request: Request) -> AuthUser | None:
+    """Verify Cloudflare's application JWT and map its email to an app role."""
+    token = request.headers.get("Cf-Access-Jwt-Assertion", "").strip()
+    if not token:
+        return None
+    try:
+        team_domain, audience = _cloudflare_settings()
+        signing_key = _jwks_client(team_domain).get_signing_key_from_jwt(token).key
+        claims = jwt.decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=f"https://{team_domain}",
+            options={"require": ["exp", "iat", "iss", "aud", "email"]},
+        )
+        email = str(claims["email"]).strip().lower()
+        role = role_for_email(email)
+        return AuthUser(email, role) if role else None
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError, RuntimeError):
+        return None
+
+
+def cloudflare_logout_url() -> str:
+    team_domain, _ = _cloudflare_settings()
+    return f"https://{team_domain}/cdn-cgi/access/logout"
+
+
 def _required_role(method: str, path: str) -> str:
     """Map an API request to its minimum role.
 
@@ -180,13 +245,22 @@ def _has_role(user: AuthUser, required: str) -> bool:
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if auth_disabled():
+        try:
+            mode = auth_mode()
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        if mode == "disabled":
             request.state.user = AuthUser("local@bridgeguard", "admin")
             return await call_next(request)
-        if request.method == "OPTIONS" or not path.startswith("/api/") or path == "/api/auth/login":
+        if request.method == "OPTIONS" or not path.startswith("/api/"):
             return await call_next(request)
-        token = request.cookies.get(COOKIE_NAME, "")
-        user = verify_session(token) if token else None
+        if path == "/api/auth/login" and mode == "password":
+            return await call_next(request)
+        if mode == "cloudflare":
+            user = verify_cloudflare_request(request)
+        else:
+            token = request.cookies.get(COOKIE_NAME, "")
+            user = verify_session(token) if token else None
         if user is None:
             return JSONResponse({"detail": "Authentication required"}, status_code=401)
         required = _required_role(request.method, path)
@@ -219,6 +293,8 @@ def _record_failure(client: str) -> None:
 
 @router.post("/login")
 def login(body: LoginBody, request: Request, response: Response):
+    if auth_mode() != "password":
+        raise HTTPException(status_code=409, detail="Password login is disabled")
     client = request.client.host if request.client else "unknown"
     _check_rate_limit(client)
     try:
@@ -256,5 +332,6 @@ def me(request: Request):
 @router.post("/logout")
 def logout(response: Response):
     response.delete_cookie(COOKIE_NAME, path="/")
-    return {"status": "signed_out"}
-
+    if auth_mode() == "cloudflare":
+        return {"status": "signed_out", "logout_url": cloudflare_logout_url()}
+    return {"status": "signed_out", "logout_url": None}

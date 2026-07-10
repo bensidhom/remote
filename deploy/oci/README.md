@@ -1,8 +1,9 @@
 # BridgeGuard on OCI Always Free
 
 Use an Ubuntu ARM64 `VM.Standard.A1.Flex` instance with 2 OCPUs, 12 GB RAM, and
-at least a 50 GB boot volume. Open inbound TCP 80 and 443 in the OCI security
-list. Point a DNS `A` record at the instance before starting Caddy.
+at least a 50 GB boot volume. Cloudflare Tunnel connects outbound from the VM,
+so only SSH needs to be temporarily reachable while provisioning. Do not expose
+the application port to the Internet.
 
 ## Server preparation
 
@@ -18,21 +19,24 @@ cd /opt/bridgeguard
 
 Copy the untracked databases and persistent folders into
 `/srv/bridgeguard/data`. Create `/etc/bridgeguard/bridgeguard.env` from
-`backend/.env.example`, replacing every placeholder. Generate the session secret
-with `openssl rand -base64 48`.
+`backend/.env.example`, replacing every placeholder. For single sign-on, set
+`BRIDGEGUARD_AUTH_MODE=cloudflare`, the Cloudflare team domain, application AUD,
+and the server-side role lists. Copy `cloudflare.env.example` to
+`/etc/bridgeguard/cloudflare.env` and insert the tunnel token.
 
 Start the deployment:
 
 ```bash
 cd /opt/bridgeguard/deploy/oci
-export DOMAIN=bridgeguard.example.com
 docker compose up -d --build
 docker compose ps
-curl -fsS https://bridgeguard.example.com/ready
+docker compose exec -T app python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/ready').read().decode())"
 ```
 
-Persist `DOMAIN` in `/opt/bridgeguard/deploy/oci/.env`. Docker's
-`restart: unless-stopped` policy brings both services back after a reboot.
+In Cloudflare, publish the application hostname to `http://app:8000`, then add a
+self-hosted Access application for the same hostname. Docker's `restart:
+unless-stopped` policy brings both services back after a reboot.
 
 ## Backups
 
@@ -47,4 +51,3 @@ disaster recovery.
 
 Keep one Gunicorn worker until SQLite, RAG state, and background work have moved
 to external services.
-

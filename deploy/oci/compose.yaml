@@ -17,23 +17,13 @@ services:
     expose:
       - "8000"
 
-  caddy:
-    image: caddy:2.10-alpine
-    environment:
-      DOMAIN: ${DOMAIN}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    env_file:
+      - /etc/bridgeguard/cloudflare.env
     depends_on:
       app:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  caddy_data:
-  caddy_config:
 

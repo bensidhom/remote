@@ -140,10 +140,11 @@ at `/data` and set `BRIDGEGUARD_DATA_DIR=/data`.
 docker compose up --build
 ```
 
-The recommended free MVP deployment is an OCI Ampere A1 VM. The production
-Compose file, Caddy TLS proxy, online SQLite backup command, and setup guide are
-in `deploy/oci/`. Keep one Gunicorn worker until SQLite, RAG state, and ingestion
-jobs have moved to external services.
+The recommended free MVP deployment is an OCI Ampere A1 VM behind Cloudflare
+Tunnel and Access. The production Compose file, Cloudflare configuration,
+online SQLite backup command, and setup guide are in `deploy/oci/`. Keep one
+Gunicorn worker until SQLite, RAG state, and ingestion jobs have moved to
+external services.
 
 ---
 

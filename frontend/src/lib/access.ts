@@ -24,15 +24,18 @@ export async function signIn(email: string, password: string): Promise<AuthUser>
   return response.data;
 }
 
-export async function signOut(): Promise<void> {
+export async function signOut(): Promise<string | null> {
+  let logoutUrl: string | null = null;
   try {
-    await axios.post('/api/auth/logout');
+    const response = await axios.post<{ logout_url?: string | null }>('/api/auth/logout');
+    logoutUrl = response.data.logout_url || null;
   } finally {
     // Remove obsolete credentials created by pre-server-auth builds.
     localStorage.removeItem('bg-user-email');
     localStorage.removeItem('dbadmin_pin');
     localStorage.removeItem('admin_session');
   }
+  return logoutUrl;
 }
 
 // Retained for the optional license acknowledgement screen.

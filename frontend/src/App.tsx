@@ -244,7 +244,12 @@ const App: React.FC = () => {
   return (
     <Router>
       <AdminProvider role={user.role}>
-        <AppContent user={user} onSignOut={() => { void signOut().finally(() => setUser(null)); }} />
+        <AppContent user={user} onSignOut={() => {
+          void signOut().then((logoutUrl) => {
+            setUser(null);
+            if (logoutUrl) window.location.assign(logoutUrl);
+          });
+        }} />
       </AdminProvider>
     </Router>
   );
