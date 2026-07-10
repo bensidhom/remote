@@ -24,6 +24,13 @@ Copy the untracked databases and persistent folders into
 and the server-side role lists. Copy `cloudflare.env.example` to
 `/etc/bridgeguard/cloudflare.env` and insert the tunnel token.
 
+After copying the data, grant the fixed container user ownership:
+
+```bash
+sudo chown -R 10001:10001 /srv/bridgeguard/data
+sudo chmod 600 /etc/bridgeguard/bridgeguard.env /etc/bridgeguard/cloudflare.env
+```
+
 Start the deployment:
 
 ```bash

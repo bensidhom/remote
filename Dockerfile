@@ -12,8 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FRONTEND_DIST=/app/static \
     BRIDGEGUARD_DATA_DIR=/data
 
-RUN groupadd --system bridgeguard \
-    && useradd --system --gid bridgeguard --home-dir /app bridgeguard \
+RUN groupadd --system --gid 10001 bridgeguard \
+    && useradd --system --uid 10001 --gid bridgeguard --home-dir /app bridgeguard \
     && mkdir -p /app /data \
     && chown -R bridgeguard:bridgeguard /app /data
 
@@ -30,4 +30,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"
 
 CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:${PORT} --timeout 300 --workers 1 --access-logfile - --error-logfile -"]
-
