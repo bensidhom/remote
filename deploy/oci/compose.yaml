@@ -4,7 +4,9 @@ services:
       context: ../..
       dockerfile: Dockerfile
     env_file:
-      - /etc/bridgeguard/bridgeguard.env
+      - path: /etc/bridgeguard/bridgeguard.env
+      - path: /etc/bridgeguard/ai.env
+        required: false
     environment:
       BRIDGEGUARD_ENV: production
       BRIDGEGUARD_COOKIE_SECURE: "true"
@@ -26,4 +28,3 @@ services:
       app:
         condition: service_healthy
     restart: unless-stopped
-

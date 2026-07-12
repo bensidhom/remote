@@ -1,99 +1,30 @@
-// Loads the ArcGIS Maps SDK for JavaScript (4.x) from the official CDN exactly once,
-// then resolves the requested esri AMD modules via window.require.
-//
-// This mirrors the integration pattern used by the Turf_Maintenance reference project
-// (js.arcgis.com + window.require + esriConfig.apiKey). Using the CDN keeps the Electron
-// bundle small and avoids the heavy @arcgis/core install, while still giving full SDK power.
+// Bundle the ArcGIS Maps SDK with the application instead of loading its AMD
+// runtime from js.arcgis.com. Basemap tiles and hosted feature layers still use
+// their normal network services, but SDK startup is local and keyless.
+import '@arcgis/core/assets/esri/themes/light/main.css';
 
-const ARCGIS_VERSION = '4.31';
-const CSS_HREF = `https://js.arcgis.com/${ARCGIS_VERSION}/esri/themes/light/main.css`;
-const SCRIPT_SRC = `https://js.arcgis.com/${ARCGIS_VERSION}/`;
+const LOCAL_MODULES: Record<string, () => Promise<{ default: unknown }>> = {
+  'esri/config': () => import('@arcgis/core/config.js'),
+  'esri/Map': () => import('@arcgis/core/Map.js'),
+  'esri/views/MapView': () => import('@arcgis/core/views/MapView.js'),
+  'esri/layers/FeatureLayer': () => import('@arcgis/core/layers/FeatureLayer.js'),
+  'esri/Graphic': () => import('@arcgis/core/Graphic.js'),
+  'esri/renderers/HeatmapRenderer': () => import('@arcgis/core/renderers/HeatmapRenderer.js'),
+  'esri/renderers/ClassBreaksRenderer': () => import('@arcgis/core/renderers/ClassBreaksRenderer.js'),
+  'esri/symbols/SimpleMarkerSymbol': () => import('@arcgis/core/symbols/SimpleMarkerSymbol.js'),
+};
 
-let scriptPromise: Promise<void> | null = null;
-
-function injectCss(): void {
-  if (document.querySelector('link[data-arcgis="css"]')) return;
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = CSS_HREF;
-  link.dataset.arcgis = 'css';
-  document.head.appendChild(link);
-}
-
-// Resolves once window.require (the Dojo AMD loader) is available, polling for
-// up to `timeoutMs` to absorb any gap between <script> onload and loader init.
-function waitForRequire(timeoutMs: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const start = Date.now();
-    const tick = () => {
-      if (typeof window !== 'undefined' && window.require) { resolve(); return; }
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error('ArcGIS loader did not initialise (window.require unavailable). Check the network / CDN.'));
-        return;
-      }
-      setTimeout(tick, 100);
-    };
-    tick();
-  });
-}
-
-function loadScript(): Promise<void> {
-  if (scriptPromise) return scriptPromise;
-
-  scriptPromise = new Promise<void>((resolve, reject) => {
-    // Already initialised (static <script> in index.html, or a prior load).
-    if (typeof window !== 'undefined' && window.require) { resolve(); return; }
-
-    injectCss();
-
-    // A script tag may already exist (static include from index.html still loading).
-    const existing = document.querySelector(
-      'script[data-arcgis="js"], script[src^="https://js.arcgis.com/"]'
-    ) as HTMLScriptElement | null;
-
-    if (existing) {
-      existing.addEventListener('error', () =>
-        reject(new Error('Could not load the ArcGIS Maps SDK from the CDN. Check your network connection.'))
-      );
-      waitForRequire(25000).then(resolve, reject);
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = SCRIPT_SRC;
-    script.async = true;
-    script.dataset.arcgis = 'js';
-    script.onload = () => waitForRequire(25000).then(resolve, reject);
-    script.onerror = () =>
-      reject(new Error('Could not load the ArcGIS Maps SDK from the CDN. Check your network connection.'));
-    document.head.appendChild(script);
-  });
-
-  return scriptPromise;
-}
-
-/**
- * Loads the ArcGIS SDK (once) and resolves the requested esri modules in order.
- *
- * @example
- * const [Map, MapView] = await loadEsriModules(['esri/Map', 'esri/views/MapView']);
- */
+/** Load the requested SDK modules from the local application bundle. */
 export async function loadEsriModules<T extends unknown[] = any[]>(
   modules: string[]
 ): Promise<T> {
-  await loadScript();
-  return new Promise<T>((resolve, reject) => {
-    const req = window.require;
-    if (!req) {
-      reject(new Error('ArcGIS loader (window.require) is unavailable.'));
-      return;
-    }
-    req(
-      modules,
-      (...mods: any[]) => resolve(mods as unknown as T),
-      (err: any) => reject(err)
-    );
+  const loaders = modules.map((name) => {
+    const loader = LOCAL_MODULES[name];
+    if (!loader) throw new Error(`Unsupported local ArcGIS module: ${name}`);
+    return loader();
   });
+  const loaded = await Promise.all(loaders);
+  return loaded.map((module) => module.default) as T;
 }
 
 /** Optional ArcGIS API key from Vite env. Empty string when not configured. */
@@ -101,7 +32,7 @@ export function getArcgisApiKey(): string {
   return (import.meta.env.VITE_ARCGIS_API_KEY ?? '').trim();
 }
 
-/** Premium ArcGIS basemaps can trigger the SDK sign-in dialog when a key is invalid/referrer-blocked. */
+/** Premium ArcGIS basemaps are opt-in; keyless basemaps remain the default. */
 export function usePremiumArcgisBasemaps(): boolean {
   return (import.meta.env.VITE_USE_PREMIUM_ARCGIS_BASEMAPS ?? '').trim() === '1';
 }
