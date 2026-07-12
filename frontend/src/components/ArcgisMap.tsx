@@ -419,7 +419,10 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
         viewRef.current = built.view;
 
         // NJ county boundary outlines + labels (kept beneath the bridge layer).
-        if (showCounties) {
+        // This hosted county service now requires an ArcGIS token. Load it only
+        // when premium ArcGIS access was explicitly configured; keyless mode
+        // must never open the SDK's credential dialog.
+        if (showCounties && usePremium) {
           try {
             const countyLayer = new FeatureLayer({
               url: 'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Counties_Generalized/FeatureServer/0',
