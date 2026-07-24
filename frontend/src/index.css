@@ -52,7 +52,7 @@ body {
 
 /* ===========================================================================
    Public landing — intentionally spare, using the existing BridgeGuard artwork.
-   The datum line is the only decorative motif; no application data is loaded.
+   No application data is loaded.
    =========================================================================== */
 
 .public-landing {
@@ -140,49 +140,6 @@ body {
   outline-offset: 4px;
 }
 
-.public-landing__note {
-  margin: .8rem 0 0;
-  color: rgba(244, 232, 189, .72);
-  font-size: .66rem;
-  font-weight: 600;
-  letter-spacing: .17em;
-  text-transform: uppercase;
-}
-
-.public-landing__mark,
-.public-landing__datum {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  gap: .65rem;
-  color: rgba(244, 232, 189, .58);
-  font: 650 .6rem/1 '"Inter Variable"', Inter, sans-serif;
-  letter-spacing: .18em;
-}
-
-.public-landing__mark {
-  top: 2.25rem;
-  left: 2.25rem;
-}
-
-.public-landing__mark i {
-  width: 1.75rem;
-  height: 1px;
-  background: currentColor;
-}
-
-.public-landing__datum {
-  right: 2.25rem;
-  bottom: 2.25rem;
-  width: min(30rem, calc(100vw - 4.5rem));
-}
-
-.public-landing__datum i {
-  flex: 1;
-  height: 1px;
-  background: rgba(244, 232, 189, .36);
-}
-
 .workspace-access-gate {
   min-height: 100svh;
   display: grid;
@@ -249,15 +206,6 @@ body {
   }
   .public-landing::before {
     inset: .75rem;
-  }
-  .public-landing__mark {
-    top: 1.35rem;
-    left: 1.35rem;
-  }
-  .public-landing__datum {
-    right: 1.35rem;
-    bottom: 1.35rem;
-    width: calc(100vw - 2.7rem);
   }
 }
 

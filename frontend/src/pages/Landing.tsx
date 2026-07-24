@@ -5,12 +5,6 @@ const Landing: React.FC = () => (
   <main className="public-landing">
     <h1 className="sr-only">BridgeGuard</h1>
 
-    <div className="public-landing__mark" aria-hidden="true">
-      <span>BG</span>
-      <i />
-      <span>01</span>
-    </div>
-
     <div className="public-landing__center">
       <img
         className="public-landing__logo"
@@ -25,13 +19,6 @@ const Landing: React.FC = () => (
         <span>Open workspace</span>
         <ArrowUpRight aria-hidden="true" />
       </a>
-      <p className="public-landing__note">Authorized access</p>
-    </div>
-
-    <div className="public-landing__datum" aria-hidden="true">
-      <span>PUBLIC / 00</span>
-      <i />
-      <span>SECURE / 01</span>
     </div>
   </main>
 );

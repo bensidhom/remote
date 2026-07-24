@@ -45,8 +45,9 @@ services:
       TEI_EMBED_REVISION: 20d1e6057a2e1fa08b45123e41ce9381fc338f0e
       TEI_EMBED_DIM: "768"
       TEI_RUNTIME_VERSION: "1.9.3"
-      # Four report chunks stay below the 60s request timeout on 2 vCPUs.
-      TEI_EMBED_BATCH: "4"
+      # One report chunk per request avoids CPU-side timeouts and leaves room
+      # for interactive query embeddings on the 2-vCPU OCI shape.
+      TEI_EMBED_BATCH: "1"
     volumes:
       - ${BRIDGEGUARD_DATA_DIR_HOST:-/srv/bridgeguard/data}:/data
     restart: unless-stopped
