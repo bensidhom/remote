@@ -165,8 +165,10 @@ The manual deployment workflow:
 2. Deploys exactly the Git commit that passed those checks.
 3. Runs the hardware and persistent-data preflight.
 4. Creates and checksum-verifies a backup when an old app container exists.
-5. Pulls pinned dependencies, rebuilds, waits up to ten minutes for health, and
-   verifies the app plus the exact Nomic model/runtime/dimension.
+5. Pulls pinned dependencies, rebuilds, stops the tunnel until `/ready` passes,
+   and verifies the app plus the exact Nomic model/runtime/dimension. The
+   container's `/health` probe is liveness-only; production acceptance always
+   uses `/ready`.
 
 ## 6. Cut over Cloudflare
 

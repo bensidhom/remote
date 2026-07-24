@@ -62,7 +62,11 @@ jobs:
             sh deploy/oci/preflight.sh
             sh deploy/oci/backup.sh
             docker compose -f deploy/oci/compose.yaml pull embeddings cloudflared
+            docker compose -f deploy/oci/compose.yaml stop cloudflared
             docker compose -f deploy/oci/compose.yaml up \
-              -d --build --remove-orphans --wait --wait-timeout 600
+              -d --build --remove-orphans embeddings app
+            sh deploy/oci/wait-ready.sh deploy/oci/compose.yaml
+            docker compose -f deploy/oci/compose.yaml up \
+              -d --remove-orphans --wait --wait-timeout 120 cloudflared
             sh deploy/oci/verify.sh
           REMOTE
