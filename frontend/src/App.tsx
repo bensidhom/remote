@@ -249,10 +249,10 @@ const App: React.FC = () => {
             <p>Use an approved account to open bridge data, maps, and inspection tools.</p>
           </div>
           <a className="workspace-access-action" href="/app?signin=1">
-            Continue with secure SSO
+            Continue with email code
           </a>
           <p className="workspace-access-note">
-            Identity verification opens in a secure Cloudflare page.
+            Cloudflare emails a one-time code to approved accounts.
           </p>
           <a className="workspace-access-gate__back" href="/">Back to public page</a>
         </section>
