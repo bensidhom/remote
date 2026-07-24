@@ -36,7 +36,7 @@ ATTACHMENT_TYPES = {"inspection_report", "point_cloud"}
 TARGET_EMBEDDING_PROFILE = {
     "provider": "tei",
     "model": "nomic-ai/nomic-embed-text-v1.5",
-    "revision": "e9b6763023c676ca8431644204f50c2b100d9aab",
+    "revision": "20d1e6057a2e1fa08b45123e41ce9381fc338f0e",
     "runtime_version": "1.9.3",
     "dimension": 768,
     "input_policy": "nomic-v1.5-search-prefixes-v1",

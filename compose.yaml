@@ -6,7 +6,7 @@ services:
       - --model-id
       - nomic-ai/nomic-embed-text-v1.5
       - --revision
-      - e9b6763023c676ca8431644204f50c2b100d9aab
+      - 20d1e6057a2e1fa08b45123e41ce9381fc338f0e
       - --dtype
       - float32
       - --pooling
@@ -34,7 +34,7 @@ services:
       PORT: "8000"
       TEI_EMBED_BASE_URL: http://embeddings:80
       TEI_EMBED_MODEL: nomic-ai/nomic-embed-text-v1.5
-      TEI_EMBED_REVISION: e9b6763023c676ca8431644204f50c2b100d9aab
+      TEI_EMBED_REVISION: 20d1e6057a2e1fa08b45123e41ce9381fc338f0e
       TEI_EMBED_DIM: "768"
       TEI_RUNTIME_VERSION: "1.9.3"
     ports:

@@ -49,7 +49,7 @@ Generation and embedding are deliberately separate:
 | Role                         | Provider |
 |------------------------------|----------|
 | Text, Bridgette, RAG completion, and image/point-cloud judgment | **Cerebras** (`CEREBRAS_MODEL`) |
-| Document and query embeddings | **Nomic v1.5 via TEI**, revision `e9b6763023c676ca8431644204f50c2b100d9aab`, normalized 768-D |
+| Document and query embeddings | **Nomic v1.5 via TEI**, revision `20d1e6057a2e1fa08b45123e41ce9381fc338f0e`, normalized 768-D |
 
 ### Embedding profiles and migrations
 
@@ -58,10 +58,16 @@ The supplied Compose files start TEI internally:
 ```env
 TEI_EMBED_BASE_URL=http://embeddings:80
 TEI_EMBED_MODEL=nomic-ai/nomic-embed-text-v1.5
-TEI_EMBED_REVISION=e9b6763023c676ca8431644204f50c2b100d9aab
+TEI_EMBED_REVISION=20d1e6057a2e1fa08b45123e41ce9381fc338f0e
 TEI_EMBED_DIM=768
 TEI_RUNTIME_VERSION=1.9.3
 ```
+
+The revision is intentionally pinned. A later config-only Hub snapshot adds
+legacy position aliases that TEI 1.9.3 reads as duplicate fields; the pinned
+snapshot uses the same Nomic v1.5 weights and tokenizer with a TEI-compatible
+config. The revision remains part of the persisted embedding profile, so older
+or unprofiled vectors are re-embedded while parsed chunks are reused.
 
 Nomic uses `search_document:` for indexed passages and `search_query:` for
 questions. Those prefixes, normalization, model revision, TEI runtime version,

@@ -79,7 +79,7 @@ def create_backup(output_root: Path) -> Path:
             ),
             "revision": os.getenv(
                 "TEI_EMBED_REVISION",
-                "e9b6763023c676ca8431644204f50c2b100d9aab",
+                "20d1e6057a2e1fa08b45123e41ce9381fc338f0e",
             ),
             "runtime_version": os.getenv("TEI_RUNTIME_VERSION", "1.9.3"),
             "dimension": int(os.getenv("TEI_EMBED_DIM", "768")),

@@ -31,6 +31,10 @@ jobs:
             grep -q 'platform: linux/amd64'
           docker compose -f deploy/oci/compose.yaml config |
             grep -q 'image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07'
+          test "$(docker compose -f compose.yaml config |
+            grep -c '20d1e6057a2e1fa08b45123e41ce9381fc338f0e')" -eq 2
+          test "$(docker compose -f deploy/oci/compose.yaml config |
+            grep -c '20d1e6057a2e1fa08b45123e41ce9381fc338f0e')" -eq 2
           docker compose -f deploy/oci/compose.yaml config |
             grep -q 'image: cloudflare/cloudflared:2026.7.2-amd64'
           sh -n deploy/oci/backup.sh

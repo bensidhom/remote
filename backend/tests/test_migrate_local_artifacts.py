@@ -37,6 +37,48 @@ def _create_attachment_database(path: Path, rows=()):
 
 
 class LocalArtifactMigrationTests(unittest.TestCase):
+    def test_old_nomic_vectors_are_removed_but_parsed_content_is_kept(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temp:
+            destination = Path(temp)
+            cache = (
+                destination
+                / "rag_storage"
+                / "bridge_reports"
+                / "old-revision.json"
+            )
+            cache.parent.mkdir(parents=True)
+            parsed_chunks = [{"text": "deck finding"}]
+            parsed_images = [{"path": "page_images/page-1.png"}]
+            cache.write_text(
+                json.dumps(
+                    {
+                        "chunks": parsed_chunks,
+                        "images": parsed_images,
+                        "embeddings": [[0.1] * 768],
+                        "image_embeddings": [[0.2] * 768],
+                        "embedding_profile": {
+                            **migration.TARGET_EMBEDDING_PROFILE,
+                            "revision": (
+                                "e9b6763023c676ca8431644204f50c2b100d9aab"
+                            ),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            invalidated = migration.invalidate_legacy_report_vectors(destination)
+            migrated_cache = json.loads(cache.read_text(encoding="utf-8"))
+
+            self.assertEqual(invalidated["caches"], 1)
+            self.assertEqual(invalidated["chunks"], 1)
+            self.assertEqual(invalidated["vectors_removed"], 1)
+            self.assertEqual(migrated_cache["chunks"], parsed_chunks)
+            self.assertEqual(migrated_cache["images"], parsed_images)
+            self.assertIsNone(migrated_cache["embeddings"])
+            self.assertIsNone(migrated_cache["image_embeddings"])
+            self.assertIsNone(migrated_cache["embedding_profile"])
+
     def test_copy_invalidate_and_merge_accepts_windows_attachment_paths(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temp:
             root = Path(temp)

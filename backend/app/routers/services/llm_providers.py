@@ -22,7 +22,7 @@ TEI = "tei"
 # ── Model defaults ───────────────────────────────────────────────────
 _CEREBRAS_MODEL_DEFAULT = "gemma-4-31b"
 _TEI_EMBED_MODEL_DEFAULT = "nomic-ai/nomic-embed-text-v1.5"
-_TEI_EMBED_REVISION_DEFAULT = "e9b6763023c676ca8431644204f50c2b100d9aab"
+_TEI_EMBED_REVISION_DEFAULT = "20d1e6057a2e1fa08b45123e41ce9381fc338f0e"
 _TEI_RUNTIME_VERSION_DEFAULT = "1.9.3"
 _TEI_INPUT_POLICY = "nomic-v1.5-search-prefixes-v1"
 _TEI_NORMALIZE = True

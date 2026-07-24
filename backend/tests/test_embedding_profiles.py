@@ -28,7 +28,7 @@ def _tei_env(dim="768"):
     return {
         "TEI_EMBED_BASE_URL": "http://embed.internal:8080/",
         "TEI_EMBED_MODEL": "nomic-ai/nomic-embed-text-v1.5",
-        "TEI_EMBED_REVISION": "e9b6763023c676ca8431644204f50c2b100d9aab",
+        "TEI_EMBED_REVISION": "20d1e6057a2e1fa08b45123e41ce9381fc338f0e",
         "TEI_EMBED_DIM": dim,
         "TEI_RUNTIME_VERSION": "1.9.3",
         "TEI_EMBED_BATCH": "16",
@@ -52,7 +52,7 @@ class EmbeddingProfileTests(unittest.TestCase):
         self.assertEqual(profile["model"], "nomic-ai/nomic-embed-text-v1.5")
         self.assertEqual(
             profile["revision"],
-            "e9b6763023c676ca8431644204f50c2b100d9aab",
+            "20d1e6057a2e1fa08b45123e41ce9381fc338f0e",
         )
         self.assertEqual(profile["dimension"], 768)
         self.assertEqual(profile["runtime_version"], "1.9.3")
