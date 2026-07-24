@@ -106,8 +106,9 @@ TUNNEL_TOKEN=replace-with-cloudflare-tunnel-token
 ```
 
 The Compose file pins TEI 1.9.3 by immutable image digest, the exact Nomic model
-revision, mean pooling, float32 output, Nomic query/document prefixes, and 768
-dimensions. It does not use Ollama or NVIDIA.
+revision, mean pooling, float32 output, Nomic query/document prefixes, 768
+dimensions, and an 8,192-token batch ceiling sized for the 12 GB VM. It does
+not use Ollama or NVIDIA.
 
 ## 4. Transfer and merge local processed data
 

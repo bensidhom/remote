@@ -12,6 +12,10 @@ services:
       - float32
       - --pooling
       - mean
+      # Preserve the model's full input length without TEI's oversized
+      # 16,384-token default allocation on this 12 GB instance.
+      - --max-batch-tokens
+      - "8192"
     volumes:
       - ${BRIDGEGUARD_MODELS_DIR:-/srv/bridgeguard/models}:/data
     healthcheck:
