@@ -241,10 +241,21 @@ const App: React.FC = () => {
   if (!user) {
     return (
       <main className="workspace-access-gate">
-        <img src="/bridgeguard.png" alt="BridgeGuard" width="1024" height="1024" />
-        <p>Your BridgeGuard session is not active.</p>
-        <a href="/app">Continue through secure access</a>
-        <a className="workspace-access-gate__back" href="/">Back to public page</a>
+        <section className="workspace-access-card" aria-labelledby="workspace-access-title">
+          <img src="/bridgeguard.png" alt="BridgeGuard" width="1024" height="1024" />
+          <div className="workspace-access-copy">
+            <p className="workspace-access-eyebrow">BridgeGuard secure workspace</p>
+            <h1 id="workspace-access-title">Sign in to continue</h1>
+            <p>Use an approved account to open bridge data, maps, and inspection tools.</p>
+          </div>
+          <a className="workspace-access-action" href="/app?signin=1">
+            Continue with secure SSO
+          </a>
+          <p className="workspace-access-note">
+            Identity verification opens in a secure Cloudflare page.
+          </p>
+          <a className="workspace-access-gate__back" href="/">Back to public page</a>
+        </section>
       </main>
     );
   }
@@ -255,7 +266,7 @@ const App: React.FC = () => {
         <AppContent user={user} onSignOut={() => {
           void signOut().then((logoutUrl) => {
             setUser(null);
-            if (logoutUrl) window.location.assign(logoutUrl);
+            if (logoutUrl) window.location.replace(logoutUrl);
           });
         }} />
       </AdminProvider>

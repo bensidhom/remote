@@ -144,12 +144,24 @@ body {
   min-height: 100svh;
   display: grid;
   place-content: center;
-  justify-items: center;
-  gap: 1rem;
-  padding: 2rem;
-  text-align: center;
-  background: #263f44;
+  padding: clamp(1.25rem, 4vw, 3rem);
+  background:
+    radial-gradient(circle at 50% 36%, rgba(242, 207, 99, .12), transparent 24rem),
+    #263f44;
   color: #f4e8bd;
+}
+
+.workspace-access-card {
+  width: min(92vw, 31rem);
+  display: grid;
+  justify-items: center;
+  gap: 1.1rem;
+  padding: clamp(1.5rem, 5vw, 2.6rem);
+  border: 1px solid rgba(244, 232, 189, .24);
+  background: rgba(21, 49, 54, .52);
+  box-shadow: 0 2rem 5rem rgba(7, 26, 30, .28);
+  text-align: center;
+  backdrop-filter: blur(10px);
 }
 
 .workspace-loading {
@@ -165,27 +177,66 @@ body {
 }
 
 .workspace-access-gate img {
-  width: min(72vw, 22rem);
+  width: min(70vw, 18rem);
   height: auto;
-  border-radius: 2rem;
+  border-radius: 1.6rem;
+  filter: drop-shadow(0 1.5rem 2.5rem rgba(7, 26, 30, .24));
 }
 
-.workspace-access-gate p {
+.workspace-access-copy {
+  display: grid;
+  gap: .55rem;
+}
+
+.workspace-access-copy h1 {
+  margin: 0;
+  color: #fff4c6;
+  font-size: clamp(1.65rem, 4vw, 2.15rem);
+  font-weight: 760;
+  letter-spacing: -.035em;
+}
+
+.workspace-access-copy p {
   margin: 0;
   color: rgba(244, 232, 189, .75);
+  line-height: 1.55;
 }
 
-.workspace-access-gate a {
+.workspace-access-copy .workspace-access-eyebrow {
+  color: #f2cf63;
+  font-size: .7rem;
+  font-weight: 760;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.workspace-access-gate .workspace-access-action {
+  width: 100%;
   padding: .85rem 1.1rem;
+  border: 1px solid rgba(255, 244, 198, .42);
   background: #f2cf63;
   color: #102d32;
   font-weight: 750;
   text-decoration: none;
+  transition: transform 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.workspace-access-gate .workspace-access-action:hover {
+  transform: translateY(-2px);
+  background: #f8da7b;
+  box-shadow: 0 .85rem 1.8rem rgba(7, 26, 30, .24);
 }
 
 .workspace-access-gate a:focus-visible {
   outline: 3px solid #fff4c6;
   outline-offset: 4px;
+}
+
+.workspace-access-gate .workspace-access-note {
+  margin: -.35rem 0 0;
+  color: rgba(244, 232, 189, .58);
+  font-size: .74rem;
+  line-height: 1.45;
 }
 
 .workspace-access-gate .workspace-access-gate__back {

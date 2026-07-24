@@ -209,8 +209,11 @@ def verify_cloudflare_request(request: Request) -> AuthUser | None:
 
 
 def cloudflare_logout_url() -> str:
-    team_domain, _ = _cloudflare_settings()
-    return f"https://{team_domain}/cdn-cgi/access/logout"
+    # Cloudflare keeps separate global and application authorization cookies.
+    # Logging out on the protected application hostname clears the application
+    # cookie immediately; the team-domain endpoint can leave it usable while
+    # distributed revocation propagates.
+    return "/cdn-cgi/access/logout"
 
 
 def _required_role(method: str, path: str) -> str:

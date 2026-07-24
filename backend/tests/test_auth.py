@@ -10,6 +10,7 @@ from app.auth import (
     AuthMiddleware,
     AuthUser,
     _required_role,
+    cloudflare_logout_url,
     issue_session,
     role_for_email,
     router,
@@ -61,6 +62,9 @@ class AuthTests(unittest.TestCase):
     def test_expired_session_is_rejected(self):
         token = issue_session(AuthUser("viewer@example.com", "viewer"), now=100)
         self.assertIsNone(verify_session(token, now=100 + 28801))
+
+    def test_cloudflare_logout_uses_application_domain(self):
+        self.assertEqual(cloudflare_logout_url(), "/cdn-cgi/access/logout")
 
     def test_privileged_routes_require_expected_roles(self):
         self.assertEqual(_required_role("GET", "/api/map-data"), "viewer")
