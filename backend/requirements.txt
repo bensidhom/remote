@@ -2,9 +2,12 @@
 # Install:  pip install -r backend/requirements.txt
 #
 # Slim on purpose: torch / open3d / pycolmap / opencv / docling / pytesseract /
-# ultralytics / ollama / prophet / scipy / matplotlib are NOT required by the kept
-# code paths (prophet is imported lazily inside forecasting.py and the app uses the
-# Markov engine instead), so they are intentionally omitted.
+# ultralytics / prophet are NOT required by the kept code paths (prophet
+# is imported lazily inside forecasting.py and the app uses the Markov engine
+# instead), so they are intentionally omitted. SciPy/matplotlib/pye57 support the
+# hosted point-cloud feature without loading local ML models. E57 decoding is
+# optional on ARM64 (pye57 publishes no Linux aarch64 wheel); NPZ/PLY/LAS remain
+# available there.
 #
 # Versions below were verified together on Python 3.14 (Windows) and Python 3.11+.
 # IMPORTANT: lightrag-hku is PINNED to 1.4.12 — 1.5.x changed the LightRAG(...)
@@ -25,12 +28,19 @@ Pillow==12.3.0
 pymupdf==1.28.0
 pypdf==6.14.2
 
+# ---- Point-cloud parsing + deterministic geometry ----
+# Hosted VLM APIs only review rendered regions; these packages perform E57
+# decoding, k-NN cleaning/label propagation, and headless scene rendering.
+pye57==0.4.19; platform_machine != "aarch64" and platform_machine != "arm64"
+scipy
+matplotlib
+
 # ---- HTTP + system telemetry ----
 httpx==0.28.1
 psutil==7.2.2
 
 # ---- Retrieval-augmented generation + hosted LLM clients ----
 lightrag-hku==1.4.12       # PINNED — do not bump without re-testing rag_engine.py
-openai==2.44.0             # used by LightRAG's OpenAI-compatible bindings (NVIDIA + Cerebras)
+openai==2.44.0             # used by LightRAG against Cerebras' compatible endpoint
 tiktoken==0.13.0
 cerebras-cloud-sdk==1.67.0

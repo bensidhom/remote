@@ -49,7 +49,7 @@ export interface MapBridge {
 
 export type MapMode = 'heatmap' | 'markers';
 export type BaseLayer = 'streets' | 'satellite';
-export type BridgeAction = 'open' | 'history' | 'reports' | 'edit' | 'lcca' | 'explorer';
+export type BridgeAction = 'open' | 'history' | 'reports' | 'edit' | 'lcca' | 'explorer' | 'pointcloud';
 
 export interface PopupBridgeRef {
   state_code: string | number;
@@ -63,6 +63,12 @@ export interface PopupBridgeRef {
   superstructure_condition_rating?: string | number;
   substructure_condition_rating?: string | number;
   lowest_condition_rating_code?: string | number;
+}
+
+export interface MapBridgeFocus {
+  requestId: string;
+  state_code: string | number;
+  bridge_number: string;
 }
 
 interface ArcgisMapProps {
@@ -82,6 +88,9 @@ interface ArcgisMapProps {
   showCounties?: boolean;
   /** Called with the 3-digit county code when a county polygon is clicked. */
   onCountySelect?: (countyCode: string) => void;
+  /** Imperative request from the map sidebar chat to center and open one bridge card. */
+  focusBridge?: MapBridgeFocus | null;
+  onFocusResult?: (focus: MapBridgeFocus, success: boolean, error?: string) => void;
 }
 
 const toNum = (v: unknown): number | null => {
@@ -293,6 +302,7 @@ function buildPopupContent(
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;gap:6px';
     row.appendChild(mkBtn('History', 'history', false));
+    row.appendChild(mkBtn('Point Cloud', 'pointcloud', false));
     row.appendChild(mkBtn('LCCA', 'lcca', false));
     bar.appendChild(row);
     wrap.appendChild(bar);
@@ -313,6 +323,8 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
   onBridgeAction,
   showCounties = false,
   onCountySelect,
+  focusBridge = null,
+  onFocusResult,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<any>(null);
@@ -325,6 +337,9 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
   onActionRef.current = onBridgeAction;
   const onCountyRef = useRef(onCountySelect);
   onCountyRef.current = onCountySelect;
+  const onFocusResultRef = useRef(onFocusResult);
+  onFocusResultRef.current = onFocusResult;
+  const completedFocusRef = useRef<string | null>(null);
 
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -588,6 +603,48 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
     const usePremium = Boolean(getArcgisApiKey()) && usePremiumArcgisBasemaps() && !keylessRef.current;
     mapRef.current.basemap = resolveBasemap(basemap, usePremium);
   }, [ready, basemap]);
+
+  // Sidebar-chat navigation: wait until the requested county layer has been
+  // rebuilt, then center tightly on the marker and open the existing bridge card.
+  useEffect(() => {
+    if (!ready || !focusBridge || !layerRef.current || !viewRef.current) return;
+    if (completedFocusRef.current === focusBridge.requestId) return;
+    const bridgeNumber = String(focusBridge.bridge_number);
+    const stateCode = String(focusBridge.state_code);
+    const bridgeIndex = bridges.findIndex((bridge) =>
+      String(bridge.bridge_number).toUpperCase() === bridgeNumber.toUpperCase() &&
+      String(bridge.state_code ?? '').toUpperCase() === stateCode.toUpperCase());
+    if (bridgeIndex < 0) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await layerRef.current.queryFeatures({
+          // Graphics are assigned ObjectID = their 1-based position in `bridges`.
+          where: `ObjectID = ${bridgeIndex + 1}`,
+          outFields: ['*'],
+          returnGeometry: true,
+          num: 1,
+        });
+        const graphic = result?.features?.[0];
+        if (!graphic) throw new Error('The bridge marker is not available in the selected county.');
+        await viewRef.current.goTo({ target: graphic.geometry, zoom: 16 }, { duration: 850 });
+        if (cancelled) return;
+        if (typeof viewRef.current.openPopup === 'function') {
+          await viewRef.current.openPopup({ features: [graphic], location: graphic.geometry });
+        } else {
+          viewRef.current.popup.open({ features: [graphic], location: graphic.geometry });
+        }
+        completedFocusRef.current = focusBridge.requestId;
+        onFocusResultRef.current?.(focusBridge, true);
+      } catch (err: any) {
+        if (!cancelled) {
+          onFocusResultRef.current?.(focusBridge, false, err?.message || 'Could not open the bridge card.');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [ready, bridges, focusBridge]);
 
   return (
     <div className={`relative ${className}`}>

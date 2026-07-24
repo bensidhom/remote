@@ -1,4 +1,25 @@
 services:
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    command:
+      - --model-id
+      - nomic-ai/nomic-embed-text-v1.5
+      - --revision
+      - e9b6763023c676ca8431644204f50c2b100d9aab
+      - --dtype
+      - float32
+    volumes:
+      - ./backend/data/models:/data
+    ports:
+      - "127.0.0.1:8080:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    restart: unless-stopped
+
   app:
     build:
       context: .
@@ -8,9 +29,15 @@ services:
       BRIDGEGUARD_DATA_DIR: /data
       FRONTEND_DIST: /app/static
       PORT: "8000"
+      TEI_EMBED_BASE_URL: http://embeddings:80
+      TEI_EMBED_MODEL: nomic-ai/nomic-embed-text-v1.5
+      TEI_EMBED_REVISION: e9b6763023c676ca8431644204f50c2b100d9aab
+      TEI_EMBED_DIM: "768"
     ports:
       - "8000:8000"
     volumes:
       - ./backend/data:/data
+    depends_on:
+      embeddings:
+        condition: service_healthy
     restart: unless-stopped
-

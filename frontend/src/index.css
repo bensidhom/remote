@@ -50,6 +50,217 @@ body {
 
 #root { width: 100%; height: 100vh; }
 
+/* ===========================================================================
+   Public landing — intentionally spare, using the existing BridgeGuard artwork.
+   The datum line is the only decorative motif; no application data is loaded.
+   =========================================================================== */
+
+.public-landing {
+  --landing-deep: #263f44;
+  --landing-steel: #617579;
+  --landing-gold: #f2cf63;
+  --landing-paper: #f4e8bd;
+  --landing-ink: #102d32;
+  position: relative;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  isolation: isolate;
+  padding: clamp(2rem, 6vw, 5rem);
+  color: var(--landing-paper);
+  background:
+    radial-gradient(circle at 50% 44%, rgba(242, 207, 99, 0.14), transparent 28rem),
+    linear-gradient(145deg, #708185 0%, var(--landing-steel) 48%, var(--landing-deep) 100%);
+}
+
+.public-landing::before {
+  content: '';
+  position: absolute;
+  inset: 1.25rem;
+  z-index: -1;
+  border: 1px solid rgba(244, 232, 189, 0.22);
+  pointer-events: none;
+}
+
+.public-landing__center {
+  width: min(86vw, 36rem);
+  display: grid;
+  justify-items: center;
+  animation: landing-arrive 700ms cubic-bezier(.2,.8,.2,1) both;
+}
+
+.public-landing__logo {
+  display: block;
+  width: min(84vw, 34rem);
+  height: auto;
+  border-radius: clamp(1.25rem, 4vw, 2.75rem);
+  filter: drop-shadow(0 2.4rem 4rem rgba(8, 31, 35, 0.24));
+}
+
+.public-landing__access {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: .7rem;
+  margin-top: clamp(-1.1rem, -2vw, -.6rem);
+  padding: .86rem 1.05rem .86rem 1.15rem;
+  border: 1px solid rgba(242, 207, 99, .7);
+  color: var(--landing-ink);
+  background: var(--landing-gold);
+  box-shadow: 0 1rem 2.25rem rgba(16, 45, 50, .24);
+  font-size: .76rem;
+  font-weight: 760;
+  letter-spacing: .1em;
+  line-height: 1;
+  text-decoration: none;
+  text-transform: uppercase;
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.public-landing__access svg {
+  width: 1rem;
+  height: 1rem;
+  stroke-width: 1.8;
+}
+
+.public-landing__access svg:last-child {
+  margin-left: .3rem;
+}
+
+.public-landing__access:hover {
+  transform: translateY(-2px);
+  background: #f8da7b;
+  box-shadow: 0 1.25rem 2.7rem rgba(16, 45, 50, .32);
+}
+
+.public-landing__access:focus-visible {
+  outline: 3px solid #fff4c6;
+  outline-offset: 4px;
+}
+
+.public-landing__note {
+  margin: .8rem 0 0;
+  color: rgba(244, 232, 189, .72);
+  font-size: .66rem;
+  font-weight: 600;
+  letter-spacing: .17em;
+  text-transform: uppercase;
+}
+
+.public-landing__mark,
+.public-landing__datum {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  color: rgba(244, 232, 189, .58);
+  font: 650 .6rem/1 '"Inter Variable"', Inter, sans-serif;
+  letter-spacing: .18em;
+}
+
+.public-landing__mark {
+  top: 2.25rem;
+  left: 2.25rem;
+}
+
+.public-landing__mark i {
+  width: 1.75rem;
+  height: 1px;
+  background: currentColor;
+}
+
+.public-landing__datum {
+  right: 2.25rem;
+  bottom: 2.25rem;
+  width: min(30rem, calc(100vw - 4.5rem));
+}
+
+.public-landing__datum i {
+  flex: 1;
+  height: 1px;
+  background: rgba(244, 232, 189, .36);
+}
+
+.workspace-access-gate {
+  min-height: 100svh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 1rem;
+  padding: 2rem;
+  text-align: center;
+  background: #263f44;
+  color: #f4e8bd;
+}
+
+.workspace-loading {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  background: #263f44;
+  color: #f4e8bd;
+  font-size: .75rem;
+  font-weight: 650;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.workspace-access-gate img {
+  width: min(72vw, 22rem);
+  height: auto;
+  border-radius: 2rem;
+}
+
+.workspace-access-gate p {
+  margin: 0;
+  color: rgba(244, 232, 189, .75);
+}
+
+.workspace-access-gate a {
+  padding: .85rem 1.1rem;
+  background: #f2cf63;
+  color: #102d32;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.workspace-access-gate a:focus-visible {
+  outline: 3px solid #fff4c6;
+  outline-offset: 4px;
+}
+
+.workspace-access-gate .workspace-access-gate__back {
+  padding: .25rem;
+  background: transparent;
+  color: rgba(244, 232, 189, .7);
+  font-size: .78rem;
+}
+
+@keyframes landing-arrive {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 540px) {
+  .public-landing {
+    padding: 1.5rem;
+  }
+  .public-landing::before {
+    inset: .75rem;
+  }
+  .public-landing__mark {
+    top: 1.35rem;
+    left: 1.35rem;
+  }
+  .public-landing__datum {
+    right: 1.35rem;
+    bottom: 1.35rem;
+    width: calc(100vw - 2.7rem);
+  }
+}
+
 /* --- Custom scrollbars ----------------------------------------------------- */
 .ui-scroll::-webkit-scrollbar,
 *::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -185,5 +396,6 @@ body {
 .esri-popup__pagination-page-text { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .text-gradient, .shiny-text, .aurora-bg, .landing-hero { animation: none !important; }
+  .text-gradient, .shiny-text, .aurora-bg, .landing-hero, .public-landing__center { animation: none !important; }
+  .public-landing__access { transition: none; }
 }

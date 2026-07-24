@@ -15,7 +15,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[3]
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 # Load .env (KEY=VALUE lines) into the environment before any env reads below or
-# elsewhere (e.g. CEREBRAS_API_KEY / NVIDIA_API_KEY for the hosted AI providers).
+# elsewhere (for example CEREBRAS_API_KEY and the TEI embedding endpoint).
 # Checks backend/.env first (the app's own config, self-contained deploy bundle),
 # then <repo>/.env. Real environment variables always win. Dependency-free.
 for _env_file in (_BACKEND_DIR / '.env', _REPO_ROOT / '.env'):

@@ -10,7 +10,7 @@ import { AdminProvider } from './context/AdminContext';
 import { Modal } from './components/ui';
 import { onOpenTool, type ToolId, type ToolPayload } from './lib/tools';
 import EmailLoginGate from './components/EmailLoginGate';
-import { getCurrentUser, signOut, type AuthUser } from './lib/access';
+import { getAuthConfig, getCurrentUser, signOut, type AuthConfig, type AuthUser } from './lib/access';
 
 import HomeSidebar from './components/HomeSidebar';
 import MapPage from './pages/Map';
@@ -24,6 +24,7 @@ const Kpis = React.lazy(() => import('./pages/Kpis'));
 const Editor = React.lazy(() => import('./pages/Editor'));
 const DBAdmin = React.lazy(() => import('./pages/DBAdmin'));
 const Forecasts = React.lazy(() => import('./pages/Forecasts'));
+const PointCloud = React.lazy(() => import('./pages/PointCloud'));
 
 type ModalSize = 'md' | 'lg' | 'xl' | 'full';
 const TOOL_SIZE: Partial<Record<ToolId, ModalSize>> = {
@@ -36,6 +37,7 @@ const TOOL_SIZE: Partial<Record<ToolId, ModalSize>> = {
   converter: 'lg',
   loader: 'lg',
   explorer: 'lg',
+  pointcloud: 'xl',
 };
 
 const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user, onSignOut }) => {
@@ -99,12 +101,6 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
     localStorage.setItem('theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
 
-  // Hosted LLM providers (Cerebras / NVIDIA) pick the concrete model server-side
-  // (see Settings → AI Provider). Vision still sends a model hint with each
-  // request; the backend maps it to the active provider.
-  const selectedTextModel = 'qwen3.6:latest';
-  const selectedVisionQueryModel = 'qwen3.6:latest';
-
   const renderTool = (tool: Exclude<ToolId, 'vision'>) => {
     switch (tool) {
       case 'map': return <MapPage />;
@@ -116,14 +112,21 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
       case 'bridgette': return <Bridgette />;
       case 'forecasts': return <Forecasts />;
       case 'dbadmin': return <DBAdmin />;
+      case 'pointcloud': return (
+        <PointCloud
+          bridgeStateCode={toolPayload?.stateCode}
+          bridgeNumber={toolPayload?.bridgeNumber != null ? String(toolPayload.bridgeNumber) : undefined}
+          bridgeName={toolPayload?.bridgeName}
+        />
+      );
       default: return null;
     }
   };
 
   // The large map is NOT kept mounted while hidden — it re-inits on open.
   // Everything else preserves state across switch/close.
-  const EPHEMERAL: Exclude<ToolId, 'vision'>[] = ['map'];
-  const isFullBleed = (tool: ToolId | null) => tool === 'map';
+  const EPHEMERAL: Exclude<ToolId, 'vision'>[] = ['map', 'pointcloud'];
+  const isFullBleed = (tool: ToolId | null) => tool === 'map' || tool === 'pointcloud';
 
   return (
     <div className="flex flex-col h-screen bg-slate-100">
@@ -196,9 +199,6 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
           <div className="flex-1 overflow-auto ui-scroll p-6">
             <React.Suspense fallback={<div className="p-8 text-center text-slate-500">Loading Vision…</div>}>
               <Vision
-                selectedTextModel={selectedTextModel}
-                selectedVisionQueryModel={selectedVisionQueryModel}
-                availableModels={[]}
                 onRagActiveChange={setVisionRagActive}
               />
             </React.Suspense>
@@ -211,11 +211,16 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
 
 const App: React.FC = () => {
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [authMode, setAuthMode] = useState<AuthConfig['mode']>('password');
   const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
     let active = true;
-    getCurrentUser()
+    getAuthConfig()
+      .then((config) => {
+        if (active) setAuthMode(config.mode);
+        return getCurrentUser();
+      })
       .then((current) => { if (active) setUser(current); })
       .catch(() => { if (active) setUser(null); })
       .finally(() => { if (active) setCheckingSession(false); });
@@ -237,6 +242,17 @@ const App: React.FC = () => {
 
   if (checkingSession) {
     return <div className="fixed inset-0 grid place-items-center bg-slate-950 text-slate-300">Checking session…</div>;
+  }
+
+  if (!user && authMode === 'cloudflare') {
+    return (
+      <main className="workspace-access-gate">
+        <img src="/bridgeguard.png" alt="BridgeGuard" width="1024" height="1024" />
+        <p>Your BridgeGuard session is not active.</p>
+        <a href="/app">Continue through secure access</a>
+        <a className="workspace-access-gate__back" href="/">Back to public page</a>
+      </main>
+    );
   }
 
   if (!user) return <EmailLoginGate onSignedIn={setUser} />;

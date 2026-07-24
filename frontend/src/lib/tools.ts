@@ -4,13 +4,13 @@
 // a single listener in App.tsx.
 import {
   FileText, Upload, Database, BarChart3, BrainCircuit,
-  Edit3, Shield, Camera, Bot, type LucideIcon,
+  Edit3, Shield, Camera, Bot, Box, type LucideIcon,
 } from 'lucide-react';
 
 export type ToolId =
   | 'map' | 'converter' | 'loader' | 'explorer' | 'editor'
   | 'kpis' | 'forecasts' | 'dbadmin' | 'vision'
-  | 'bridgette' | 'bridge';
+  | 'bridgette' | 'bridge' | 'pointcloud';
 
 export interface ToolMeta {
   id: ToolId;
@@ -33,6 +33,7 @@ export const TOOLS: ToolMeta[] = [
   { id: 'editor',     label: 'Editor',         desc: 'Edit bridge records',        Icon: Edit3,       accent: '#06b6d4' },
   { id: 'forecasts',  label: 'Forecasts',      desc: 'Condition predictions',      Icon: BrainCircuit, accent: '#6366f1' },
   { id: 'vision',     label: 'Vision',         desc: 'AI image analysis',          Icon: Camera,      accent: '#14b8a6' },
+  { id: 'pointcloud', label: 'Point Cloud',    desc: '3D bridge scan analysis',    Icon: Box,         accent: '#0ea5e9' },
   { id: 'dbadmin',    label: 'DB Admin',       desc: 'Database management',        Icon: Shield,      accent: '#f97316', admin: true },
 ];
 

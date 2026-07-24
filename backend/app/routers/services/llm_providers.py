@@ -1,25 +1,8 @@
-"""
-Hosted LLM providers for the API-only web build (no local inference).
+"""Cerebras generation plus a pinned, non-Ollama Nomic embedding service.
 
-Two providers, switchable at runtime:
-
-  • cerebras (DEFAULT) — Cerebras Cloud SDK. Text AND vision (multimodal,
-    OpenAI-style image_url content). Env: CEREBRAS_API_KEY,
-    model from CEREBRAS_MODEL (default 'gemma-4-31b').
-  • nvidia — the hosted NVIDIA/Qwen API (OpenAI chat-completions shape) at
-    https://integrate.api.nvidia.com/v1/chat/completions. Text AND vision.
-    Env: NVIDIA_API_KEY, model NVIDIA_VLM_MODEL (default 'qwen/qwen3.5-397b-a17b').
-
-Routing:
-  • generate() / stream() (text OR image) → follow the current provider toggle.
-    Both providers accept images, so image calls go to whichever provider is
-    active — NVIDIA is NOT forced.
-  • embed() → ALWAYS NVIDIA. Cerebras embeddings aren't established, and mixing
-    embedding models inside one vector store corrupts it, so embeddings are
-    pinned to a single NVIDIA model regardless of the text/vision toggle.
-
-Only httpx-free stdlib urllib is used for the NVIDIA HTTP calls (matching the
-rest of the backend); Cerebras goes through its official SDK. No heavy deps.
+Text and multimodal completion are served only by the configured Cerebras
+endpoint. Embeddings are served by Hugging Face Text Embeddings Inference (TEI)
+running ``nomic-ai/nomic-embed-text-v1.5`` at a pinned Hub revision.
 """
 
 import os
@@ -33,20 +16,19 @@ import numpy as np
 
 from .datapaths import DATA_DIR
 
-# ── Provider identifiers ─────────────────────────────────────────────
 CEREBRAS = "cerebras"
-NVIDIA = "nvidia"
-_VALID = (CEREBRAS, NVIDIA)
-_DEFAULT_PROVIDER = CEREBRAS
-
-# ── Endpoints ────────────────────────────────────────────────────────
-NVIDIA_CHAT_URL = os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1/chat/completions")
-NVIDIA_EMBED_URL = os.getenv("NVIDIA_EMBED_URL", "https://integrate.api.nvidia.com/v1/embeddings")
+TEI = "tei"
 
 # ── Model defaults ───────────────────────────────────────────────────
 _CEREBRAS_MODEL_DEFAULT = "gemma-4-31b"
-_NVIDIA_VLM_MODEL_DEFAULT = "qwen/qwen3.5-397b-a17b"
-_NVIDIA_EMBED_MODEL_DEFAULT = "nvidia/nv-embedqa-e5-v5"
+_TEI_EMBED_MODEL_DEFAULT = "nomic-ai/nomic-embed-text-v1.5"
+_TEI_EMBED_REVISION_DEFAULT = "e9b6763023c676ca8431644204f50c2b100d9aab"
+_TEI_INPUT_POLICY = "nomic-v1.5-search-prefixes-v1"
+_TEI_NORMALIZE = True
+_TEI_TRUNCATE = True
+_TEI_TRUNCATION_DIRECTION = "right"
+_TEI_DTYPE = "float32"
+_TEI_POOLING = "mean"
 _CEREBRAS_MODEL_LIMITS = {
     "gemma-4-31b": {
         "context": 65536,
@@ -55,14 +37,72 @@ _CEREBRAS_MODEL_LIMITS = {
     },
 }
 
-# Embedding vector dimension for the default NVIDIA embed model. Exported so the
-# RAG engine can size LightRAG's EmbeddingFunc to match.
-EMBED_DIM = int(os.getenv("NVIDIA_EMBED_DIM", "1024"))
 
-# Where the runtime provider toggle is persisted. Honors BRIDGEGUARD_DATA_DIR
-# via datapaths.DATA_DIR so a packaged / read-only-repo deploy still has a
-# writable location.
-_PROVIDER_FILE = os.path.join(str(DATA_DIR), "ai_provider.json")
+def _embedding_dimension(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value
+
+
+def embedding_profile() -> dict:
+    """Return the active, restart-scoped embedding-space identity.
+
+    Provider, exact revision, input-prefix policy, and dimension are
+    inseparable. Persist all of them beside every vector matrix.
+    """
+    provider = TEI
+    model = (
+        os.getenv("TEI_EMBED_MODEL", _TEI_EMBED_MODEL_DEFAULT).strip()
+        or _TEI_EMBED_MODEL_DEFAULT
+    )
+    revision = (
+        os.getenv("TEI_EMBED_REVISION", _TEI_EMBED_REVISION_DEFAULT).strip()
+        or _TEI_EMBED_REVISION_DEFAULT
+    )
+    return {
+        "provider": provider,
+        "model": model,
+        "revision": revision,
+        "dimension": _embedding_dimension("TEI_EMBED_DIM", 768),
+        "input_policy": _TEI_INPUT_POLICY,
+        "normalize": _TEI_NORMALIZE,
+        "truncate": _TEI_TRUNCATE,
+        "truncation_direction": _TEI_TRUNCATION_DIRECTION,
+        "dtype": _TEI_DTYPE,
+        "pooling": _TEI_POOLING,
+    }
+
+
+def embedding_profile_matches(value) -> bool:
+    """Strict cache-profile comparison; legacy/missing metadata is unsafe."""
+    if not isinstance(value, dict):
+        return False
+    active = embedding_profile()
+    try:
+        cached_dim = int(value.get("dimension"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(value.get("provider") or "").lower() == active["provider"]
+        and str(value.get("model") or "") == active["model"]
+        and str(value.get("revision") or "") == active["revision"]
+        and cached_dim == active["dimension"]
+        and str(value.get("input_policy") or "") == active["input_policy"]
+        and value.get("normalize") is active["normalize"]
+        and value.get("truncate") is active["truncate"]
+        and str(value.get("truncation_direction") or "") == active["truncation_direction"]
+        and str(value.get("dtype") or "") == active["dtype"]
+        and str(value.get("pooling") or "") == active["pooling"]
+    )
+
+
+# Compatibility export used by existing callers. Environment changes are
+# restart-scoped; use embedding_profile() for the authoritative active values.
+EMBED_DIM = embedding_profile()["dimension"]
 
 # Cache one Cerebras SDK client per api-key (its constructor spins up an HTTP
 # client; recreating it per call is wasteful).
@@ -168,8 +208,9 @@ def _cerebras_model_name() -> str:
     return os.getenv("CEREBRAS_MODEL", _CEREBRAS_MODEL_DEFAULT).strip() or _CEREBRAS_MODEL_DEFAULT
 
 
-def _nvidia_chat_model_name() -> str:
-    return os.getenv("NVIDIA_VLM_MODEL", _NVIDIA_VLM_MODEL_DEFAULT).strip() or _NVIDIA_VLM_MODEL_DEFAULT
+def generation_model() -> str:
+    """Return the server-controlled Cerebras model used by every generation call."""
+    return _cerebras_model_name()
 
 
 def _record_usage(provider: str, category: str, estimated_tokens: int = 0,
@@ -216,42 +257,33 @@ def usage_snapshot() -> dict:
         data = _load_usage()
     day = _today_key()
     daily = data.get(day) or _empty_usage_day()
+    cerebras_usage = (daily.get("by_provider") or {}).get(CEREBRAS) or {
+        "requests": 0,
+        "tokens": 0,
+        "estimated_tokens": 0,
+    }
 
-    provider = get_provider()
-    model = _cerebras_model_name() if provider == CEREBRAS else _nvidia_chat_model_name()
+    provider = CEREBRAS
+    model = _cerebras_model_name()
     context_window = None
     rate_limits = {"requests": {"minute": None, "hour": None, "day": None},
                    "tokens": {"minute": None, "hour": None, "day": None}}
-    if provider == CEREBRAS:
-        defaults = _CEREBRAS_MODEL_LIMITS.get(model, {})
-        default_requests = defaults.get("requests") or {}
-        default_tokens = defaults.get("tokens") or {}
-        context_window = defaults.get("context")
-        rate_limits = {
-            "requests": {
-                "minute": _env_positive_int("CEREBRAS_MINUTE_REQUEST_LIMIT", default_requests.get("minute")),
-                "hour": _env_positive_int("CEREBRAS_HOURLY_REQUEST_LIMIT", default_requests.get("hour")),
-                "day": _env_positive_int("CEREBRAS_DAILY_REQUEST_LIMIT", default_requests.get("day")),
-            },
-            "tokens": {
-                "minute": _env_positive_int("CEREBRAS_MINUTE_TOKEN_LIMIT", default_tokens.get("minute")),
-                "hour": _env_positive_int("CEREBRAS_HOURLY_TOKEN_LIMIT", default_tokens.get("hour")),
-                "day": _env_positive_int("CEREBRAS_DAILY_TOKEN_LIMIT", default_tokens.get("day")),
-            },
-        }
-    elif provider == NVIDIA:
-        rate_limits = {
-            "requests": {
-                "minute": _env_positive_int("NVIDIA_MINUTE_REQUEST_LIMIT"),
-                "hour": _env_positive_int("NVIDIA_HOURLY_REQUEST_LIMIT"),
-                "day": _env_positive_int("NVIDIA_DAILY_REQUEST_LIMIT"),
-            },
-            "tokens": {
-                "minute": _env_positive_int("NVIDIA_MINUTE_TOKEN_LIMIT"),
-                "hour": _env_positive_int("NVIDIA_HOURLY_TOKEN_LIMIT"),
-                "day": _env_positive_int("NVIDIA_DAILY_TOKEN_LIMIT"),
-            },
-        }
+    defaults = _CEREBRAS_MODEL_LIMITS.get(model, {})
+    default_requests = defaults.get("requests") or {}
+    default_tokens = defaults.get("tokens") or {}
+    context_window = defaults.get("context")
+    rate_limits = {
+        "requests": {
+            "minute": _env_positive_int("CEREBRAS_MINUTE_REQUEST_LIMIT", default_requests.get("minute")),
+            "hour": _env_positive_int("CEREBRAS_HOURLY_REQUEST_LIMIT", default_requests.get("hour")),
+            "day": _env_positive_int("CEREBRAS_DAILY_REQUEST_LIMIT", default_requests.get("day")),
+        },
+        "tokens": {
+            "minute": _env_positive_int("CEREBRAS_MINUTE_TOKEN_LIMIT", default_tokens.get("minute")),
+            "hour": _env_positive_int("CEREBRAS_HOURLY_TOKEN_LIMIT", default_tokens.get("hour")),
+            "day": _env_positive_int("CEREBRAS_DAILY_TOKEN_LIMIT", default_tokens.get("day")),
+        },
+    }
 
     limits = {
         "tokens": rate_limits["tokens"]["day"],
@@ -260,12 +292,12 @@ def usage_snapshot() -> dict:
     token_pct = None
     request_pct = None
     if limits["tokens"]:
-        token_pct = min(100, round((int(daily.get("tokens") or 0) / limits["tokens"]) * 100, 1))
+        token_pct = min(100, round((int(cerebras_usage.get("tokens") or 0) / limits["tokens"]) * 100, 1))
     if limits["requests"]:
-        request_pct = min(100, round((int(daily.get("requests") or 0) / limits["requests"]) * 100, 1))
+        request_pct = min(100, round((int(cerebras_usage.get("requests") or 0) / limits["requests"]) * 100, 1))
     exhausted = (
-        (limits["tokens"] and int(daily.get("tokens") or 0) >= limits["tokens"])
-        or (limits["requests"] and int(daily.get("requests") or 0) >= limits["requests"])
+        (limits["tokens"] and int(cerebras_usage.get("tokens") or 0) >= limits["tokens"])
+        or (limits["requests"] and int(cerebras_usage.get("requests") or 0) >= limits["requests"])
     )
     return {
         "date": day,
@@ -285,57 +317,21 @@ def usage_snapshot() -> dict:
             "Usage is tracked locally by this app; provider dashboard limits may differ."
         ),
         "usage": daily,
+        "provider_usage": cerebras_usage,
     }
-
-
-# ── Provider selection ───────────────────────────────────────────────
-def get_provider() -> str:
-    """Return the active provider: 'cerebras' or 'nvidia'.
-
-    Order: BRIDGEGUARD_AI_PROVIDER env → data/ai_provider.json → default
-    'cerebras'. Any legacy/unknown value (e.g. the old 'remote'/'local') maps
-    to the default 'cerebras'."""
-    envp = os.getenv("BRIDGEGUARD_AI_PROVIDER", "").strip().lower()
-    if envp in _VALID:
-        return envp
-    try:
-        with open(_PROVIDER_FILE, "r", encoding="utf-8") as f:
-            p = str(json.load(f).get("provider", "")).strip().lower()
-        if p in _VALID:
-            return p
-    except Exception:
-        pass
-    return _DEFAULT_PROVIDER
-
-
-def set_provider(name: str) -> str:
-    """Validate and persist the provider choice. Raises ValueError on an
-    invalid name. Writes are wrapped in try/except so a read-only filesystem
-    never crashes the switch (the choice still takes effect for env-based reads
-    / in-process, it just won't survive a restart)."""
-    name = str(name or "").strip().lower()
-    if name not in _VALID:
-        raise ValueError("provider must be 'cerebras' or 'nvidia'")
-    try:
-        os.makedirs(os.path.dirname(_PROVIDER_FILE), exist_ok=True)
-        with open(_PROVIDER_FILE, "w", encoding="utf-8") as f:
-            json.dump({"provider": name}, f)
-    except Exception as exc:
-        print(f"[llm_providers] could not persist provider choice: {exc}")
-    print(f"[llm_providers] provider set to {name}")
-    return name
 
 
 def status() -> dict:
     """Snapshot of provider configuration for the settings UI."""
+    embed_profile = embedding_profile()
     return {
-        "provider": get_provider(),
+        "provider": CEREBRAS,
         "cerebras_key_set": bool(os.getenv("CEREBRAS_API_KEY", "").strip()),
-        "nvidia_key_set": bool(os.getenv("NVIDIA_API_KEY", "").strip()),
-        "cerebras_model": os.getenv("CEREBRAS_MODEL", _CEREBRAS_MODEL_DEFAULT),
-        "nvidia_model": os.getenv("NVIDIA_VLM_MODEL", _NVIDIA_VLM_MODEL_DEFAULT),
-        "embed_model": os.getenv("NVIDIA_EMBED_MODEL", _NVIDIA_EMBED_MODEL_DEFAULT),
-        "embed_dim": EMBED_DIM,
+        "cerebras_model": generation_model(),
+        "embedding_provider": embed_profile["provider"],
+        "embed_model": embed_profile["model"],
+        "embed_dim": embed_profile["dimension"],
+        "embed_revision": embed_profile["revision"],
     }
 
 
@@ -368,9 +364,10 @@ def _cerebras_messages(prompt: str, images_b64=None) -> list:
 
 
 def _cerebras_create_kwargs(model, messages, num_predict, temperature, stream):
+    # The server owns model selection; client model hints are ignored.
     kwargs = {
         "messages": messages,
-        "model": model or os.getenv("CEREBRAS_MODEL", _CEREBRAS_MODEL_DEFAULT),
+        "model": generation_model(),
         "max_completion_tokens": num_predict,
         "temperature": 0.0 if temperature is None else temperature,
         "top_p": 1,
@@ -466,175 +463,146 @@ def _cerebras_stream(prompt, images_b64=None, timeout=300, num_predict=1024,
                       estimated_tokens=estimated_in + _estimate_tokens("".join(out_chunks)))
 
 
-# ── NVIDIA (hosted API, OpenAI chat-completions shape, stdlib urllib) ─
-def _nvidia_default_model(images_b64=None) -> str:
-    """Text stages may point at a cheaper NVIDIA_TEXT_MODEL; image stages must
-    use the vision-capable NVIDIA_VLM_MODEL."""
-    vlm = os.getenv("NVIDIA_VLM_MODEL", _NVIDIA_VLM_MODEL_DEFAULT)
-    if images_b64:
-        return vlm
-    return os.getenv("NVIDIA_TEXT_MODEL", "").strip() or vlm
-
-
-def _nvidia_payload(prompt, images_b64, num_predict, temperature, model, stream):
-    content = [{"type": "text", "text": prompt}]
-    for b64 in images_b64 or []:
-        content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    messages = [{"role": "user", "content": content if images_b64 else prompt}]
-    # NVIDIA_VLM_THINK=1 lets the hosted model reason before answering (no local
-    # cost; the JSON extractor tolerates surrounding thinking). The token budget
-    # must then cover the reasoning too.
-    think = os.getenv("NVIDIA_VLM_THINK", "0") == "1"
-    return {
-        "model": model or _nvidia_default_model(images_b64),
-        "messages": messages,
-        "stream": stream,
-        "max_tokens": max(num_predict, 8192) if think else num_predict,
-        # app policy: temperature 0 everywhere → repeatable output
-        "temperature": 0.0 if temperature is None else temperature,
-        "chat_template_kwargs": {"enable_thinking": think},
-    }
-
-
-def _nvidia_generate(prompt, images_b64=None, timeout=300, num_predict=1024,
-                     model=None, temperature=0.0) -> str:
-    """Non-streaming NVIDIA hosted call. Images are inline JPEG data-URLs (keep
-    them small — the hosted API rejects large payloads)."""
-    key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("NVIDIA_API_KEY is not set")
-    payload = _nvidia_payload(prompt, images_b64, num_predict, temperature, model, False)
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(NVIDIA_CHAT_URL, data=data, headers={
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {key}",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    msg = (body.get("choices") or [{}])[0].get("message") or {}
-    text = msg.get("content", "") or ""
-    estimated = _estimate_tokens(prompt, text) + (750 * len(images_b64 or []))
-    _record_usage(NVIDIA, "images" if images_b64 else "qa",
-                  estimated_tokens=estimated, usage=_usage_from_obj(body))
-    return text
-
-
-def _nvidia_stream(prompt, images_b64=None, timeout=300, num_predict=1024,
-                   model=None, temperature=0.0):
-    """Streaming NVIDIA hosted call: yields answer-text chunks (OpenAI-style SSE
-    `data:` lines). Closing the generator closes the HTTP response, which aborts
-    the hosted generation — that is how a user "Stop" cancels a remote chat."""
-    key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("NVIDIA_API_KEY is not set")
-    payload = _nvidia_payload(prompt, images_b64, num_predict, temperature, model, True)
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(NVIDIA_CHAT_URL, data=data, headers={
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        "Authorization": f"Bearer {key}",
-    })
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    out_chunks = []
-    try:
-        for raw in resp:
-            line = raw.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data:"):
-                continue
-            line = line[len("data:"):].strip()
-            if line == "[DONE]":
-                break
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            delta = (obj.get("choices") or [{}])[0].get("delta") or {}
-            chunk = delta.get("content")
-            if isinstance(chunk, str) and chunk:
-                out_chunks.append(chunk)
-                yield chunk
-    finally:
-        try:
-            resp.close()  # closing the socket aborts the hosted generation
-        except Exception:
-            pass
-        _record_usage(NVIDIA, "images" if images_b64 else "qa",
-                      estimated_tokens=_estimate_tokens(prompt, "".join(out_chunks)) + (750 * len(images_b64 or [])))
-
-
-# ── Public text/vision entry points (provider-routed) ────────────────
+# ── Public text/vision entry points (Cerebras only) ──────────────────
 def generate(prompt, images_b64=None, timeout=300, num_predict=1024,
              model=None, temperature=0.0) -> str:
-    """Text or image completion via the CURRENT provider. Both providers accept
-    images, so image calls follow the toggle (NVIDIA is not forced)."""
-    if get_provider() == NVIDIA:
-        return _nvidia_generate(prompt, images_b64=images_b64, timeout=timeout,
-                                num_predict=num_predict, model=model, temperature=temperature)
+    """Text or image completion via the configured Cerebras endpoint."""
     return _cerebras_generate(prompt, images_b64=images_b64, timeout=timeout,
                               num_predict=num_predict, model=model, temperature=temperature)
 
 
 def stream(prompt, images_b64=None, timeout=300, num_predict=1024, model=None):
-    """Streaming text/image completion via the CURRENT provider. Yields text
-    chunks; closing the generator aborts the hosted generation (user Stop)."""
-    if get_provider() == NVIDIA:
-        yield from _nvidia_stream(prompt, images_b64=images_b64, timeout=timeout,
-                                  num_predict=num_predict, model=model)
-    else:
-        yield from _cerebras_stream(prompt, images_b64=images_b64, timeout=timeout,
-                                    num_predict=num_predict, model=model)
+    """Stream Cerebras text/image completion; closing aborts generation."""
+    yield from _cerebras_stream(prompt, images_b64=images_b64, timeout=timeout,
+                                num_predict=num_predict, model=model)
 
 
-# ── Embeddings (ALWAYS NVIDIA) ───────────────────────────────────────
-# Pinned to NVIDIA regardless of the text/vision toggle: Cerebras embeddings
-# aren't established, and mixing embedding models within one vector store
-# corrupts similarity search. Keep every embedding — LightRAG's KG and the
-# pure-python fallback retrieval — on this single NVIDIA model.
-def embed(texts) -> np.ndarray:
-    """Embed a list of strings via NVIDIA NIM embeddings. Returns an
-    (N, EMBED_DIM) float32 array. Raises RuntimeError on failure (callers that
-    want a soft fallback wrap this in try/except)."""
-    key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("NVIDIA_API_KEY is not set")
-    model = os.getenv("NVIDIA_EMBED_MODEL", _NVIDIA_EMBED_MODEL_DEFAULT)
-    items = list(texts or [])
-    if not items:
-        return np.zeros((0, EMBED_DIM), dtype=np.float32)
+# ── Embeddings (pinned Nomic v1.5 via Hugging Face TEI) ──────────────
+# Every index/cache records the complete vector-shaping profile and rejects
+# legacy or mismatched matrices.
+def _validated_embedding_matrix(vectors, item_count: int, profile: dict) -> np.ndarray:
+    """Materialize and validate provider output before it reaches any cache."""
+    try:
+        matrix = np.asarray(vectors, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{profile['provider']} embeddings were not a rectangular float matrix"
+        ) from exc
+    expected = (item_count, profile["dimension"])
+    if matrix.ndim != 2 or matrix.shape != expected:
+        raise RuntimeError(
+            f"{profile['provider']} embedding shape mismatch for {profile['model']}: "
+            f"expected {expected}, got {tuple(matrix.shape)}"
+        )
+    if not np.isfinite(matrix).all():
+        raise RuntimeError(f"{profile['provider']} embeddings contained NaN or infinity")
+    return matrix
 
-    all_vecs = []
-    batch_size = int(os.getenv("NVIDIA_EMBED_BATCH", "32"))
-    for i in range(0, len(items), batch_size):
-        batch = [(t[:2000] if t else " ") for t in items[i:i + batch_size]]
+
+def _tei_base_url() -> str:
+    return (os.getenv("TEI_EMBED_BASE_URL") or "http://127.0.0.1:8080").rstrip("/")
+
+
+def _tei_headers() -> dict:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    key = os.getenv("TEI_EMBED_API_KEY", "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _tei_embed(items: list, input_type: str, profile: dict) -> np.ndarray:
+    prefix = "search_document: " if input_type == "passage" else "search_query: "
+    batch_size = _embedding_dimension("TEI_EMBED_BATCH", 16)
+    vectors = []
+    for start in range(0, len(items), batch_size):
+        batch = [prefix + (text if text.strip() else " ") for text in items[start:start + batch_size]]
         payload = {
-            "input": batch,
-            "model": model,
-            # NVIDIA NIM requires an input_type; 'passage' for stored documents.
-            "input_type": "passage",
-            "encoding_format": "float",
-            "truncate": "END",
+            "inputs": batch,
+            "truncate": profile["truncate"],
+            "truncation_direction": profile["truncation_direction"],
+            "normalize": profile["normalize"],
+            "dimensions": profile["dimension"],
         }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(NVIDIA_EMBED_URL, data=data, headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {key}",
-        })
+        req = urllib.request.Request(
+            f"{_tei_base_url()}/embed",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=_tei_headers(),
+        )
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError) as exc:
-            raise RuntimeError(f"NVIDIA embeddings request failed: {exc}")
-        rows = body.get("data") or []
-        _record_usage(NVIDIA, "embedding",
-                      estimated_tokens=_estimate_tokens(batch),
-                      usage=_usage_from_obj(body))
-        # Preserve request order (NVIDIA returns an 'index' per row).
-        rows = sorted(rows, key=lambda r: r.get("index", 0))
-        for r in rows:
-            all_vecs.append(r.get("embedding") or [])
-    if not all_vecs:
-        raise RuntimeError("NVIDIA embeddings returned no vectors")
-    return np.array(all_vecs, dtype=np.float32)
+                rows = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            raise RuntimeError(f"TEI embeddings request failed: {exc}") from exc
+        if not isinstance(rows, list):
+            raise RuntimeError("TEI embeddings returned an invalid response")
+        vectors.extend(rows)
+        _record_usage(
+            TEI,
+            "embedding",
+            estimated_tokens=_estimate_tokens(batch),
+        )
+    return _validated_embedding_matrix(vectors, len(items), profile)
+
+
+def verify_embedding_backend(timeout: int = 30) -> dict:
+    """Verify TEI serves the pinned model revision and produces 768-D vectors."""
+    profile = embedding_profile()
+    req = urllib.request.Request(f"{_tei_base_url()}/info", headers=_tei_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            info = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"TEI readiness check failed: {exc}") from exc
+    model_id = str(info.get("model_id") or info.get("modelId") or "")
+    model_sha = str(info.get("model_sha") or info.get("modelSha") or "")
+    if model_id != profile["model"]:
+        raise RuntimeError(
+            f"TEI model mismatch: expected {profile['model']!r}, got {model_id!r}"
+        )
+    if model_sha != profile["revision"]:
+        raise RuntimeError(
+            f"TEI revision mismatch: expected {profile['revision']!r}, got {model_sha!r}"
+        )
+    model_dtype = str(info.get("model_dtype") or "")
+    if model_dtype != profile["dtype"]:
+        raise RuntimeError(
+            f"TEI dtype mismatch: expected {profile['dtype']!r}, got {model_dtype!r}"
+        )
+    model_type = info.get("model_type") or {}
+    pooling = str(((model_type.get("embedding") or {}).get("pooling")) or "")
+    if pooling != profile["pooling"]:
+        raise RuntimeError(
+            f"TEI pooling mismatch: expected {profile['pooling']!r}, got {pooling!r}"
+        )
+    probe = _tei_embed(["BridgeGuard embedding readiness probe"], "query", profile)
+    return {
+        "provider": TEI,
+        "model": model_id,
+        "revision": model_sha,
+        "dimension": int(probe.shape[1]),
+    }
+
+
+def embed(texts, input_type: str = "passage") -> np.ndarray:
+    """Embed text in the pinned Nomic vector space.
+
+    Indexed content gets Nomic's ``search_document:`` prefix and questions get
+    ``search_query:``. The distinction is part of the persisted profile.
+    """
+    input_type = str(input_type or "").strip().lower()
+    if input_type not in {"passage", "query"}:
+        raise ValueError("input_type must be 'passage' or 'query'")
+    profile = embedding_profile()
+    items = [str(t) if t is not None else "" for t in (texts or [])]
+    if not items:
+        return np.zeros((0, profile["dimension"]), dtype=np.float32)
+    return _tei_embed(items, input_type, profile)
+
+
+def embed_passages(texts) -> np.ndarray:
+    return embed(texts, input_type="passage")
+
+
+def embed_query(text: str) -> np.ndarray:
+    return embed([text], input_type="query")

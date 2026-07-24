@@ -1,15 +1,20 @@
 // frontend/src/pages/Map.tsx
 // Map Explorer (opens as a full-bleed modal): ArcGIS map with floating glass
 // controls, county drilldown, and 6-action bridge popups.
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { MapPin, Loader2, Layers, Filter, Satellite, Map as MapIcon } from 'lucide-react';
-import ArcgisMap, { MapBridge, MapMode, BaseLayer, BridgeAction, PopupBridgeRef } from '../components/ArcgisMap';
+import ArcgisMap, { MapBridge, MapMode, BaseLayer, BridgeAction, PopupBridgeRef, MapBridgeFocus } from '../components/ArcgisMap';
 import BridgeHistoryModal from '../components/BridgeHistoryModal';
 import BridgeReportsModal from '../components/BridgeReportsModal';
 import BridgeLCCAModal from '../components/BridgeLCCAModal';
 import BridgeDetailModal from '../components/BridgeDetailModal';
 import { openTool } from '../lib/tools';
+import {
+  SHOW_BRIDGE_ON_MAP_EVENT,
+  emitShowBridgeOnMapResult,
+  type ShowBridgeOnMapRequest,
+} from '../lib/mapBridgeEvents';
 
 interface StateOption { state_code: number; state_name: string; }
 interface CountyOption { state_code: number; county_code: number; bridge_count: number; }
@@ -65,6 +70,10 @@ const MapPage: React.FC = () => {
   const [reportsModal, setReportsModal] = useState<PopupBridgeRef | null>(null);
   const [lccaModal, setLccaModal] = useState<PopupBridgeRef | null>(null);
   const [detailBridge, setDetailBridge] = useState<PopupBridgeRef | null>(null);
+  const [focusBridge, setFocusBridge] = useState<MapBridgeFocus | null>(null);
+  const focusTargetRef = useRef<MapBridge | null>(null);
+  const desiredCountyRef = useRef<string | null>(null);
+  const searchableBridgesRef = useRef<MapBridge[] | null>(null);
 
   const handleBridgeAction = (action: BridgeAction, bridge: PopupBridgeRef) => {
     const payload = { stateCode: bridge.state_code, bridgeNumber: bridge.bridge_number, bridgeName: bridge.bridge_name };
@@ -74,6 +83,7 @@ const MapPage: React.FC = () => {
     else if (action === 'lcca') setLccaModal(bridge);
     else if (action === 'edit') openTool('editor', payload);
     else if (action === 'explorer') openTool('explorer', payload);
+    else if (action === 'pointcloud') openTool('pointcloud', payload);
   };
 
   useEffect(() => {
@@ -115,7 +125,9 @@ const MapPage: React.FC = () => {
         const counties: CountyOption[] = res.data || [];
         setAvailableCounties(counties);
         // Auto-select the first county so exactly one county loads at a time.
-        setSelectedCounty(counties.length ? String(counties[0].county_code) : '');
+        const desired = desiredCountyRef.current;
+        const desiredExists = desired && counties.some((county) => String(county.county_code) === desired);
+        setSelectedCounty(desiredExists ? desired : (counties.length ? String(counties[0].county_code) : ''));
         setAllBridges([]);
       } catch (err) {
         console.error(err);
@@ -124,6 +136,102 @@ const MapPage: React.FC = () => {
     };
     fetchCounties();
   }, [selectedState, selectedYear]);
+
+  useEffect(() => {
+    const normalize = (value: unknown) => String(value ?? '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const onShowBridge = async (event: Event) => {
+      const request = (event as CustomEvent<ShowBridgeOnMapRequest>).detail;
+      if (!request?.requestId || !request.searchText) return;
+      try {
+        if (!searchableBridgesRef.current) {
+          const response = await axios.get('/api/map-data?state_code=34');
+          const normalizedBridges = (response.data || [])
+            .map((bridge: MapBridge) => ({
+              ...bridge,
+              latitude: Number(bridge.latitude),
+              longitude: Number(bridge.longitude),
+            }))
+            .filter((bridge: MapBridge) => Number.isFinite(bridge.latitude) && Number.isFinite(bridge.longitude));
+          const uniqueBridges = new Map<string, MapBridge>();
+          normalizedBridges.forEach((bridge: MapBridge) => {
+            uniqueBridges.set(`${bridge.state_code ?? 34}|${bridge.bridge_number}`, bridge);
+          });
+          searchableBridgesRef.current = Array.from(uniqueBridges.values());
+        }
+
+        const needle = normalize(request.searchText);
+        const tokens = needle.split(' ').filter(Boolean);
+        const ranked = (searchableBridgesRef.current || []).map((bridge) => {
+          const number = normalize(bridge.bridge_number);
+          const name = normalize(bridge.bridge_name || bridge.display_name);
+          const location = normalize(bridge.bridge_location);
+          const combined = `${number} ${name} ${location}`.trim();
+          let score = 0;
+          if (number === needle) score = 100;
+          else if (number.includes(needle) && needle.length >= 3) score = 88;
+          else if (name === needle) score = 80;
+          else if (name.includes(needle) && needle.length >= 4) score = 70;
+          else if (location.includes(needle) && needle.length >= 4) score = 60;
+          else if (tokens.length && tokens.every((token) => combined.includes(token))) score = 50 + tokens.length;
+          return { bridge, score };
+        }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
+
+        if (!ranked.length) {
+          emitShowBridgeOnMapResult({
+            requestId: request.requestId,
+            status: 'not_found',
+            message: `I couldn't find a mapped New Jersey bridge matching “${request.searchText}”. Try its structure number.`,
+          });
+          return;
+        }
+
+        const bestScore = ranked[0].score;
+        const equallyRanked = ranked.filter((item) => item.score === bestScore);
+        if (bestScore < 88 && equallyRanked.length > 1) {
+          const matches = equallyRanked.slice(0, 4).map(({ bridge }) => ({
+            bridge_number: String(bridge.bridge_number),
+            label: bridge.bridge_name || bridge.display_name || bridge.bridge_location || `Bridge ${bridge.bridge_number}`,
+          }));
+          emitShowBridgeOnMapResult({
+            requestId: request.requestId,
+            status: 'ambiguous',
+            message: `I found multiple bridges: ${matches.map((match) => `${match.bridge_number} (${match.label})`).join(', ')}. Ask again with the structure number.`,
+            matches,
+          });
+          return;
+        }
+
+        const target = ranked[0].bridge;
+        const county = String(target.county_code ?? '');
+        const state = String(target.state_code ?? 34);
+        const year = target.data_year == null ? '' : String(target.data_year);
+        desiredCountyRef.current = county;
+        focusTargetRef.current = target;
+        setFocusBridge({
+          requestId: request.requestId,
+          state_code: state,
+          bridge_number: String(target.bridge_number),
+        });
+        setSelectedState(state);
+        if (year) setSelectedYear(year);
+        if (county) setSelectedCounty(county);
+      } catch (err: any) {
+        emitShowBridgeOnMapResult({
+          requestId: request.requestId,
+          status: 'error',
+          message: err?.message || 'Could not search the bridge map.',
+        });
+      }
+    };
+
+    window.addEventListener(SHOW_BRIDGE_ON_MAP_EVENT, onShowBridge as EventListener);
+    return () => window.removeEventListener(SHOW_BRIDGE_ON_MAP_EVENT, onShowBridge as EventListener);
+  }, []);
 
   useEffect(() => {
     if (!selectedState || !selectedCounty) { setAllBridges([]); return; }
@@ -229,6 +337,28 @@ const MapPage: React.FC = () => {
               showCounties
               onCountySelect={(c) => setSelectedCounty(c)}
               onBridgeAction={handleBridgeAction}
+              focusBridge={focusBridge}
+              onFocusResult={(focus, success, focusError) => {
+                const target = focusTargetRef.current;
+                if (success && target) {
+                  const label = target.bridge_name || target.display_name || `Bridge ${target.bridge_number}`;
+                  emitShowBridgeOnMapResult({
+                    requestId: focus.requestId,
+                    status: 'shown',
+                    message: `Showing ${label} (Bridge ${target.bridge_number}) on the map.`,
+                    bridge: target,
+                  });
+                } else {
+                  emitShowBridgeOnMapResult({
+                    requestId: focus.requestId,
+                    status: 'error',
+                    message: focusError || 'The bridge was found, but its map card could not be opened.',
+                  });
+                }
+                desiredCountyRef.current = null;
+                focusTargetRef.current = null;
+                setFocusBridge(null);
+              }}
             />
             {loadingBridges && (
               <div className="absolute inset-0 flex items-center justify-center bg-white/50 dark:bg-slate-950/50 z-[650]">

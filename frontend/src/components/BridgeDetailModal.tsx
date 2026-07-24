@@ -1,7 +1,7 @@
 // frontend/src/components/BridgeDetailModal.tsx
 // Full-screen per-bridge popup: one place for editing, files,
 // history+forecast, life-cycle cost, and a bridge-scoped RAG chat.
-import React, { useState, useEffect, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Edit3, FileText, Box, History, Coins, Bot, Send, Loader2, Square, Table2, Plus, Trash2, ScanSearch, ZoomIn, ZoomOut, X } from 'lucide-react';
 import type { PopupBridgeRef } from './ArcgisMap';
@@ -11,11 +11,14 @@ import BridgeReportsModal from './BridgeReportsModal';
 import BridgeLCCAModal from './BridgeLCCAModal';
 import Editor from '../pages/Editor';
 
-type Tab = 'history' | 'files' | 'lcca' | 'rag' | 'custom' | 'edit';
+const PointCloud = lazy(() => import('../pages/PointCloud'));
+
+type Tab = 'history' | 'files' | 'pointcloud' | 'lcca' | 'rag' | 'custom' | 'edit';
 type ReportImage = { data: string; mime: string; label?: string; filename?: string; detections?: { label?: string; confidence?: number; bbox?: number[] }[] };
 const TABS: { id: Tab; label: string; Icon: typeof History }[] = [
   { id: 'history', label: 'History', Icon: History },
   { id: 'files', label: 'Files', Icon: FileText },
+  { id: 'pointcloud', label: 'Point Cloud', Icon: Box },
   { id: 'lcca', label: 'LCCA', Icon: Coins },
   { id: 'rag', label: 'Ask', Icon: Bot },
   { id: 'custom', label: 'Custom', Icon: Table2 },
@@ -56,6 +59,13 @@ const BridgeDetailModal: React.FC<{ bridge: PopupBridgeRef; onClose: () => void 
         <div className="flex-1 overflow-auto ui-scroll p-4">
           {tab === 'history' && <BridgeHistoryModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} onClose={noop} />}
           {tab === 'files' && <BridgeReportsModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} onClose={noop} />}
+          {tab === 'pointcloud' && (
+            <div className="-m-4 h-[calc(100%+2rem)] min-h-[620px]">
+              <Suspense fallback={<div className="p-8 text-center text-slate-500">Loading point-cloud viewer…</div>}>
+                <PointCloud bridgeStateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} />
+              </Suspense>
+            </div>
+          )}
           {tab === 'lcca' && (
             <BridgeLCCAModal
               embedded

@@ -1,19 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Settings, Cloud, Cpu, Brain, Eye, Layers, Trash2 } from 'lucide-react';
+import { Settings, Cloud, Brain, Eye, Layers, Trash2 } from 'lucide-react';
 import { Modal } from './ui';
 
 interface SettingsDialogProps {
   open: boolean;
   onClose: () => void;
 }
-
-type Provider = 'cerebras' | 'nvidia';
-
-const PROVIDERS: { id: Provider; label: string; sub: string; Icon: typeof Cloud }[] = [
-  { id: 'cerebras', label: 'Cerebras', sub: 'Default · fast hosted inference', Icon: Cloud },
-  { id: 'nvidia', label: 'NVIDIA / Qwen', sub: 'Hosted Qwen multimodal', Icon: Cpu },
-];
 
 const inputClass =
   'w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500';
@@ -24,62 +17,29 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onClose }) => {
   const [statusType, setStatusType] = useState<'success' | 'error'>('success');
 
   // RAG settings (read from backend)
-  const [embeddingModel, setEmbeddingModel] = useState('nomic-embed-text:latest');
-  const [visionModel, setVisionModel] = useState('qwen3.6:latest');
+  const [embeddingModel, setEmbeddingModel] = useState('nomic-ai/nomic-embed-text-v1.5');
+  const [embeddingProvider, setEmbeddingProvider] = useState('tei');
+  const [embeddingDim, setEmbeddingDim] = useState(768);
+  const [embeddingRevision, setEmbeddingRevision] = useState('');
+  const [visionModel, setVisionModel] = useState('Cerebras');
   const [chunkSize, setChunkSize] = useState(500);
   const [chunkOverlap, setChunkOverlap] = useState(100);
-
-  // Hosted AI provider — both are multimodal. Cerebras is the default.
-  const [aiProvider, setAiProvider] = useState<Provider>('cerebras');
-  const [providerBusy, setProviderBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
       loadRagSettings();
-      loadAiProvider();
     }
   }, [open]);
-
-  const loadAiProvider = async () => {
-    try {
-      const res = await axios.get('/api/ai-provider');
-      setAiProvider(res.data?.provider === 'nvidia' ? 'nvidia' : 'cerebras');
-    } catch {
-      // default 'cerebras' is fine
-    }
-  };
-
-  const switchAiProvider = async (provider: Provider) => {
-    if (provider === aiProvider || providerBusy) return;
-    const previous = aiProvider;
-    setAiProvider(provider); // optimistic
-    setProviderBusy(true);
-    try {
-      const res = await axios.post('/api/ai-provider', { provider });
-      if (res.data?.provider === 'nvidia' || res.data?.provider === 'cerebras') {
-        setAiProvider(res.data.provider);
-      }
-      setStatusType('success');
-      setStatusMessage(
-        res.data?.message ||
-        `AI provider set to ${provider === 'nvidia' ? 'NVIDIA / Qwen' : 'Cerebras'}.`
-      );
-      setTimeout(() => setStatusMessage(null), 4000);
-    } catch (error: any) {
-      setAiProvider(previous); // roll back on failure
-      setStatusType('error');
-      setStatusMessage(error?.response?.data?.detail || 'Failed to switch AI provider.');
-    } finally {
-      setProviderBusy(false);
-    }
-  };
 
   const loadRagSettings = async () => {
     try {
       const res = await axios.get('/api/rag-settings');
       if (res.data) {
-        setEmbeddingModel(res.data.embed_model || 'nomic-embed-text:latest');
-        setVisionModel(res.data.vision_model || 'qwen3.6:latest');
+        setEmbeddingModel(res.data.embed_model || 'nomic-ai/nomic-embed-text-v1.5');
+        setEmbeddingProvider(res.data.embedding_provider || 'tei');
+        setEmbeddingDim(Number(res.data.embed_dim) || 768);
+        setEmbeddingRevision(res.data.embed_revision || '');
+        setVisionModel(res.data.vision_model || 'Cerebras');
         setChunkSize(res.data.chunk_size || 500);
         setChunkOverlap(res.data.chunk_overlap || 100);
       }
@@ -91,8 +51,6 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onClose }) => {
   const saveRagSettings = async () => {
     try {
       await axios.post('/api/rag-settings', {
-        embed_model: embeddingModel,
-        vision_model: visionModel,
         chunk_size: chunkSize,
         chunk_overlap: chunkOverlap,
       });
@@ -127,33 +85,21 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onClose }) => {
   return (
     <Modal open={open} onClose={onClose} size="md" title="Settings" icon={<Settings className="w-5 h-5" />}>
         <div className="space-y-6">
-          {/* ── AI Provider (hosted, multimodal) ──────── */}
+          {/* ── AI Provider (fixed, hosted, multimodal) ─ */}
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Cloud className="w-4 h-4 text-indigo-500" />
               <label className="text-sm font-semibold text-gray-700 dark:text-gray-300">AI Provider</label>
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              {PROVIDERS.map(({ id, label, sub, Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  disabled={providerBusy}
-                  onClick={() => switchAiProvider(id)}
-                  className={`flex flex-col items-center justify-center gap-1 rounded-2xl px-4 py-3 text-sm font-semibold border transition-colors disabled:opacity-60 ${
-                    aiProvider === id
-                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                      : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-indigo-400'
-                  }`}
-                >
-                  <span className="flex items-center gap-2"><Icon className="w-4 h-4" /> {label}</span>
-                  <span className={`text-[10px] font-normal ${aiProvider === id ? 'text-indigo-100' : 'text-gray-400'}`}>{sub}</span>
-                </button>
-              ))}
+            <div className="flex items-center gap-3 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-indigo-800 dark:border-indigo-800 dark:bg-indigo-950/30 dark:text-indigo-200">
+              <Cloud className="h-5 w-5" />
+              <div>
+                <div className="text-sm font-semibold">Cerebras</div>
+                <div className="text-[11px] opacity-75">Server-controlled text and vision generation</div>
+              </div>
             </div>
             <p className="text-xs text-gray-400">
-              Both providers are hosted and multimodal — image Q&amp;A works on either one.
-              RAG document embeddings always use NVIDIA regardless of the selection above.
+              Cerebras handles chat, report-image understanding, and point-cloud cleanup/segmentation judgments.
             </p>
           </div>
 
@@ -169,11 +115,14 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onClose }) => {
             <input
               type="text"
               value={embeddingModel}
-              onChange={(e) => setEmbeddingModel(e.target.value)}
-              className={inputClass}
-              placeholder="nomic-embed-text:latest"
+              readOnly
+              className={`${inputClass} cursor-not-allowed opacity-75`}
             />
-            <p className="text-xs text-gray-400">Model used for semantic embeddings during indexing (served by NVIDIA).</p>
+            <p className="text-xs text-gray-400">
+              {embeddingProvider.toUpperCase()} · {embeddingDim} dimensions
+              {embeddingRevision ? ` · revision ${embeddingRevision.slice(0, 12)}` : ''}. Old parsed
+              files are reusable, but vectors are rebuilt if this pinned profile changes.
+            </p>
           </div>
 
           {/* ── Vision Indexing Model (RAG) ───────────── */}
@@ -185,9 +134,8 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ open, onClose }) => {
             <input
               type="text"
               value={visionModel}
-              onChange={(e) => setVisionModel(e.target.value)}
-              className={inputClass}
-              placeholder="qwen3.6:latest"
+              readOnly
+              className={`${inputClass} cursor-not-allowed opacity-75`}
             />
             <p className="text-xs text-gray-400">Model used for extracted image analysis during indexing and segmentation.</p>
           </div>

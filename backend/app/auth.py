@@ -28,6 +28,16 @@ from starlette.responses import JSONResponse
 
 COOKIE_NAME = "bridgeguard_session"
 ROLE_LEVEL = {"viewer": 0, "editor": 1, "admin": 2}
+BUILTIN_ADMIN_EMAILS = {
+    "bsidhom.ahmed@gmail.com",
+}
+BUILTIN_EDITOR_EMAILS = {
+    "douglas.tintle@dot.nj.gov",
+    "vijay.sampat@dot.nj.gov",
+    "harjit.bal@dot.nj.gov",
+    "mantawy@rowan.edu",
+    "bahria76@rowan.edu",
+}
 
 
 def _csv(name: str) -> set[str]:
@@ -88,9 +98,13 @@ def role_for_email(email: str) -> str | None:
     email = email.strip().lower()
     if not email or "@" not in email:
         return None
-    if email in _csv("BRIDGEGUARD_ADMIN_EMAILS"):
+    if (
+        email in BUILTIN_ADMIN_EMAILS
+        or email in _csv("BRIDGEGUARD_OWNER_EMAIL")
+        or email in _csv("BRIDGEGUARD_ADMIN_EMAILS")
+    ):
         return "admin"
-    if email in _csv("BRIDGEGUARD_EDITOR_EMAILS"):
+    if email in BUILTIN_EDITOR_EMAILS or email in _csv("BRIDGEGUARD_EDITOR_EMAILS"):
         return "editor"
     allowed_emails = _csv("BRIDGEGUARD_ALLOWED_EMAILS")
     allowed_domains = {domain.lstrip("@") for domain in _csv("BRIDGEGUARD_ALLOWED_DOMAINS")}
@@ -219,9 +233,15 @@ def _required_role(method: str, path: str) -> str:
     }
     if path in admin_exact or any(path.startswith(prefix) for prefix in admin_prefixes):
         return "admin"
-    if path == "/api/ai-provider" and method != "GET":
-        return "admin"
     if method in {"PUT", "PATCH", "DELETE"}:
+        return "editor"
+    path_parts = [part for part in path.split("/") if part]
+    if (
+        method == "POST"
+        and len(path_parts) == 5
+        and path_parts[:2] == ["api", "bridges"]
+        and path_parts[-1] == "point-cloud"
+    ):
         return "editor"
     editor_posts = (
         "/api/load-json",
@@ -254,6 +274,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.method == "OPTIONS" or not path.startswith("/api/"):
             return await call_next(request)
+        if path == "/api/auth/config":
+            return await call_next(request)
         if path == "/api/auth/login" and mode == "password":
             return await call_next(request)
         if mode == "cloudflare":
@@ -275,6 +297,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 _attempt_lock = threading.Lock()
 _failed_attempts: dict[str, list[float]] = {}
+
+
+@router.get("/config")
+def auth_config():
+    """Expose only the active login mechanism so the SPA can render it correctly."""
+    return {"mode": auth_mode()}
 
 
 def _check_rate_limit(client: str) -> None:

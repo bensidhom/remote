@@ -4,10 +4,11 @@
 // narrow icon-only rail (no room) — shown only on the wide (lg) sidebar.
 import React, { useRef, useState } from 'react';
 import { Bot, Send, Square, Loader2 } from 'lucide-react';
+import { isSidebarMapRequest, requestShowBridgeOnMap } from '../lib/mapBridgeEvents';
 
 interface Turn { q: string; a?: string; error?: string; loading?: boolean }
 
-const SUGGESTIONS = ['Bridges per county', 'Avg deck rating each year', 'Bridges built before 1970'];
+const SUGGESTIONS = ['Show bridge 0102151 on the map', 'Bridges per county', 'Avg deck rating each year'];
 
 const SidebarBridgette: React.FC = () => {
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -28,6 +29,17 @@ const SidebarBridgette: React.FC = () => {
     const update = (patch: Partial<Turn>) => setTurns((t) => t.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
     let answer = '';
     try {
+      // Map navigation is intentionally available only in this sidebar chat.
+      // Full-page Bridgette continues to answer database questions without UI actions.
+      if (isSidebarMapRequest(question)) {
+        const result = await requestShowBridgeOnMap(question);
+        if (result.status === 'shown' || result.status === 'ambiguous') {
+          update({ loading: false, a: result.message });
+        } else {
+          update({ loading: false, error: result.message });
+        }
+        return;
+      }
       const fd = new FormData();
       fd.append('question', question);
       const res = await fetch('/api/bridgette/stream', { method: 'POST', body: fd, signal: controller.signal });

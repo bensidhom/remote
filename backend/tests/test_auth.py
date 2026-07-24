@@ -24,6 +24,7 @@ ENV = {
     "BRIDGEGUARD_ALLOWED_DOMAINS": "dot.nj.gov",
     "BRIDGEGUARD_ALLOWED_EMAILS": "viewer@example.com",
     "BRIDGEGUARD_EDITOR_EMAILS": "editor@example.com",
+    "BRIDGEGUARD_OWNER_EMAIL": "owner@example.com",
     "BRIDGEGUARD_ADMIN_EMAILS": "admin@example.com",
 }
 
@@ -39,7 +40,17 @@ class AuthTests(unittest.TestCase):
     def test_roles_are_resolved_server_side(self):
         self.assertEqual(role_for_email("person@dot.nj.gov"), "viewer")
         self.assertEqual(role_for_email("editor@example.com"), "editor")
+        self.assertEqual(role_for_email("bsidhom.ahmed@gmail.com"), "admin")
+        self.assertEqual(role_for_email("owner@example.com"), "admin")
         self.assertEqual(role_for_email("admin@example.com"), "admin")
+        for email in (
+            "douglas.tintle@dot.nj.gov",
+            "vijay.sampat@dot.nj.gov",
+            "harjit.bal@dot.nj.gov",
+            "mantawy@rowan.edu",
+            "bahria76@rowan.edu",
+        ):
+            self.assertEqual(role_for_email(email), "editor")
         self.assertIsNone(role_for_email("stranger@example.net"))
 
     def test_session_round_trip_and_tamper_rejection(self):
@@ -54,6 +65,8 @@ class AuthTests(unittest.TestCase):
     def test_privileged_routes_require_expected_roles(self):
         self.assertEqual(_required_role("GET", "/api/map-data"), "viewer")
         self.assertEqual(_required_role("PUT", "/api/bridge/34/1"), "editor")
+        self.assertEqual(_required_role("POST", "/api/bridges/34/1/point-cloud"), "editor")
+        self.assertEqual(_required_role("POST", "/api/bridges/34/1/point-cloud/analyze"), "viewer")
         self.assertEqual(_required_role("GET", "/api/tables"), "admin")
         self.assertEqual(_required_role("POST", "/api/sql-query"), "admin")
 
@@ -80,6 +93,19 @@ class AuthTests(unittest.TestCase):
             self.assertIn("bridgeguard_session", client.cookies)
             self.assertEqual(client.get("/api/map-data").status_code, 200)
             self.assertEqual(client.get("/api/tables").status_code, 403)
+
+    def test_auth_config_is_public_but_data_apis_are_not(self):
+        app = FastAPI()
+        app.include_router(router)
+
+        @app.get("/api/map-data")
+        def map_data():
+            return {"ok": True}
+
+        app.add_middleware(AuthMiddleware)
+        with TestClient(app) as client:
+            self.assertEqual(client.get("/api/auth/config").json(), {"mode": "password"})
+            self.assertEqual(client.get("/api/map-data").status_code, 401)
 
     def test_cloudflare_jwt_claims_are_mapped_to_roles(self):
         cloudflare_env = {

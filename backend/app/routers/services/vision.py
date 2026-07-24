@@ -27,12 +27,11 @@ except ImportError:
 
 SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
 SUPPORTED_DOCUMENT_EXTENSIONS = {'.pdf'}
-from .datapaths import TEMP_DIR  # centralized under the repo-relative data/ folder
+from .datapaths import DATA_DIR, TEMP_DIR  # centralized persistent data folder
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Optional model overrides for the chat/ask features. '' = use the caller's
-# (main) model. In the hosted build the active provider (cerebras/nvidia)
-# ultimately chooses its own model; these remain for API/signature stability.
+# Legacy model arguments are accepted for API compatibility, but the server's
+# CEREBRAS_MODEL setting is authoritative for text and vision generation.
 SQL_MODEL = os.getenv('BRIDGE_SQL_MODEL', '')        # '' = use the caller's (main) model
 ANSWER_MODEL = os.getenv('BRIDGE_ANSWER_MODEL', '')  # '' = use the caller's (main) model
 
@@ -69,8 +68,7 @@ def extract_text_from_image(image_path: Path) -> str:
 
 
 def describe_image(image_path: Path) -> str:
-    """Describe an image with the active provider's vision model (cerebras or
-    nvidia — both accept images). No local model is ever loaded."""
+    """Describe an image with the configured Cerebras vision endpoint."""
     _prompt = (
         "Describe this image in detail. Include what you see: objects, text, charts, "
         "diagrams, labels, numbers, structural elements, colors, and any relevant information. "
@@ -93,8 +91,7 @@ def describe_image(image_path: Path) -> str:
 
 
 def _query_image_with_vision_model(image_path: Path, question: str) -> Optional[str]:
-    """Send an image + user question directly to the active provider's vision
-    model (cerebras or nvidia). Returns the answer, or None on failure."""
+    """Send an image and question to Cerebras. Return None on failure."""
     try:
         from .rag_engine import _resize_image_b64
         ans = llm_providers.generate(question, images_b64=[_resize_image_b64(str(image_path))],
@@ -170,7 +167,7 @@ def get_relevant_chunks(question: str, chunks: List[str], max_chunks: int = 4) -
 # We stream the provider's tokens and, when a stop is requested, close the
 # generator mid-stream — which closes the underlying HTTP response and aborts
 # the hosted generation. `begin_chat()` arms this for a request (so
-# get_ollama_answer streams + checks the flag); plain callers (e.g. Vision
+# get_cerebras_answer streams + checks the flag); plain callers (e.g. Vision
 # document processing) keep the simple blocking path.
 # NOTE: a single global flag — fine for this single-user desktop app.
 _chat_cancel_event = threading.Event()
@@ -199,9 +196,9 @@ def cancel_chat() -> None:
 
 
 def _stream_answer_tokens(model: str, prompt: str, timeout: int = 300):
-    """Yield answer tokens from the active hosted provider (cerebras DEFAULT /
-    nvidia). The `model` arg is accepted for signature stability but the provider
-    picks its own model. Checks the cancel flag between chunks and aborts the
+    """Yield answer tokens from Cerebras. The `model` argument is accepted for
+    signature stability but the server chooses CEREBRAS_MODEL. Checks the cancel
+    flag between chunks and aborts the
     in-flight generation on user Stop (ChatCancelled) by closing the stream."""
     gen = llm_providers.stream(prompt, num_predict=1024, timeout=timeout)
     try:
@@ -246,12 +243,11 @@ async def _aiter_answer_tokens(model: str, prompt: str, timeout: int = 300):
             raise RuntimeError(val or "streaming failed")
 
 
-def get_ollama_answer(prompt: str, model: str = 'qwen3.6:latest') -> str:
-    """Generate a text completion via the active hosted provider (cerebras
-    DEFAULT / nvidia). Name kept for import stability (callers still say
-    `get_ollama_answer`); NO local model is ever loaded. One retry on failure,
-    then a clear error. When cancellation is armed (begin_chat), the call streams
-    so a user Stop aborts it mid-generation."""
+def get_cerebras_answer(prompt: str, model: str = '') -> str:
+    """Generate with Cerebras, retrying once.
+
+    When cancellation is armed, stream so a user Stop aborts the request.
+    """
     last_exc = None
     for _attempt in range(2):
         try:
@@ -263,8 +259,8 @@ def get_ollama_answer(prompt: str, model: str = 'qwen3.6:latest') -> str:
         except Exception as exc:
             last_exc = exc
     raise RuntimeError(
-        f"Hosted AI request failed: {last_exc}. Check the network and your provider's "
-        "API key (CEREBRAS_API_KEY or NVIDIA_API_KEY in .env), or switch the AI provider in Settings."
+        f"Cerebras request failed: {last_exc}. Check the network, configured model, "
+        "and CEREBRAS_API_KEY."
     )
 
 
@@ -387,7 +383,7 @@ def _preview_rows_for_prompt(rows: list, limit: int = 40) -> tuple[list, str]:
     return preview, f"first {head_count} and last {tail_count} of {len(rows)} rows"
 
 
-def bridgette_answer(question: str, model: str = 'qwen3.6:latest', db_path: Optional[str] = None) -> dict:
+def bridgette_answer(question: str, model: str = '', db_path: Optional[str] = None) -> dict:
     """Answer an NL question about NJ bridges: generate SQL → execute (read-only) → summarize."""
     from .database import execute_readonly_sql, USER_DB as _DB
     dbp = db_path or _DB
@@ -410,7 +406,7 @@ def bridgette_answer(question: str, model: str = 'qwen3.6:latest', db_path: Opti
         # Generate SQL with the fast small model; if it doesn't run, retry once
         # with the capable model. Fast on the happy path, correct on the rare miss.
         def _try_sql(m):
-            s = _extract_sql(get_ollama_answer(sql_prompt, model=m))
+            s = _extract_sql(get_cerebras_answer(sql_prompt, model=m))
             if not s.upper().startswith('SELECT'):
                 return s, None
             s = _ensure_limit(s, 500)
@@ -445,7 +441,7 @@ def bridgette_answer(question: str, model: str = 'qwen3.6:latest', db_path: Opti
             f"Results (JSON, {preview_label}): {preview}\nAnswer:"
         )
         try:
-            answer = get_ollama_answer(summary_prompt, model=ANSWER_MODEL or model).strip()
+            answer = get_cerebras_answer(summary_prompt, model=ANSWER_MODEL or model).strip()
         except ChatCancelled:
             raise  # propagate user stop; do not fall back to a canned answer
         except Exception:
@@ -455,7 +451,7 @@ def bridgette_answer(question: str, model: str = 'qwen3.6:latest', db_path: Opti
         end_chat()
 
 
-def bridgette_answer_stream(question: str, model: str = 'qwen3.6:latest', db_path: Optional[str] = None):
+def bridgette_answer_stream(question: str, model: str = '', db_path: Optional[str] = None):
     """Streaming Bridgette: same SQL→execute→summarize flow as bridgette_answer,
     but yields events so the UI shows the answer appear token-by-token:
       {'type':'meta', sql, rows, columns, count}  (once, before the answer)
@@ -481,7 +477,7 @@ def bridgette_answer_stream(question: str, model: str = 'qwen3.6:latest', db_pat
         )
 
         def _try_sql(m):
-            s = _extract_sql(get_ollama_answer(sql_prompt, model=m))
+            s = _extract_sql(get_cerebras_answer(sql_prompt, model=m))
             if not s.upper().startswith('SELECT'):
                 return s, None
             s = _ensure_limit(s, 500)
@@ -531,7 +527,7 @@ def bridgette_answer_stream(question: str, model: str = 'qwen3.6:latest', db_pat
         end_chat()
 
 
-def bridge_sql_context(question: str, state_code, bridge_number: str, model: str = 'qwen3.6:latest') -> tuple:
+def bridge_sql_context(question: str, state_code, bridge_number: str, model: str = '') -> tuple:
     """Bridgette-style DB evidence for ONE bridge: generate a read-only SELECT
     scoped to this bridge, execute it, and return (compact_context_text, sql).
 
@@ -556,7 +552,7 @@ def bridge_sql_context(question: str, state_code, bridge_number: str, model: str
     )
     # Fast small model first; fall back to the capable model if its SQL won't run.
     def _try_sql(m):
-        s = _extract_sql(get_ollama_answer(sql_prompt, model=m))
+        s = _extract_sql(get_cerebras_answer(sql_prompt, model=m))
         if not s.upper().startswith('SELECT'):
             return s, None
         s = _ensure_limit(s, 200)
@@ -622,17 +618,6 @@ def _safe_json_from_model_output(raw_text: str) -> dict:
         'missing_fields': [],
         'raw_text': text,
     }
-
-
-def get_installed_ollama_models() -> List[str]:
-    """Stub: no local models in the hosted build. Kept for import stability.
-    Returns an empty list so callers/UI show 'no local models'."""
-    return []
-
-
-def pull_ollama_model(model: str) -> str:
-    """Stub: local models are not supported in the hosted build."""
-    raise RuntimeError("local models are not supported in the hosted build")
 
 
 def build_prompt(
@@ -785,7 +770,7 @@ def get_db_context(question: str, state_code: Optional[int] = None, bridge_numbe
 
 def process_db_rag(
     question: str,
-    model: str = 'qwen3.6:latest',
+    model: str = '',
     state_code: Optional[int] = None,
     bridge_number: Optional[str] = None,
     strict_grounding: bool = False,
@@ -800,7 +785,7 @@ def process_db_rag(
         )
 
     try:
-        answer = get_ollama_answer(
+        answer = get_cerebras_answer(
             build_prompt(
                 context,
                 question,
@@ -811,9 +796,9 @@ def process_db_rag(
             ),
             model=model,
         )
-        model_used = model
+        model_used = llm_providers.generation_model()
     except Exception as exc:
-        raise RuntimeError(f"Hosted AI is not available: {exc}. Check your network and provider API key (CEREBRAS_API_KEY / NVIDIA_API_KEY in .env).")
+        raise RuntimeError(f"Cerebras is not available: {exc}. Check the network and CEREBRAS_API_KEY.")
 
     # Build short source labels from the table names in each chunk
     raw_chunks = context.split('\n\n---\n\n')
@@ -876,8 +861,81 @@ def _bridge_cache_dir() -> Path:
     return d
 
 
+def _relative_data_path(value) -> str:
+    """Persist cache asset paths relative to the portable data directory."""
+    try:
+        return Path(value).resolve().relative_to(Path(DATA_DIR).resolve()).as_posix()
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _resolve_data_path(value) -> str:
+    path = Path(str(value))
+    return str(path if path.is_absolute() else Path(DATA_DIR) / path)
+
+
+def _cache_paths_relative(value):
+    if isinstance(value, list):
+        return [_cache_paths_relative(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                _relative_data_path(item)
+                if key == "path" and item
+                else _cache_paths_relative(item)
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
+def _cache_paths_resolved(value):
+    if isinstance(value, list):
+        return [_cache_paths_resolved(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                _resolve_data_path(item)
+                if key == "path" and item
+                else _cache_paths_resolved(item)
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
 def _sig_str(sig) -> str:
-    return '|'.join(f"{p}:{m}" for p, m in sig)
+    return '|'.join(f"{_relative_data_path(p)}:{m}" for p, m in sig)
+
+
+def _bridge_cache_key(state_code, bridge_number, sig):
+    profile = llm_providers.embedding_profile()
+    return (
+        str(state_code),
+        str(bridge_number),
+        sig,
+        profile["provider"],
+        profile["model"],
+        profile["dimension"],
+    )
+
+
+def _existing_report_files(state_code, bridge_number) -> list:
+    """Accept both portable DATA_DIR-relative and legacy absolute DB paths."""
+    from .database import get_bridge_report_files
+
+    files = []
+    for item in get_bridge_report_files(state_code, bridge_number):
+        raw = item.get("filepath")
+        if not raw:
+            continue
+        path = Path(str(raw))
+        resolved = path if path.is_absolute() else Path(DATA_DIR) / path
+        if resolved.exists():
+            copy = dict(item)
+            copy["filepath"] = str(resolved)
+            files.append(copy)
+    return files
 
 
 def _load_bridge_cache(state_code, bridge_number, sig):
@@ -893,7 +951,7 @@ def _load_bridge_cache(state_code, bridge_number, sig):
         data = json.loads(fp.read_text(encoding='utf-8'))
         if data.get('sig') != _sig_str(sig):
             return None
-        chunks = data.get('chunks') or []
+        chunks = _cache_paths_resolved(data.get('chunks') or [])
         # Cache schema upgrade: older caches stored image chunks without the source
         # image path, so the chat could not render a gallery. Force a re-ingest so
         # image chunks are rebuilt with their on-disk path.
@@ -911,11 +969,30 @@ def _load_bridge_cache(state_code, bridge_number, sig):
         ):
             return None
         emb = data.get('embeddings')
+        needs_reembedding = bool(chunks)
+        matrix = None
+        if emb:
+            try:
+                candidate = np.asarray(emb, dtype=np.float32)
+            except (TypeError, ValueError):
+                candidate = None
+            if (
+                candidate is not None
+                and candidate.ndim == 2
+                and candidate.shape[0] == len(chunks)
+                and candidate.shape[1] == llm_providers.embedding_profile()["dimension"]
+                and np.isfinite(candidate).all()
+                and llm_providers.embedding_profile_matches(data.get("embedding_profile"))
+            ):
+                matrix = candidate
+                needs_reembedding = False
         return {
             'chunks': chunks,
-            'embeddings': np.array(emb, dtype=np.float32) if emb else None,
+            'embeddings': matrix,
+            'embedding_profile': data.get("embedding_profile"),
+            'needs_reembedding': needs_reembedding,
             'image_count': data.get('image_count', 0),
-            'page_images': data.get('page_images') or [],
+            'page_images': _cache_paths_resolved(data.get('page_images') or []),
         }
     except Exception:
         return None
@@ -927,10 +1004,13 @@ def _save_bridge_cache(state_code, bridge_number, sig, result) -> None:
         emb = result.get('embeddings')
         payload = {
             'sig': _sig_str(sig),
-            'chunks': result.get('chunks') or [],
+            'chunks': _cache_paths_relative(result.get('chunks') or []),
             'embeddings': emb.tolist() if emb is not None else None,
+            'embedding_profile': (
+                llm_providers.embedding_profile() if emb is not None else None
+            ),
             'image_count': result.get('image_count', 0),
-            'page_images': result.get('page_images') or [],
+            'page_images': _cache_paths_relative(result.get('page_images') or []),
         }
         fp.write_text(json.dumps(payload), encoding='utf-8')
     except Exception as exc:
@@ -1038,17 +1118,15 @@ def bridge_reports_index_status(state_code, bridge_number) -> dict:
     parsed+embedded (cached), WITHOUT triggering a parse. Lets the UI show a
     'Ready' vs 'Indexing…' badge so the user knows a file is queryable before
     asking. Returns {file_count, ready, indexing}."""
-    from .database import get_bridge_report_files
-    files = [f for f in get_bridge_report_files(state_code, bridge_number)
-             if f.get('filepath') and os.path.exists(f['filepath'])]
+    files = _existing_report_files(state_code, bridge_number)
     if not files:
         return {'file_count': 0, 'ready': True, 'indexing': False}
     sig = tuple(sorted((f['filepath'], int(os.path.getmtime(f['filepath']))) for f in files))
-    key = (str(state_code), str(bridge_number), sig)
+    key = _bridge_cache_key(state_code, bridge_number, sig)
     if key in _BRIDGE_REPORTS_CACHE:
         return {'file_count': len(files), 'ready': True, 'indexing': False}
     disk = _load_bridge_cache(state_code, bridge_number, sig)
-    if disk is not None:
+    if disk is not None and not disk.get('needs_reembedding'):
         _BRIDGE_REPORTS_CACHE[key] = disk  # warm memory cache for the upcoming Ask
         return {'file_count': len(files), 'ready': True, 'indexing': False}
     return {'file_count': len(files), 'ready': False, 'indexing': True}
@@ -1066,7 +1144,6 @@ def _ingest_bridge_reports_impl(state_code, bridge_number, report_progress: bool
 
     When report_progress is True, stages are published via rag_engine's progress
     machinery (polled by the frontend through /api/vision-progress)."""
-    from .database import get_bridge_report_files
     from .rag_engine import (
         _split_page_chunks, _compute_embeddings, _resize_image_b64, _file_hash,
     )
@@ -1079,14 +1156,13 @@ def _ingest_bridge_reports_impl(state_code, bridge_number, report_progress: bool
             except Exception:
                 pass
 
-    files = [f for f in get_bridge_report_files(state_code, bridge_number)
-             if f.get('filepath') and os.path.exists(f['filepath'])]
+    files = _existing_report_files(state_code, bridge_number)
     if not files:
         _prog('Ready', 1, 1)
         return {'chunks': [], 'embeddings': None}
 
     sig = tuple(sorted((f['filepath'], int(os.path.getmtime(f['filepath']))) for f in files))
-    key = (str(state_code), str(bridge_number), sig)
+    key = _bridge_cache_key(state_code, bridge_number, sig)
     if key in _BRIDGE_REPORTS_CACHE:
         _prog('Ready', 1, 1)
         return _BRIDGE_REPORTS_CACHE[key]
@@ -1094,7 +1170,21 @@ def _ingest_bridge_reports_impl(state_code, bridge_number, report_progress: bool
     # Survives restarts: if a prior ingest for this exact file set is on disk, reuse it.
     disk = _load_bridge_cache(state_code, bridge_number, sig)
     if disk is not None:
-        _BRIDGE_REPORTS_CACHE[key] = disk
+        if disk.get('needs_reembedding'):
+            _prog('Updating report embeddings', 0, 1)
+            disk['embeddings'] = _compute_embeddings(disk.get('chunks') or [])
+            disk['embedding_profile'] = (
+                llm_providers.embedding_profile()
+                if disk.get('embeddings') is not None else None
+            )
+            disk['needs_reembedding'] = disk.get('embeddings') is None
+            # Replace the disk cache only after a complete, validated matrix was
+            # produced. On provider outage retain the old profile for rollback
+            # and serve this request via lexical retrieval.
+            if not disk['needs_reembedding']:
+                _save_bridge_cache(state_code, bridge_number, sig, disk)
+        if not disk.get('needs_reembedding'):
+            _BRIDGE_REPORTS_CACHE[key] = disk
         _prog('Ready', 1, 1)
         return disk
 
@@ -1159,7 +1249,9 @@ def _ingest_bridge_reports_impl(state_code, bridge_number, report_progress: bool
                            'caption': img.get('caption')})
 
     _prog('Embedding & building index', total - 1, total)
-    result = {'chunks': chunks, 'embeddings': _compute_embeddings(chunks) if chunks else None,
+    new_embeddings = _compute_embeddings(chunks) if chunks else None
+    result = {'chunks': chunks, 'embeddings': new_embeddings,
+              'embedding_profile': llm_providers.embedding_profile() if new_embeddings is not None else None,
               'image_count': n_images, 'page_images': all_page_images}
     _BRIDGE_REPORTS_CACHE[key] = result
     _save_bridge_cache(state_code, bridge_number, sig, result)
@@ -1169,7 +1261,7 @@ def _ingest_bridge_reports_impl(state_code, bridge_number, report_progress: bool
 
 def process_db_rag_with_files(
     question: str,
-    model: str = 'qwen3.6:latest',
+    model: str = '',
     state_code: Optional[int] = None,
     bridge_number: Optional[str] = None,
     strict_grounding: bool = False,
@@ -1267,7 +1359,7 @@ def process_db_rag_with_files(
     if files_context:
         combined += '\n\n' + ('=' * 40) + '\nINSPECTION REPORT EXCERPTS:\n' + files_context
 
-    answer = get_ollama_answer(
+    answer = get_cerebras_answer(
         build_prompt(combined, question, metadata=db_metadata, strict_grounding=strict_grounding,
                      output_format=output_format, target_fields=target_fields),
         model=model,
@@ -1276,7 +1368,7 @@ def process_db_rag_with_files(
     sources = (['Database'] if db_context else []) + [f"Report: {s}" for s in report_sources]
     return {
         'status': 'success', 'question': question, 'answer': answer, 'json_answer': parsed_json,
-        'source_chunks': sources or ['Database'], 'model_used': model,
+        'source_chunks': sources or ['Database'], 'model_used': llm_providers.generation_model(),
         'source': 'db+files' if files_context else 'database',
         'strict_grounding': strict_grounding, 'output_format': output_format,
         'reports_used': report_sources,
@@ -1287,7 +1379,7 @@ def process_db_rag_with_files(
 
 async def process_bridge_ask(
     question: str,
-    model: str = 'qwen3.6:latest',
+    model: str = '',
     state_code: Optional[int] = None,
     bridge_number: Optional[str] = None,
     strict_grounding: bool = False,
@@ -1383,7 +1475,7 @@ async def process_bridge_ask(
             'status': 'success', 'question': question, 'answer': answer,
             'json_answer': parsed,
             'source_chunks': sources or (reports_used or ['Database']),
-            'model_used': 'vision' if vision else model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': images or [],
             'reports_used': reports_used,
@@ -1529,7 +1621,7 @@ async def process_bridge_ask(
 
     # Run the (blocking, streaming) generation off the event loop so a parallel
     # /api/ask-cancel request can be served and actually stop it mid-generation.
-    answer = await asyncio.to_thread(get_ollama_answer, prompt, ANSWER_MODEL or model)
+    answer = await asyncio.to_thread(get_cerebras_answer, prompt, ANSWER_MODEL or model)
     return _resp(answer, images=answer_images, sources=sources or ['Database'])
 
 
@@ -1684,7 +1776,7 @@ async def process_bridge_visual_investigation(
     }
 
 
-async def process_bridge_ask_stream(question: str, model: str = 'qwen3.6:latest', state_code=None,
+async def process_bridge_ask_stream(question: str, model: str = '', state_code=None,
                                     bridge_number=None, strict_grounding: bool = False,
                                     output_format: str = 'text', target_fields: str = '',
                                     selected_sources=None, force_defect_segmentation: bool = False,
@@ -1719,7 +1811,7 @@ async def process_bridge_ask_stream(question: str, model: str = 'qwen3.6:latest'
 
 async def process_vision_query_only(
     question: str,
-    model: str = 'qwen3.6:latest',
+    model: str = '',
     strict_grounding: bool = False,
     output_format: str = 'text',
     target_fields: str = '',
@@ -1764,7 +1856,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': 'No page images were found for this document.',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1776,7 +1868,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': f'Page {requested_idx} is out of range. This document has {total} page{"s" if total != 1 else ""} (1–{total}).',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1788,7 +1880,7 @@ async def process_vision_query_only(
             'question': question,
             'answer': f'Here is page {requested_idx} of {total} from the document.',
             'source_chunks': [f'Page {requested_idx}'],
-            'model_used': model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': [img] if img else [],
             'cached': True,
@@ -1804,7 +1896,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': 'No photo number was detected in your question. Try e.g. "show photo 5".',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1818,7 +1910,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': f'Photo {photo_idx} was not found in extracted report images. Try "show page N" or re-ingest the document.',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1831,7 +1923,7 @@ async def process_vision_query_only(
             'question': question,
             'answer': f'Here is {label} from the report extraction.',
             'source_chunks': [label],
-            'model_used': model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': [img],
             'cached': True,
@@ -1847,7 +1939,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': 'No page images were found for this document.',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1858,7 +1950,7 @@ async def process_vision_query_only(
             'question': question,
             'answer': f'This document has {len(all_imgs)} page{"s" if len(all_imgs) != 1 else ""}.',
             'source_chunks': ['All pages'],
-            'model_used': model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': all_imgs,
             'cached': True,
@@ -1874,7 +1966,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': 'No extracted embedded images were found. Try "show all pages" to inspect scanned page visuals.',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1885,7 +1977,7 @@ async def process_vision_query_only(
             'question': question,
             'answer': f'Found {len(extracted_imgs)} extracted image{"s" if len(extracted_imgs) != 1 else ""} (photos/figures).',
             'source_chunks': ['Extracted images'],
-            'model_used': model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': extracted_imgs,
             'cached': True,
@@ -1904,7 +1996,7 @@ async def process_vision_query_only(
                 'question': question,
                 'answer': 'No matching image was found for that description. Try "show all images" to browse available figures.',
                 'source_chunks': [],
-                'model_used': model,
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'multimodal',
                 'images': [],
                 'cached': True,
@@ -1929,7 +2021,7 @@ async def process_vision_query_only(
             'question': question,
             'answer': f'Here is the best matching figure: {label}' if b64_img else 'Image file not found on disk.',
             'source_chunks': [label],
-            'model_used': model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': [b64_img] if b64_img else [],
             'cached': True,
@@ -1954,7 +2046,7 @@ async def process_vision_query_only(
     if retrieval.get('vision_used') or retrieval.get('kg_used'):
         answer = context
     else:
-        answer = get_ollama_answer(
+        answer = get_cerebras_answer(
             build_prompt(
                 context,
                 question,
@@ -1974,7 +2066,7 @@ async def process_vision_query_only(
         'answer': answer,
         'json_answer': parsed_json,
         'source_chunks': retrieval.get('sources', []),
-        'model_used': 'vision' if retrieval.get('vision_used') else model,
+        'model_used': llm_providers.generation_model(),
         'document_type': 'multimodal',
         'images': images,
         'cached': True,
@@ -1990,7 +2082,7 @@ async def process_vision_query_only(
 async def process_vision_rag(
     file: UploadFile,
     question: str,
-    model: str = 'qwen3.6:latest',
+    model: str = '',
     strict_grounding: bool = False,
     output_format: str = 'text',
     target_fields: str = '',
@@ -2034,7 +2126,7 @@ async def process_vision_rag(
         if retrieval.get('vision_used') or retrieval.get('kg_used'):
             answer = context
         else:
-            answer = get_ollama_answer(
+            answer = get_cerebras_answer(
                 build_prompt(
                     context,
                     question,
@@ -2054,7 +2146,7 @@ async def process_vision_rag(
             'answer': answer,
             'json_answer': parsed_json,
             'source_chunks': retrieval.get('sources', []),
-            'model_used': 'vision' if retrieval.get('vision_used') else model,
+            'model_used': llm_providers.generation_model(),
             'document_type': 'multimodal',
             'images': images,
             'cached': ingest_result.get('cached', False),
@@ -2099,7 +2191,7 @@ async def process_vision_rag(
                 'question': question,
                 'answer': answer,
                 'source_chunks': ['Image (visual analysis)'],
-                'model_used': 'vision',
+                'model_used': llm_providers.generation_model(),
                 'document_type': 'image',
                 'images': [],
             }
@@ -2123,7 +2215,7 @@ async def process_vision_rag(
         context = '\n\n---\n\n'.join(relevant)
 
     try:
-        answer = get_ollama_answer(
+        answer = get_cerebras_answer(
             build_prompt(
                 context,
                 question,
@@ -2133,9 +2225,9 @@ async def process_vision_rag(
             ),
             model=model,
         )
-        model_used = model
+        model_used = llm_providers.generation_model()
     except Exception as exc:
-        raise RuntimeError(f"Hosted AI is not available: {exc}. Check your network and provider API key (CEREBRAS_API_KEY / NVIDIA_API_KEY in .env).")
+        raise RuntimeError(f"Cerebras is not available: {exc}. Check the network and CEREBRAS_API_KEY.")
 
     parsed_json = _safe_json_from_model_output(answer) if output_format == 'json' else None
 

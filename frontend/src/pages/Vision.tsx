@@ -20,13 +20,10 @@ interface ChatMessage {
 }
 
 interface VisionProps {
-  selectedTextModel: string;
-  selectedVisionQueryModel: string;
-  availableModels: string[];
   onRagActiveChange?: (active: boolean) => void;
 }
 
-const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryModel, availableModels, onRagActiveChange }) => {
+const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
   const [sourceType, setSourceType] = useState<'document' | 'database'>('document');
   const [file, setFile] = useState<File | null>(null);
   const [fileIngested, setFileIngested] = useState(false);
@@ -65,8 +62,6 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
   const PERSIST_DOC_HASH_KEY = 'vision_indexed_doc_hash';
   const PERSIST_DOC_NAME_KEY = 'vision_indexed_doc_name';
   const PERSIST_CHAT_KEY = 'vision_chat_history';
-  const activeModel = sourceType === 'document' ? selectedVisionQueryModel : selectedTextModel;
-
   // Notify parent when Vision RAG processing starts/stops
   useEffect(() => {
     onRagActiveChange?.(loading);
@@ -351,7 +346,6 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
       try {
         const formData = new FormData();
         formData.append('question', q);
-        formData.append('model', selectedVisionQueryModel);
         formData.append('strict_grounding', String(strictGrounding));
         formData.append('output_format', outputFormat);
         formData.append('target_fields', targetFields);
@@ -425,7 +419,6 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
         const formData = new FormData();
         formData.append('file', file);
         formData.append('question', q);
-        formData.append('model', selectedVisionQueryModel);
         formData.append('strict_grounding', String(strictGrounding));
         formData.append('output_format', outputFormat);
         formData.append('target_fields', targetFields);
@@ -475,8 +468,8 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
           setStatusType('success');
           setStatusMessage(
             indexed
-              ? `Document processed with ${data.model_used || selectedVisionQueryModel} mode.`
-                : `Processed with ${data.model_used || selectedVisionQueryModel} mode (fallback path, not indexed). ${data.rag_error ? `Reason: ${data.rag_error}` : ''}`
+              ? `Document processed with ${data.model_used || 'Cerebras'} mode.`
+                : `Processed with ${data.model_used || 'Cerebras'} mode (fallback path, not indexed). ${data.rag_error ? `Reason: ${data.rag_error}` : ''}`
           );
           return true;
         }
@@ -597,7 +590,6 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
     try {
       const formData = new FormData();
       formData.append('question', q);
-      formData.append('model', selectedTextModel);
       formData.append('strict_grounding', String(strictGrounding));
       formData.append('output_format', outputFormat);
       formData.append('target_fields', targetFields);
@@ -621,7 +613,7 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
           data.json_answer,
         );
         setStatusType('success');
-        setStatusMessage(`Database query processed with ${data.model_used || selectedTextModel} mode.`);
+        setStatusMessage(`Database query processed with ${data.model_used || 'Cerebras'} mode.`);
       } else {
         addAssistantMessage(data.detail || 'Unexpected response from the backend.');
         setStatusType('error');
@@ -659,7 +651,6 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
         try {
           const formData = new FormData();
           formData.append('question', q);
-          formData.append('model', selectedTextModel);
           formData.append('strict_grounding', String(strictGrounding));
           formData.append('output_format', outputFormat);
           formData.append('target_fields', targetFields);
@@ -684,7 +675,7 @@ const Vision: React.FC<VisionProps> = ({ selectedTextModel, selectedVisionQueryM
       setQuestion(q);
       window.setTimeout(() => submitVisionQuery(), 0);
     }
-  }, [loading, sourceType, selectedTextModel, strictGrounding, outputFormat, targetFields, dbStateCode, dbBridgeNumber, submitVisionQuery]);
+  }, [loading, sourceType, strictGrounding, outputFormat, targetFields, dbStateCode, dbBridgeNumber, submitVisionQuery]);
 
   const removeIndexedDocument = async () => {
     setResettingIndex(true);

@@ -1,4 +1,23 @@
 services:
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9
+    command:
+      - --model-id
+      - nomic-ai/nomic-embed-text-v1.5
+      - --revision
+      - e9b6763023c676ca8431644204f50c2b100d9aab
+      - --dtype
+      - float32
+    volumes:
+      - /srv/bridgeguard/models:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    restart: unless-stopped
+
   app:
     build:
       context: ../..
@@ -13,11 +32,18 @@ services:
       BRIDGEGUARD_DATA_DIR: /data
       FRONTEND_DIST: /app/static
       PORT: "8000"
+      TEI_EMBED_BASE_URL: http://embeddings:80
+      TEI_EMBED_MODEL: nomic-ai/nomic-embed-text-v1.5
+      TEI_EMBED_REVISION: e9b6763023c676ca8431644204f50c2b100d9aab
+      TEI_EMBED_DIM: "768"
     volumes:
       - /srv/bridgeguard/data:/data
     restart: unless-stopped
     expose:
       - "8000"
+    depends_on:
+      embeddings:
+        condition: service_healthy
 
   cloudflared:
     image: cloudflare/cloudflared:latest

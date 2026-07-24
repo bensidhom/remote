@@ -24,6 +24,7 @@ import time
 import threading
 import numpy as np
 import re as _re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -135,13 +136,11 @@ def get_progress() -> dict:
 
 
 # ── Model / chunk settings (hosted-API build) ───────────────────────
-# Kept as module attributes because /api/rag-settings reads and writes them for
-# display. Embeddings ALWAYS run on the NVIDIA embed model (see
-# llm_providers.embed); the text/vision model names below are informational and
-# the active provider (cerebras/nvidia) is chosen per call at runtime.
-EMBED_MODEL = os.getenv('NVIDIA_EMBED_MODEL', 'nvidia/nv-embedqa-e5-v5')
-LLM_MODEL = os.getenv('NVIDIA_TEXT_MODEL') or os.getenv('NVIDIA_VLM_MODEL', 'qwen/qwen3.5-397b-a17b')
-VISION_MODEL = os.getenv('NVIDIA_VLM_MODEL', 'qwen/qwen3.5-397b-a17b')
+# Kept as module attributes because /api/rag-settings reads them for display.
+# Cerebras owns generation; the pinned TEI profile owns the vector space.
+EMBED_MODEL = llm_providers.embedding_profile()["model"]
+LLM_MODEL = llm_providers.generation_model()
+VISION_MODEL = llm_providers.generation_model()
 CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', '500'))
 CHUNK_OVERLAP = int(os.getenv('CHUNK_OVERLAP', '100'))
 LIGHTRAG_TIKTOKEN_MODEL = os.getenv('LIGHTRAG_TIKTOKEN_MODEL', 'gpt-4o-mini')
@@ -214,6 +213,41 @@ def _load_manifest() -> Dict[str, dict]:
     return {}
 
 
+def _active_embedding_profile() -> dict:
+    return dict(llm_providers.embedding_profile())
+
+
+def _validated_cached_matrix(value, rows: int, cached_profile) -> Optional[np.ndarray]:
+    """Return a cache matrix only when profile, rows, and width all match."""
+    if not llm_providers.embedding_profile_matches(cached_profile):
+        return None
+    if value is None:
+        return None
+    try:
+        matrix = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    expected_dim = _active_embedding_profile()["dimension"]
+    if matrix.ndim != 2 or matrix.shape != (rows, expected_dim):
+        return None
+    if not np.isfinite(matrix).all():
+        return None
+    return matrix
+
+
+def _entry_embeddings_compatible(entry: dict) -> bool:
+    profile = entry.get("embedding_profile")
+    chunks = entry.get("chunks") or []
+    descriptions = entry.get("image_descriptions") or []
+    text_ok = not chunks or _validated_cached_matrix(
+        entry.get("embeddings"), len(chunks), profile
+    ) is not None
+    images_ok = not descriptions or _validated_cached_matrix(
+        entry.get("image_embeddings"), len(descriptions), profile
+    ) is not None
+    return text_ok and images_ok
+
+
 def _save_manifest() -> None:
     _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     meta = {}
@@ -227,6 +261,7 @@ def _save_manifest() -> None:
             "extracted_images": v.get("extracted_images", []),
             "image_descriptions": v.get("image_descriptions", []),
             "kg_ready": v.get("kg_ready", False),
+            "embedding_profile": v.get("embedding_profile"),
             "embeddings": emb.tolist() if isinstance(emb, np.ndarray) else (emb if emb else None),
             "image_embeddings": img_emb.tolist() if isinstance(img_emb, np.ndarray) else (img_emb if img_emb else None),
         }
@@ -239,54 +274,6 @@ def _file_hash(file_path: str) -> str:
         for chunk in iter(lambda: f.read(1 << 16), b''):
             h.update(chunk)
     return h.hexdigest()
-
-
-# ── AI provider (hosted): delegate to llm_providers ─────────────────
-# The provider toggle ('cerebras' DEFAULT / 'nvidia') lives in llm_providers,
-# persisted under data/ (honors BRIDGEGUARD_DATA_DIR); BRIDGEGUARD_AI_PROVIDER
-# overrides it. There are NO local models to load/warm in this build.
-def get_ai_provider() -> str:
-    return llm_providers.get_provider()
-
-
-def set_ai_provider(provider: str) -> str:
-    """Validate + persist the provider choice. No warmer to start/stop — the
-    hosted providers hold nothing in local RAM/VRAM."""
-    return llm_providers.set_provider(provider)
-
-
-def nvidia_available() -> bool:
-    """Historically 'is the hosted NVIDIA API usable?'. Name kept for import
-    stability; now means: is the CURRENT provider usable (its API key set)?"""
-    prov = llm_providers.get_provider()
-    if prov == "nvidia":
-        return bool(os.getenv("NVIDIA_API_KEY", "").strip())
-    return bool(os.getenv("CEREBRAS_API_KEY", "").strip())
-
-
-def _nvidia_generate(prompt: str, images_b64: List[str] = None, timeout: int = 300,
-                     num_predict: int = 1024, system: str = None,
-                     temperature: float = 0.0, model: str = None) -> str:
-    """Text/vision generation, routed by the provider toggle. Name kept for
-    import stability (callers still say `_nvidia_generate`), but text follows
-    the active provider (cerebras/nvidia) and images go to whichever provider is
-    active — both are multimodal. A `system` prompt (rarely used) is folded into
-    the user prompt since the provider entry point takes a single prompt."""
-    full = f"{system}\n\n{prompt}" if system else prompt
-    return llm_providers.generate(full, images_b64=images_b64, timeout=timeout,
-                                  num_predict=num_predict, model=model,
-                                  temperature=temperature)
-
-
-def _nvidia_stream_tokens(prompt: str, images_b64: List[str] = None, timeout: int = 300,
-                          num_predict: int = 1024, system: str = None,
-                          temperature: float = 0.0, model: str = None):
-    """Streaming variant of _nvidia_generate, routed by the provider toggle.
-    Yields text chunks; closing the generator closes the underlying stream and
-    aborts the hosted generation — that is how a user "Stop" cancels a chat."""
-    full = f"{system}\n\n{prompt}" if system else prompt
-    yield from llm_providers.stream(full, images_b64=images_b64, timeout=timeout,
-                                    num_predict=num_predict, model=model)
 
 
 def _resize_image_b64(image_path: str, max_dim: int = 768) -> str:
@@ -324,8 +311,7 @@ def _resize_bytes_b64(data: bytes, max_dim: int = 768) -> str:
 
 
 def _query_page_image(image_path: str, question: str) -> str:
-    """Send a page image + question to the active provider's vision model
-    (cerebras or nvidia — both accept images; routed by the toggle)."""
+    """Send a page image and question to the configured Cerebras endpoint."""
     try:
         img_b64 = _resize_image_b64(image_path)
         return llm_providers.generate(question, images_b64=[img_b64], timeout=300, num_predict=1024)
@@ -577,9 +563,16 @@ def _render_pdf_pages(file_path: str, doc_hash: str, dpi: int = 150) -> List[str
 
 
 # ── LightRAG knowledge graph ────────────────────────────────────────
+_KG_EMBED_INPUT_TYPE = ContextVar("kg_embed_input_type", default="passage")
+
+
 async def _get_lightrag(doc_hash: str, model: str = None):
     llm = model or LLM_MODEL
-    key = f"{doc_hash[:16]}_{llm}"
+    embed_profile = _active_embedding_profile()
+    profile_token = hashlib.sha256(
+        json.dumps(embed_profile, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:10]
+    key = f"{doc_hash[:16]}_{llm}_{profile_token}"
     if key in _lightrag_cache:
         return _lightrag_cache[key]
 
@@ -587,27 +580,21 @@ async def _get_lightrag(doc_hash: str, model: str = None):
     from lightrag.llm.openai import openai_complete_if_cache
     from lightrag.utils import EmbeddingFunc
 
-    working_dir = str(Path(RAG_WORKING_DIR) / f"kg_{doc_hash[:16]}")
+    # Never open an arbitrary legacy vector store with a new dimension/model.
+    # A profile-specific directory makes model changes a safe fresh index.
+    working_dir = str(Path(RAG_WORKING_DIR) / f"kg_{doc_hash[:16]}_{profile_token}")
     Path(working_dir).mkdir(parents=True, exist_ok=True)
 
-    # KG EMBEDDINGS always use NVIDIA — Cerebras exposes no embeddings endpoint,
-    # and a vector store must keep ONE embedding model/dim (switching corrupts it).
-    _NV_BASE = "https://integrate.api.nvidia.com/v1"
-    _NV_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
-    _NV_LLM = os.getenv("NVIDIA_TEXT_MODEL") or os.getenv("NVIDIA_VLM_MODEL", "qwen/qwen3.5-397b-a17b")
-
-    # KG TEXT COMPLETION follows the provider toggle (Cerebras default, NVIDIA
-    # optional). Both are OpenAI-compatible, so LightRAG's openai binding drives
-    # either. Provider is read per call so a runtime switch takes effect, and
-    # switching is safe because only completion changes — embeddings stay NVIDIA.
+    # KG text completion uses Cerebras' OpenAI-compatible endpoint. Embeddings
+    # remain independent and are served by the pinned Nomic TEI sidecar.
     _CB_BASE = os.getenv("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1")
     _CB_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
-    _CB_LLM = os.getenv("CEREBRAS_MODEL", "gemma-4-31b")
+    _CB_LLM = llm_providers.generation_model()
 
     def _kg_backend():
-        if llm_providers.get_provider() == "cerebras" and _CB_KEY:
-            return _CB_BASE, _CB_KEY, _CB_LLM
-        return _NV_BASE, _NV_KEY, _NV_LLM
+        if not _CB_KEY:
+            raise RuntimeError("CEREBRAS_API_KEY is required for RAG completion")
+        return _CB_BASE, _CB_KEY, _CB_LLM
 
     async def _kg_complete(prompt, system_prompt=None, history_messages=None,
                            keyword_extraction=False, **kw):
@@ -617,13 +604,15 @@ async def _get_lightrag(doc_hash: str, model: str = None):
             history_messages=history_messages or [], base_url=base, api_key=key_,
             keyword_extraction=keyword_extraction, **kw)
 
-    async def _nvidia_kg_embed(texts):
-        # Route KG embeddings through the shared NVIDIA embed path (nv-embedqa-e5-v5,
-        # dim == EMBED_DIM). We deliberately do NOT use lightrag's nvidia_openai_embed
-        # here: it hard-codes a 2048-dim assertion for its own default model, which
-        # clashes with our 1024-dim model. Run the sync HTTP call off the loop.
+    async def _kg_embed(texts):
+        # LightRAG exposes one callback for inserts and lookups. A context-local
+        # role keeps concurrent calls from mixing Nomic passage/query prefixes.
         import asyncio as _aio
-        return await _aio.to_thread(llm_providers.embed, list(texts))
+        return await _aio.to_thread(
+            llm_providers.embed,
+            list(texts),
+            _KG_EMBED_INPUT_TYPE.get(),
+        )
 
     rag = LightRAG(
         working_dir=working_dir,
@@ -632,9 +621,9 @@ async def _get_lightrag(doc_hash: str, model: str = None):
         tiktoken_model_name=_resolve_tiktoken_model_name(),
         llm_model_max_async=1,
         embedding_func=EmbeddingFunc(
-            embedding_dim=llm_providers.EMBED_DIM,
+            embedding_dim=embed_profile["dimension"],
             max_token_size=8192,
-            func=_nvidia_kg_embed,
+            func=_kg_embed,
         ),
         embedding_batch_num=8,
         embedding_func_max_async=2,
@@ -651,7 +640,11 @@ async def _get_lightrag(doc_hash: str, model: str = None):
 async def _build_kg(doc_hash: str, full_text: str) -> bool:
     try:
         rag = await _get_lightrag(doc_hash)
-        await rag.ainsert(full_text)
+        token = _KG_EMBED_INPUT_TYPE.set("passage")
+        try:
+            await rag.ainsert(full_text)
+        finally:
+            _KG_EMBED_INPUT_TYPE.reset(token)
         return True
     except Exception as exc:
         import traceback
@@ -670,7 +663,11 @@ async def _query_kg(question: str, doc_hash: str, model: str = None) -> Optional
     from lightrag import QueryParam
     try:
         rag = await _get_lightrag(doc_hash, model=model)
-        result = await rag.aquery(question, param=QueryParam(mode="hybrid"))
+        token = _KG_EMBED_INPUT_TYPE.set("query")
+        try:
+            result = await rag.aquery(question, param=QueryParam(mode="hybrid"))
+        finally:
+            _KG_EMBED_INPUT_TYPE.reset(token)
         if result and result.strip():
             # LightRAG returns a "[no-context]" boilerplate when it cannot answer.
             # Treat these as a miss so the embedding fallback takes over.
@@ -938,11 +935,10 @@ def _split_page_chunks(pages: List[dict], chunk_size: int = None, overlap: int =
 
 
 # ── embedding helpers ────────────────────────────────────────────────
-def _embed(texts: List[str]) -> Optional[np.ndarray]:
-    """Embed via llm_providers.embed (ALWAYS NVIDIA). Returns None on failure so
-    _get_relevant falls back to token-overlap ranking."""
+def _embed(texts: List[str], input_type: str = "query") -> Optional[np.ndarray]:
+    """Embed in the active profile, returning None for safe lexical fallback."""
     try:
-        vecs = llm_providers.embed(texts)
+        vecs = llm_providers.embed(texts, input_type=input_type)
         if vecs is not None and len(vecs):
             return np.array(vecs, dtype=np.float32)
     except Exception as exc:
@@ -959,11 +955,23 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _get_relevant(question: str, chunks: List[dict], k: int = 8,
                   embeddings: Optional[np.ndarray] = None) -> List[dict]:
     if embeddings is not None and len(embeddings) == len(chunks):
-        q_emb = _embed([question])
-        if q_emb is not None:
+        try:
+            embeddings = np.asarray(embeddings, dtype=np.float32)
+        except (TypeError, ValueError):
+            embeddings = None
+    if embeddings is not None and len(embeddings) == len(chunks):
+        q_emb = _embed([question], input_type="query")
+        if (
+            q_emb is not None
+            and q_emb.ndim == 2
+            and embeddings.ndim == 2
+            and q_emb.shape[1] == embeddings.shape[1]
+        ):
             sims = _cosine_similarity(q_emb[0], embeddings)
             top_idx = np.argsort(sims)[::-1][:k]
             return [chunks[i] for i in top_idx]
+        if q_emb is not None:
+            print("[rag_engine] Cached embedding width is incompatible; using lexical retrieval")
     qtokens = set(tok.lower() for tok in question.split() if tok.isalnum())
     scored = sorted(
         chunks,
@@ -981,7 +989,7 @@ def _compute_embeddings(chunks: List[dict]) -> Optional[np.ndarray]:
     batch_size = 16
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        emb = _embed(batch)
+        emb = _embed(batch, input_type="passage")
         if emb is None:
             print(f"[rag_engine] Embedding batch {i // batch_size} failed")
             return None
@@ -1189,16 +1197,17 @@ def get_relevant_extracted_images(question: str, doc_hash: str = None, k: int = 
             return page_images[:k]
 
     # Use embedding similarity on image descriptions
-    img_emb = entry.get("image_embeddings")
+    img_emb = _validated_cached_matrix(
+        entry.get("image_embeddings"),
+        len(descriptions),
+        entry.get("embedding_profile"),
+    )
     if img_emb is not None and descriptions:
-        if isinstance(img_emb, list):
-            img_emb = np.array(img_emb, dtype=np.float32)
-        if len(img_emb) == len(descriptions):
-            q_emb = _embed([question])
-            if q_emb is not None:
-                sims = _cosine_similarity(q_emb[0], img_emb)
-                top_idx = np.argsort(sims)[::-1][:k]
-                return [images[i] for i in top_idx if i < len(images)]
+        q_emb = _embed([question], input_type="query")
+        if q_emb is not None and q_emb.shape[1] == img_emb.shape[1]:
+            sims = _cosine_similarity(q_emb[0], img_emb)
+            top_idx = np.argsort(sims)[::-1][:k]
+            return [images[i] for i in top_idx if i < len(images)]
 
     # Fallback: return first k images
     return images[:k]
@@ -1392,6 +1401,43 @@ def get_extracted_image_count(doc_hash: str = None) -> int:
     return len(entry.get("extracted_images", [])) if entry else 0
 
 
+async def _reindex_cached_entry(doc_hash: str, entry: dict) -> bool:
+    """Reuse parsed content but never vectors from an unknown/different profile."""
+    chunks = entry.get("chunks") or []
+    descriptions = entry.get("image_descriptions") or []
+    entry["kg_ready"] = False
+
+    text_embeddings = _compute_embeddings(chunks) if chunks else None
+    image_embeddings = _compute_embeddings(
+        [{"page": 0, "text": text} for text in descriptions]
+    ) if descriptions else None
+    complete = (
+        (not chunks or text_embeddings is not None)
+        and (not descriptions or image_embeddings is not None)
+    )
+    if complete:
+        entry["embeddings"] = text_embeddings
+        entry["image_embeddings"] = image_embeddings
+        entry["embedding_profile"] = _active_embedding_profile()
+
+    text_pages = [
+        page for page in (entry.get("pages") or [])
+        if not str(page.get("text") or "").startswith("[Page")
+    ]
+    full_text = "\n\n".join(
+        f"=== Page {page.get('page')} ===\n{page.get('text') or ''}"
+        for page in text_pages
+    )
+    if complete and full_text.strip():
+        entry["kg_ready"] = await _build_kg(doc_hash, full_text)
+    # Commit the new profile atomically only after both vector matrices passed
+    # validation. If the provider is unavailable, the old on-disk profile stays
+    # intact for rollback while strict query guards use lexical fallback.
+    if complete:
+        _save_manifest()
+    return complete
+
+
 # ── public API ──────────────────────────────────────────────────────
 async def ingest_document(file_path: str) -> dict:
     """
@@ -1415,18 +1461,40 @@ async def ingest_document(file_path: str) -> dict:
     if doc_hash in _ingested:
         entry = _ingested[doc_hash]
         if entry.get("pages"):
-            emb = entry.get("embeddings")
-            if isinstance(emb, list):
-                entry["embeddings"] = np.array(emb, dtype=np.float32)
-            img_emb = entry.get("image_embeddings")
-            if isinstance(img_emb, list):
-                entry["image_embeddings"] = np.array(img_emb, dtype=np.float32)
+            reindexed = False
+            reindex_attempted = False
+            if _entry_embeddings_compatible(entry):
+                entry["embeddings"] = _validated_cached_matrix(
+                    entry.get("embeddings"),
+                    len(entry.get("chunks") or []),
+                    entry.get("embedding_profile"),
+                )
+                entry["image_embeddings"] = _validated_cached_matrix(
+                    entry.get("image_embeddings"),
+                    len(entry.get("image_descriptions") or []),
+                    entry.get("embedding_profile"),
+                )
+            else:
+                reindex_attempted = True
+                print(
+                    f"[rag_engine] Cached vectors for {fname} have no compatible "
+                    "embedding profile; re-indexing parsed content"
+                )
+                reindexed = await _reindex_cached_entry(doc_hash, entry)
             _active_session_hash = doc_hash  # mark as active even on cache hit
-            print(f"[rag_engine] Cache hit for {fname} - skipping")
+            print(f"[rag_engine] Cache hit for {fname} - parsed content reused")
             return {
                 "status": "success",
                 "cached": True,
-                "message": f"Document already processed: {fname}",
+                "reindexed": reindexed,
+                "reindex_attempted": reindex_attempted,
+                "message": (
+                    f"Document vectors refreshed: {fname}"
+                    if reindexed else (
+                        f"Parsed document reused; embeddings unavailable: {fname}"
+                        if reindex_attempted else f"Document already processed: {fname}"
+                    )
+                ),
                 "pages_found": len(entry.get("page_images", [])),
                 "images_found": len(entry.get("extracted_images", [])),
             }
@@ -1561,6 +1629,14 @@ async def ingest_document(file_path: str) -> dict:
         "kg_ready": kg_ok,
         "embeddings": emb,
         "image_embeddings": image_embeddings,
+        "embedding_profile": (
+            _active_embedding_profile()
+            if (
+                (not chunks or emb is not None)
+                and (not image_descriptions or image_embeddings is not None)
+            )
+            else None
+        ),
     }
     _ingested[doc_hash] = parsed
     _active_session_hash = doc_hash
@@ -1745,10 +1821,12 @@ async def query_document(
             }
 
     # ── Embedding fallback ──
-    emb = entry.get("embeddings")
-    if emb is not None and isinstance(emb, list):
-        emb = np.array(emb, dtype=np.float32)
-        entry["embeddings"] = emb
+    emb = _validated_cached_matrix(
+        entry.get("embeddings"),
+        len(chunks),
+        entry.get("embedding_profile"),
+    )
+    entry["embeddings"] = emb
 
     relevant = _get_relevant(question, chunks, embeddings=emb)
     if _is_broad_question(question):

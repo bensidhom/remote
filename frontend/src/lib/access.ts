@@ -7,6 +7,16 @@ export interface AuthUser {
   role: UserRole;
 }
 
+export interface AuthConfig {
+  mode: 'password' | 'cloudflare' | 'disabled';
+}
+
+/** Read the server's authentication mode without exposing any auth secrets. */
+export async function getAuthConfig(): Promise<AuthConfig> {
+  const response = await axios.get<AuthConfig>('/api/auth/config');
+  return response.data;
+}
+
 /** Restore the HttpOnly server session, if one exists. */
 export async function getCurrentUser(): Promise<AuthUser | null> {
   try {

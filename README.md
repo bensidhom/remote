@@ -12,9 +12,11 @@ inspection web application. In one app it provides:
 - **Bridgette** — a natural-language → SQL chat assistant over the bridge DB.
 - **Document & image Q&A** over uploaded inspection reports, backed by LightRAG.
 
-All AI features are powered by **hosted LLM APIs — there is no local model
-inference** (no Ollama, torch, point-cloud, or photogrammetry code paths). This
-makes the app deployable on a single modest AWS server.
+Text and vision generation use the configured **Cerebras** endpoint. Embeddings
+use a private Hugging Face Text Embeddings Inference (TEI) sidecar running the
+exact pinned `nomic-ai/nomic-embed-text-v1.5` revision at 768 dimensions—no
+Ollama or NVIDIA API is required. Point-cloud cleaning and segmentation use
+bounded CPU geometry plus Cerebras vision judgment.
 
 ---
 
@@ -40,31 +42,64 @@ found the API still runs (SPA serving is simply skipped).
 
 ---
 
-## LLM provider model
+## AI and embedding model
 
-Two hosted, multimodal providers are switchable **at runtime** (Settings dialog,
-or `POST /api/ai-provider`) and via the `BRIDGEGUARD_AI_PROVIDER` env var:
+Generation and embedding are deliberately separate:
 
 | Role                         | Provider |
 |------------------------------|----------|
-| **Default** text **and** image (multimodal) chat | **Cerebras** (`gemma-4-31b`) |
-| Alternative text and image   | **NVIDIA / Qwen** VLM (`qwen/qwen3.5-397b-a17b`) |
-| RAG knowledge-graph **completion** | **Follows the toggle** (Cerebras or NVIDIA) |
-| RAG document **embeddings**  | **Always NVIDIA** (`nvidia/nv-embedqa-e5-v5`, dim 1024) |
+| Text, Bridgette, RAG completion, and image/point-cloud judgment | **Cerebras** (`CEREBRAS_MODEL`) |
+| Document and query embeddings | **Nomic v1.5 via TEI**, revision `e9b6763023c676ca8431644204f50c2b100d9aab`, normalized 768-D |
 
-Everything that generates text — chat, Bridgette NL→SQL, image Q&A, and the RAG
-answer/entity-extraction — follows the selected provider. **Embeddings are the one
-exception: they always use NVIDIA**, because Cerebras exposes no embeddings
-endpoint and "no local inference" rules out a local embedding model. A vector
-store is also dim-locked, so the embedding model must stay fixed. Net effect:
-NVIDIA is required for document Q&A (embeddings) even when Cerebras is the selected
-chat provider. Set both `CEREBRAS_API_KEY` and `NVIDIA_API_KEY` for full
-functionality. Keys are read from environment variables (recommended in
-production) or from `backend/.env` for local development.
+### Embedding profiles and migrations
 
-Relevant endpoints:
-- `GET /api/ai-provider` → `{ provider, cerebras_key_set, nvidia_key_set, message }`
-- `POST /api/ai-provider` with `{ "provider": "cerebras" | "nvidia" }`
+The supplied Compose files start TEI internally:
+
+```env
+TEI_EMBED_BASE_URL=http://embeddings:80
+TEI_EMBED_MODEL=nomic-ai/nomic-embed-text-v1.5
+TEI_EMBED_REVISION=e9b6763023c676ca8431644204f50c2b100d9aab
+TEI_EMBED_DIM=768
+```
+
+Nomic uses `search_document:` for indexed passages and `search_query:` for
+questions. Those prefixes, normalization, revision, and dimension are part of
+the persisted embedding profile. Existing PDFs, parsed chunks, image
+descriptions, page renders, and point-cloud analyses are reusable. Existing
+Ollama/GGUF or other-provider vector matrices are not: the server removes those
+vectors and re-embeds the preserved chunks once with TEI. Startup performs that
+re-index sequentially in the background by default
+(`BRIDGEGUARD_REINDEX_STALE_REPORTS=1`).
+
+To merge a desktop data directory without replacing the server database:
+
+```bash
+python backend/scripts/migrate_local_artifacts.py /path/to/local/data backend/data
+```
+
+`GET /api/ai-provider` remains as a read-only compatibility/status endpoint.
+
+---
+
+## Point-cloud processing
+
+The server point-cloud path is deliberately narrower than the desktop GPU
+runtime. NumPy/SciPy geometry removes outliers, segments structural regions,
+fits bridge surfaces, and computes clearance. Rendered candidate regions are
+sent to Cerebras for scene judgment and component naming. Local vision-model
+inference, Open3D, and photogrammetry are not required by the server deployment.
+
+Run one point-cloud job at a time. A single Gunicorn worker does not by itself
+prevent overlapping `asyncio.to_thread` jobs, and large scans can outlive normal
+reverse-proxy request timeouts. Use a bounded background-job queue/status
+endpoint before enabling concurrent users. On ARM64, prefer converting E57
+files locally to validated NPZ (`points`, optional `colors`) because `pye57`
+does not currently publish Linux ARM64 wheels; direct E57 support otherwise
+needs a tested source-build toolchain.
+
+For embedding plus single-job point-cloud processing, plan for 4–8 vCPUs,
+16–32 GB RAM, and at least 100 GB of persistent disk. Embedding alone remains
+comfortable on the smaller 2-OCPU/12-GB deployment.
 
 ---
 
@@ -80,8 +115,14 @@ python -m venv .venv
 pip install -r requirements.txt
 
 cp .env.example .env          # then edit .env and add your API keys
-uvicorn app.main:app --reload --port 8000
+docker compose up -d embeddings
+# For a host-run backend, override the Compose-internal TEI hostname:
+TEI_EMBED_BASE_URL=http://127.0.0.1:8080 uvicorn app.main:app --reload --port 8000
 ```
+
+In PowerShell, set `$env:TEI_EMBED_BASE_URL='http://127.0.0.1:8080'` before the
+`uvicorn` command. The root development Compose binds TEI only to loopback; the
+OCI production Compose keeps it private to the Docker network.
 
 The API is now on `http://127.0.0.1:8000` (health check at `/health`).
 
@@ -118,14 +159,42 @@ the API and the UI:
 Each script runs `npm ci && npm run build` in `frontend/`, then copies
 `frontend/dist/*` into `backend/static/`.
 
+The Docker image performs the frontend build in its own build stage, so do not
+commit `frontend/dist` or `backend/static`. Before deployment, GitHub Actions
+runs the frontend production build, backend tests, and a complete production
+container build. The OCI deployment workflow is manual and uses the protected
+`production` GitHub Environment.
+
+Configure these GitHub Environment secrets before running it:
+
+```text
+OCI_HOST
+OCI_KNOWN_HOSTS
+OCI_USER
+OCI_SSH_KEY
+```
+
+The server keeps API keys and Cloudflare settings in
+`/etc/bridgeguard/*.env`; they are never copied into GitHub.
+
 ## Authentication and roles
 
-Authentication is enforced by FastAPI, not by the React bundle. Configure a
-long shared deployment password, a random session-signing secret, and the
-viewer/editor/admin email lists in `backend/.env` (see `.env.example`). Sessions
-use signed, HttpOnly, SameSite cookies. Database administration is restricted to
-the server-issued `admin` role; browser-stored passwords and admin PINs are not
-used.
+The public landing is served at `/`; it contains the BridgeGuard logo and a
+single link to the protected workspace at `/app`. The landing does not request
+bridge data. Authentication is enforced by FastAPI on every `/api/*` request,
+not by the React bundle.
+
+For the recommended Cloudflare deployment, protect `/app`, `/app/*`, and
+`/api/*` in one self-hosted Access application while leaving `/` public. Set
+`BRIDGEGUARD_AUTH_MODE=cloudflare`, configure the Access team domain and AUD,
+and set `BRIDGEGUARD_OWNER_EMAIL` to the owner's actual email. The five approved
+editor accounts are listed in `backend/.env.example`. Keep the viewer email and
+domain allowlists empty to prevent additional accounts from entering.
+Cloudflare supplies the login/SSO experience; the in-app email/password form is
+only for optional `password` mode.
+
+Database administration is restricted to the server-issued `admin` role;
+browser-stored passwords and admin PINs are not used.
 
 For local development only, `BRIDGEGUARD_AUTH_DISABLED=1` creates an implicit
 local admin session. Never set it in a deployed environment.
@@ -160,7 +229,7 @@ external services.
    web: gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:${PORT:-8000} --timeout 300 --workers 1
    ```
 4. Set env properties in the EB console (Configuration → Software): at minimum
-   `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`, and `BRIDGEGUARD_AI_PROVIDER`. Set
+   `CEREBRAS_API_KEY` and the reachable `TEI_EMBED_BASE_URL`. Set
    `BRIDGEGUARD_DATA_DIR` to a writable path if the app root is read-only.
    A commented starter lives in `backend/.ebextensions/01_env.config`.
 

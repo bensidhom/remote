@@ -42,6 +42,13 @@ def _load_dotenv_early() -> None:
 
 _load_dotenv_early()
 
+# Point-cloud storage/size settings are read while its router imports, so load
+# backend/.env first just like the other environment-backed services below.
+try:
+    from .routers.point_cloud_api import router as point_cloud_router
+except ImportError:
+    from routers.point_cloud_api import router as point_cloud_router
+
 # Import services
 try:
     from .routers.services.utils import resource_path, init_db_if_needed
@@ -232,6 +239,72 @@ def select_backend_host_port() -> tuple[str, int]:
 
 from contextlib import asynccontextmanager
 
+
+def _start_stale_report_reindex() -> None:
+    """Re-embed migrated report chunks after TEI becomes ready.
+
+    This runs in one daemon thread and reuses compatible parsed caches, so the
+    desktop-to-server migration does not repeat PDF/image extraction.
+    """
+    if os.getenv("BRIDGEGUARD_REINDEX_STALE_REPORTS", "1").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        return
+
+    import threading
+    import time
+
+    def worker():
+        try:
+            try:
+                from .routers.services import llm_providers as providers
+                from .routers.services.vision import (
+                    bridge_reports_index_status,
+                    ingest_bridge_reports,
+                )
+            except ImportError:
+                from routers.services import llm_providers as providers
+                from routers.services.vision import (
+                    bridge_reports_index_status,
+                    ingest_bridge_reports,
+                )
+
+            for attempt in range(30):
+                try:
+                    providers.verify_embedding_backend(timeout=10)
+                    break
+                except Exception as exc:
+                    if attempt == 29:
+                        print(f"[reindex] TEI unavailable; stale report indexes remain pending: {exc}")
+                        return
+                    time.sleep(10)
+
+            with sqlite3.connect(f"file:{Path(USER_DB).resolve().as_posix()}?mode=ro", uri=True) as conn:
+                bridges = conn.execute(
+                    """
+                    SELECT DISTINCT state_code, bridge_number
+                    FROM bridge_attachments
+                    WHERE attachment_type='inspection_report'
+                    ORDER BY state_code, bridge_number
+                    """
+                ).fetchall()
+            updated = 0
+            for state_code, bridge_number in bridges:
+                try:
+                    status = bridge_reports_index_status(state_code, bridge_number)
+                    if status.get("file_count") and not status.get("ready"):
+                        result = ingest_bridge_reports(state_code, bridge_number)
+                        if result.get("embeddings") is not None:
+                            updated += 1
+                except Exception as exc:
+                    print(f"[reindex] {state_code}/{bridge_number} failed: {exc}")
+            print(f"[reindex] pinned Nomic report indexes ready; rebuilt {updated} cache(s).")
+        except Exception as exc:
+            print(f"[reindex] background migration failed: {exc}")
+
+    threading.Thread(target=worker, name="report-reindex", daemon=True).start()
+
+
 # Custom JSON encoder to handle NaN, Inf, etc.
 class SafeEncoder(json.JSONEncoder):
     def encode(self, obj):
@@ -246,19 +319,20 @@ class SafeEncoder(json.JSONEncoder):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize the databases. This service uses HOSTED LLM APIs
-    # (Cerebras / NVIDIA) for every AI feature — no local models are loaded,
-    # warmed, or kept resident in RAM/VRAM.
+    # Startup: initialize the databases. Generation is hosted by Cerebras;
+    # embeddings are served by the pinned Nomic TEI sidecar.
     init_db(USER_DB)
     _init_attachments_db()
     print("Database initialized")
-    print("[startup] BridgeGuard API ready — AI features use hosted LLM APIs (no local inference).")
+    print("[startup] BridgeGuard API ready — Cerebras generation + pinned Nomic TEI embeddings.")
+    _start_stale_report_reindex()
     yield
-    # Shutdown: nothing to release (no local model runners are started).
+    # Shutdown: the separately managed TEI sidecar owns the embedding model.
 
 
 app = FastAPI(title="SNBI Bridge API", version="1.0.0", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(point_cloud_router)
 
 # CORS. In the single-server deployment the SPA is served same-origin so CORS is
 # not strictly required, but keep it configurable for split (separate-host)
@@ -365,6 +439,19 @@ def _init_attachments_db():
     conn.close()
 
 
+def _portable_attachment_path(filepath: str) -> str:
+    """Store paths relative to the persistent data root when possible."""
+    try:
+        return Path(filepath).resolve().relative_to(Path(USER_DB).parent.resolve()).as_posix()
+    except (TypeError, ValueError):
+        return str(filepath)
+
+
+def _resolve_attachment_path(filepath: str) -> Path:
+    path = Path(str(filepath))
+    return path if path.is_absolute() else Path(USER_DB).parent / path
+
+
 @app.post("/api/bridges/{state_code}/{bridge_number}/reports")
 async def upload_bridge_report(state_code: str, bridge_number: str, file: UploadFile = File(...)):
     """Attach an inspection report file to a specific bridge."""
@@ -390,7 +477,8 @@ async def upload_bridge_report(state_code: str, bridge_number: str, file: Upload
     conn = sqlite3.connect(USER_DB)
     c = conn.cursor()
     c.execute("INSERT INTO bridge_attachments (state_code, bridge_number, attachment_type, filename, filepath, size_bytes) VALUES (?,?,?,?,?,?)",
-              (state_code, bridge_number, 'inspection_report', file.filename, filepath, len(content)))
+              (state_code, bridge_number, 'inspection_report', file.filename,
+               _portable_attachment_path(filepath), len(content)))
     report_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -479,9 +567,10 @@ def download_bridge_report(state_code: str, bridge_number: str, report_id: int):
               (report_id, state_code, bridge_number))
     row = c.fetchone()
     conn.close()
-    if not row or not os.path.exists(row[0]):
+    resolved = _resolve_attachment_path(row[0]) if row else None
+    if not row or resolved is None or not resolved.exists():
         raise HTTPException(status_code=404, detail="Report not found")
-    return FileResponse(row[0], filename=row[1], media_type="application/octet-stream")
+    return FileResponse(resolved, filename=row[1], media_type="application/octet-stream")
 
 
 @app.delete("/api/bridges/{state_code}/{bridge_number}/reports/{report_id}")
@@ -492,8 +581,9 @@ def delete_bridge_report(state_code: str, bridge_number: str, report_id: int):
     c.execute("SELECT filepath FROM bridge_attachments WHERE id=? AND state_code=? AND bridge_number=? AND attachment_type='inspection_report'",
               (report_id, state_code, bridge_number))
     row = c.fetchone()
-    if row and os.path.exists(row[0]):
-        os.remove(row[0])
+    resolved = _resolve_attachment_path(row[0]) if row else None
+    if resolved is not None and resolved.exists():
+        resolved.unlink()
     c.execute("DELETE FROM bridge_attachments WHERE id=? AND state_code=? AND bridge_number=? AND attachment_type='inspection_report'",
               (report_id, state_code, bridge_number))
     conn.commit()
@@ -863,7 +953,7 @@ async def apply_inspection_reports(payload: dict):
 async def vision_rag(
     file: UploadFile = File(...),
     question: str = Form(...),
-    model: str = Form('qwen3.6:latest'),
+    model: str = Form(''),
     strict_grounding: bool = Form(False),
     output_format: str = Form('text'),
     target_fields: str = Form(''),
@@ -894,7 +984,7 @@ async def vision_rag(
 @app.post("/api/vision-query")
 async def vision_query(
     question: str = Form(...),
-    model: str = Form('qwen3.6:latest'),
+    model: str = Form(''),
     strict_grounding: bool = Form(False),
     output_format: str = Form('text'),
     target_fields: str = Form(''),
@@ -924,7 +1014,7 @@ async def vision_query(
 @app.post("/api/db-rag")
 async def db_rag(
     question: str = Form(...),
-    model: str = Form('qwen3.6:latest'),
+    model: str = Form(''),
     state_code: int = Form(None),
     bridge_number: str = Form(None),
     strict_grounding: bool = Form(False),
@@ -1050,65 +1140,27 @@ def vision_index_status(doc_hash: str = ''):
         return JSONResponse(status_code=500, content={'status': 'error', 'detail': str(e)})
 
 
-# ====================== AI PROVIDER (cerebras vs nvidia) ======================
-def _ai_provider_message(provider: str, cerebras_key_set: bool, nvidia_key_set: bool) -> str:
-    """Human-readable status for the active provider, warning when its key is unset."""
-    if provider == 'cerebras':
-        msg = 'Cerebras serves all text and image (multimodal) AI features.'
-        if not cerebras_key_set:
-            msg += (' WARNING: CEREBRAS_API_KEY is not set; AI features will fail'
-                    ' until it is set (add it to backend/.env).')
-    else:
-        msg = 'NVIDIA (Qwen VLM) serves all text and image AI features.'
-        if not nvidia_key_set:
-            msg += (' WARNING: NVIDIA_API_KEY is not set; AI features will fail'
-                    ' until it is set (add it to backend/.env).')
-    if not nvidia_key_set:
-        msg += ' Note: RAG document embeddings always use NVIDIA — set NVIDIA_API_KEY for document Q&A.'
-    return msg
-
-
+# ====================== FIXED AI PROVIDER STATUS ======================
 @app.get('/api/ai-provider')
 def get_ai_provider_setting():
-    """Current hosted LLM provider: 'cerebras' (default — text + multimodal) or
-    'nvidia' (Qwen VLM). RAG embeddings always use NVIDIA regardless of choice."""
+    """Compatibility status endpoint for the fixed Cerebras + TEI deployment."""
     try:
-        from routers.services import rag_engine
+        from routers.services import llm_providers
     except ImportError:
-        from .routers.services import rag_engine
-    provider = rag_engine.get_ai_provider()
+        from .routers.services import llm_providers
     cerebras_key_set = bool(os.getenv('CEREBRAS_API_KEY', '').strip())
-    nvidia_key_set = bool(os.getenv('NVIDIA_API_KEY', '').strip())
+    embedding = llm_providers.embedding_profile()
+    message = 'Cerebras serves text and vision; pinned Nomic TEI serves 768-D embeddings.'
+    if not cerebras_key_set:
+        message += ' WARNING: CEREBRAS_API_KEY is not set.'
     return {
-        'provider': provider,
+        'provider': 'cerebras',
         'cerebras_key_set': cerebras_key_set,
-        'nvidia_key_set': nvidia_key_set,
-        'message': _ai_provider_message(provider, cerebras_key_set, nvidia_key_set),
-    }
-
-
-@app.post('/api/ai-provider')
-def set_ai_provider_setting(body: dict):
-    """Switch the hosted LLM provider. Body: {'provider': 'cerebras'|'nvidia'}."""
-    try:
-        from routers.services import rag_engine
-    except ImportError:
-        from .routers.services import rag_engine
-    requested = str(body.get('provider', '')).strip().lower()
-    if requested not in ('cerebras', 'nvidia'):
-        raise HTTPException(status_code=400, detail="provider must be 'cerebras' or 'nvidia'")
-    try:
-        provider = rag_engine.set_ai_provider(requested)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    cerebras_key_set = bool(os.getenv('CEREBRAS_API_KEY', '').strip())
-    nvidia_key_set = bool(os.getenv('NVIDIA_API_KEY', '').strip())
-    return {
-        'status': 'success',
-        'provider': provider,
-        'cerebras_key_set': cerebras_key_set,
-        'nvidia_key_set': nvidia_key_set,
-        'message': _ai_provider_message(provider, cerebras_key_set, nvidia_key_set),
+        'embedding_provider': embedding['provider'],
+        'embedding_model': embedding['model'],
+        'embedding_revision': embedding['revision'],
+        'embedding_dimension': embedding['dimension'],
+        'message': message,
     }
 
 
@@ -1130,11 +1182,16 @@ def get_api_usage():
 def get_rag_settings():
     """Return the current RAG pipeline settings."""
     try:
-        from routers.services import rag_engine
+        from routers.services import llm_providers, rag_engine
     except ImportError:
-        from .routers.services import rag_engine
+        from .routers.services import llm_providers, rag_engine
+    embedding = llm_providers.embedding_profile()
     return {
-        'embed_model': rag_engine.EMBED_MODEL,
+        'embedding_provider': embedding['provider'],
+        'embed_model': embedding['model'],
+        'embed_dim': embedding['dimension'],
+        'embed_revision': embedding['revision'],
+        'embed_input_policy': embedding['input_policy'],
         'vision_model': rag_engine.VISION_MODEL,
         'llm_model': rag_engine.LLM_MODEL,
         'chunk_size': getattr(rag_engine, 'CHUNK_SIZE', 500),
@@ -1144,17 +1201,16 @@ def get_rag_settings():
 
 @app.post('/api/rag-settings')
 def update_rag_settings(body: dict):
-    """Update RAG pipeline settings at runtime."""
+    """Update runtime-safe RAG settings.
+
+    The embedding profile is restart-scoped because changing it requires a new
+    vector namespace and re-index. Ignore the legacy ``embed_model`` field
+    rather than letting the UI claim that an unsafe hot switch succeeded.
+    """
     try:
         from routers.services import rag_engine
     except ImportError:
         from .routers.services import rag_engine
-    if 'embed_model' in body:
-        rag_engine.EMBED_MODEL = body['embed_model']
-    if 'vision_model' in body:
-        rag_engine.VISION_MODEL = body['vision_model']
-    if 'llm_model' in body:
-        rag_engine.LLM_MODEL = body['llm_model']
     if 'chunk_size' in body:
         rag_engine.CHUNK_SIZE = max(100, int(body['chunk_size']))
     if 'chunk_overlap' in body:
@@ -1507,7 +1563,7 @@ def remove_custom_table(table_id: int):
 
 
 @app.post("/api/bridgette")
-def bridgette(question: str = Form(...), model: str = Form('qwen3.6:latest')):
+def bridgette(question: str = Form(...), model: str = Form('')):
     """Bridgette — natural-language question over the NJ bridge DB (text-to-SQL).
 
     Sync `def` on purpose: FastAPI runs it in the threadpool so the event loop
@@ -1526,7 +1582,7 @@ def bridgette(question: str = Form(...), model: str = Form('qwen3.6:latest')):
 
 
 @app.post("/api/bridgette/stream")
-def bridgette_stream(question: str = Form(...), model: str = Form('qwen3.6:latest')):
+def bridgette_stream(question: str = Form(...), model: str = Form('')):
     """Streamed Bridgette: emits newline-delimited JSON events (meta → tokens →
     done) so the UI renders the answer as it generates. Sync `def` → runs in the
     threadpool, keeping the loop free for /api/ask-cancel."""
@@ -1548,7 +1604,7 @@ def bridgette_stream(question: str = Form(...), model: str = Form('qwen3.6:lates
 @app.post("/api/db-rag/stream")
 async def db_rag_stream(
     question: str = Form(...),
-    model: str = Form('qwen3.6:latest'),
+    model: str = Form(''),
     state_code: int = Form(None),
     bridge_number: str = Form(None),
     strict_grounding: bool = Form(False),
@@ -1889,14 +1945,27 @@ def health():
 
 @app.get("/ready")
 def ready():
-    """Readiness probe: persistent storage and the primary SQLite DB are usable."""
-    checks: Dict[str, bool] = {"data_directory": False, "database": False}
+    """Readiness probe: storage, database, and pinned TEI backend are usable."""
+    checks: Dict[str, bool] = {
+        "data_directory": False,
+        "database": False,
+        "embeddings": False,
+    }
     try:
         data_dir = Path(USER_DB).parent
         checks["data_directory"] = data_dir.is_dir() and os.access(data_dir, os.W_OK)
         with sqlite3.connect(f"file:{USER_DB}?mode=ro", uri=True, timeout=2) as conn:
             conn.execute("SELECT 1").fetchone()
         checks["database"] = True
+    except Exception:
+        pass
+    try:
+        try:
+            from routers.services import llm_providers as _providers
+        except ImportError:
+            from .routers.services import llm_providers as _providers
+        _providers.verify_embedding_backend(timeout=5)
+        checks["embeddings"] = True
     except Exception:
         pass
     if not all(checks.values()):
