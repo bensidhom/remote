@@ -9,8 +9,7 @@ import SettingsDialog from './components/SettingsDialog';
 import { AdminProvider } from './context/AdminContext';
 import { Modal } from './components/ui';
 import { onOpenTool, type ToolId, type ToolPayload } from './lib/tools';
-import EmailLoginGate from './components/EmailLoginGate';
-import { getAuthConfig, getCurrentUser, signOut, type AuthConfig, type AuthUser } from './lib/access';
+import { getCurrentUser, signOut, type AuthUser } from './lib/access';
 
 import HomeSidebar from './components/HomeSidebar';
 import MapPage from './pages/Map';
@@ -211,16 +210,11 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
 
 const App: React.FC = () => {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [authMode, setAuthMode] = useState<AuthConfig['mode']>('password');
   const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
     let active = true;
-    getAuthConfig()
-      .then((config) => {
-        if (active) setAuthMode(config.mode);
-        return getCurrentUser();
-      })
+    getCurrentUser()
       .then((current) => { if (active) setUser(current); })
       .catch(() => { if (active) setUser(null); })
       .finally(() => { if (active) setCheckingSession(false); });
@@ -231,7 +225,7 @@ const App: React.FC = () => {
     const interceptor = axios.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error?.response?.status === 401 && error?.config?.url !== '/api/auth/login') {
+        if (error?.response?.status === 401) {
           setUser(null);
         }
         return Promise.reject(error);
@@ -244,7 +238,7 @@ const App: React.FC = () => {
     return <div className="fixed inset-0 grid place-items-center bg-slate-950 text-slate-300">Checking session…</div>;
   }
 
-  if (!user && authMode === 'cloudflare') {
+  if (!user) {
     return (
       <main className="workspace-access-gate">
         <img src="/bridgeguard.png" alt="BridgeGuard" width="1024" height="1024" />
@@ -254,8 +248,6 @@ const App: React.FC = () => {
       </main>
     );
   }
-
-  if (!user) return <EmailLoginGate onSignedIn={setUser} />;
 
   return (
     <Router>

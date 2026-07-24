@@ -7,16 +7,6 @@ export interface AuthUser {
   role: UserRole;
 }
 
-export interface AuthConfig {
-  mode: 'password' | 'cloudflare' | 'disabled';
-}
-
-/** Read the server's authentication mode without exposing any auth secrets. */
-export async function getAuthConfig(): Promise<AuthConfig> {
-  const response = await axios.get<AuthConfig>('/api/auth/config');
-  return response.data;
-}
-
 /** Restore the HttpOnly server session, if one exists. */
 export async function getCurrentUser(): Promise<AuthUser | null> {
   try {
@@ -26,12 +16,6 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
     if (error?.response?.status === 401) return null;
     throw error;
   }
-}
-
-/** Authenticate on the server. No password is stored in the browser bundle. */
-export async function signIn(email: string, password: string): Promise<AuthUser> {
-  const response = await axios.post<AuthUser>('/api/auth/login', { email, password });
-  return response.data;
 }
 
 export async function signOut(): Promise<string | null> {
