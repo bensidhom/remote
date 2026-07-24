@@ -60,11 +60,12 @@ TEI_EMBED_BASE_URL=http://embeddings:80
 TEI_EMBED_MODEL=nomic-ai/nomic-embed-text-v1.5
 TEI_EMBED_REVISION=e9b6763023c676ca8431644204f50c2b100d9aab
 TEI_EMBED_DIM=768
+TEI_RUNTIME_VERSION=1.9.3
 ```
 
 Nomic uses `search_document:` for indexed passages and `search_query:` for
-questions. Those prefixes, normalization, revision, and dimension are part of
-the persisted embedding profile. Existing PDFs, parsed chunks, image
+questions. Those prefixes, normalization, model revision, TEI runtime version,
+and dimension are part of the persisted embedding profile. Existing PDFs, parsed chunks, image
 descriptions, page renders, and point-cloud analyses are reusable. Existing
 Ollama/GGUF or other-provider vector matrices are not: the server removes those
 vectors and re-embeds the preserved chunks once with TEI. Startup performs that
@@ -92,14 +93,13 @@ inference, Open3D, and photogrammetry are not required by the server deployment.
 Run one point-cloud job at a time. A single Gunicorn worker does not by itself
 prevent overlapping `asyncio.to_thread` jobs, and large scans can outlive normal
 reverse-proxy request timeouts. Use a bounded background-job queue/status
-endpoint before enabling concurrent users. On ARM64, prefer converting E57
-files locally to validated NPZ (`points`, optional `colors`) because `pye57`
-does not currently publish Linux ARM64 wheels; direct E57 support otherwise
-needs a tested source-build toolchain.
+endpoint before enabling concurrent users. The production x86_64 Python 3.12
+image installs the published `pye57` wheel, so E57, NPZ, LAS, PLY, XYZ, and CSV
+inputs can use the server parsing path.
 
-For embedding plus single-job point-cloud processing, plan for 4–8 vCPUs,
-16–32 GB RAM, and at least 100 GB of persistent disk. Embedding alone remains
-comfortable on the smaller 2-OCPU/12-GB deployment.
+The budget production baseline is 2 vCPUs, 12 GB RAM, and a 50 GB or larger
+persistent disk. Keep point-cloud work serialized at that size. Increase memory
+and storage before enabling concurrent scans or retaining a much larger archive.
 
 ---
 
@@ -161,9 +161,10 @@ Each script runs `npm ci && npm run build` in `frontend/`, then copies
 
 The Docker image performs the frontend build in its own build stage, so do not
 commit `frontend/dist` or `backend/static`. Before deployment, GitHub Actions
-runs the frontend production build, backend tests, and a complete production
-container build. The OCI deployment workflow is manual and uses the protected
-`production` GitHub Environment.
+runs the frontend production build, backend tests, deployment-configuration
+checks, and a complete production container build. The OCI deployment workflow
+is manual, uses the protected `production` GitHub Environment, and deploys the
+exact commit that passed CI.
 
 Configure these GitHub Environment secrets before running it:
 
@@ -199,21 +200,23 @@ browser-stored passwords and admin PINs are not used.
 For local development only, `BRIDGEGUARD_AUTH_DISABLED=1` creates an implicit
 local admin session. Never set it in a deployed environment.
 
-## Docker and OCI Always Free
+## Docker and OCI E4
 
-The root `Dockerfile` builds the React SPA and Python service into a multi-stage,
-ARM64-compatible image. Persistent data is not copied into the image; mount it
-at `/data` and set `BRIDGEGUARD_DATA_DIR=/data`.
+The root `Dockerfile` builds the React SPA and Python service into a multi-stage
+image. The supplied Compose deployment targets Linux x86_64 so it matches the
+OCI AMD E4 host and pinned TEI CPU image. Persistent data is not copied into the
+image; mount it at `/data` and set `BRIDGEGUARD_DATA_DIR=/data`.
 
 ```bash
 docker compose up --build
 ```
 
-The recommended free MVP deployment is an OCI Ampere A1 VM behind Cloudflare
-Tunnel and Access. The production Compose file, Cloudflare configuration,
-online SQLite backup command, and setup guide are in `deploy/oci/`. Keep one
-Gunicorn worker until SQLite, RAG state, and ingestion jobs have moved to
-external services.
+The recommended budget deployment is an OCI `VM.Standard.E4.Flex` VM with 1
+OCPU (2 vCPUs) and 12 GB RAM behind Cloudflare Tunnel and Access. The
+replacement-instance procedure, data migration, production Compose file,
+checksum-verifying backup command, CI/CD cutover, and rollback guide are in
+`deploy/oci/`. Keep one Gunicorn worker until SQLite, RAG state, and ingestion
+jobs have moved to external services.
 
 ---
 

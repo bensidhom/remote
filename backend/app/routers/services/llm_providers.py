@@ -23,6 +23,7 @@ TEI = "tei"
 _CEREBRAS_MODEL_DEFAULT = "gemma-4-31b"
 _TEI_EMBED_MODEL_DEFAULT = "nomic-ai/nomic-embed-text-v1.5"
 _TEI_EMBED_REVISION_DEFAULT = "e9b6763023c676ca8431644204f50c2b100d9aab"
+_TEI_RUNTIME_VERSION_DEFAULT = "1.9.3"
 _TEI_INPUT_POLICY = "nomic-v1.5-search-prefixes-v1"
 _TEI_NORMALIZE = True
 _TEI_TRUNCATE = True
@@ -63,10 +64,15 @@ def embedding_profile() -> dict:
         os.getenv("TEI_EMBED_REVISION", _TEI_EMBED_REVISION_DEFAULT).strip()
         or _TEI_EMBED_REVISION_DEFAULT
     )
+    runtime_version = (
+        os.getenv("TEI_RUNTIME_VERSION", _TEI_RUNTIME_VERSION_DEFAULT).strip()
+        or _TEI_RUNTIME_VERSION_DEFAULT
+    )
     return {
         "provider": provider,
         "model": model,
         "revision": revision,
+        "runtime_version": runtime_version,
         "dimension": _embedding_dimension("TEI_EMBED_DIM", 768),
         "input_policy": _TEI_INPUT_POLICY,
         "normalize": _TEI_NORMALIZE,
@@ -90,6 +96,7 @@ def embedding_profile_matches(value) -> bool:
         str(value.get("provider") or "").lower() == active["provider"]
         and str(value.get("model") or "") == active["model"]
         and str(value.get("revision") or "") == active["revision"]
+        and str(value.get("runtime_version") or "") == active["runtime_version"]
         and cached_dim == active["dimension"]
         and str(value.get("input_policy") or "") == active["input_policy"]
         and value.get("normalize") is active["normalize"]
@@ -511,7 +518,13 @@ def _tei_headers() -> dict:
     return headers
 
 
-def _tei_embed(items: list, input_type: str, profile: dict) -> np.ndarray:
+def _tei_embed(
+    items: list,
+    input_type: str,
+    profile: dict,
+    *,
+    record_usage: bool = True,
+) -> np.ndarray:
     prefix = "search_document: " if input_type == "passage" else "search_query: "
     batch_size = _embedding_dimension("TEI_EMBED_BATCH", 16)
     vectors = []
@@ -537,11 +550,12 @@ def _tei_embed(items: list, input_type: str, profile: dict) -> np.ndarray:
         if not isinstance(rows, list):
             raise RuntimeError("TEI embeddings returned an invalid response")
         vectors.extend(rows)
-        _record_usage(
-            TEI,
-            "embedding",
-            estimated_tokens=_estimate_tokens(batch),
-        )
+        if record_usage:
+            _record_usage(
+                TEI,
+                "embedding",
+                estimated_tokens=_estimate_tokens(batch),
+            )
     return _validated_embedding_matrix(vectors, len(items), profile)
 
 
@@ -564,6 +578,12 @@ def verify_embedding_backend(timeout: int = 30) -> dict:
         raise RuntimeError(
             f"TEI revision mismatch: expected {profile['revision']!r}, got {model_sha!r}"
         )
+    runtime_version = str(info.get("version") or "")
+    if runtime_version != profile["runtime_version"]:
+        raise RuntimeError(
+            "TEI runtime mismatch: "
+            f"expected {profile['runtime_version']!r}, got {runtime_version!r}"
+        )
     model_dtype = str(info.get("model_dtype") or "")
     if model_dtype != profile["dtype"]:
         raise RuntimeError(
@@ -575,11 +595,17 @@ def verify_embedding_backend(timeout: int = 30) -> dict:
         raise RuntimeError(
             f"TEI pooling mismatch: expected {profile['pooling']!r}, got {pooling!r}"
         )
-    probe = _tei_embed(["BridgeGuard embedding readiness probe"], "query", profile)
+    probe = _tei_embed(
+        ["BridgeGuard embedding readiness probe"],
+        "query",
+        profile,
+        record_usage=False,
+    )
     return {
         "provider": TEI,
         "model": model_id,
         "revision": model_sha,
+        "runtime_version": runtime_version,
         "dimension": int(probe.shape[1]),
     }
 

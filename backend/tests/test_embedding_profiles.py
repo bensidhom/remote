@@ -30,6 +30,7 @@ def _tei_env(dim="768"):
         "TEI_EMBED_MODEL": "nomic-ai/nomic-embed-text-v1.5",
         "TEI_EMBED_REVISION": "e9b6763023c676ca8431644204f50c2b100d9aab",
         "TEI_EMBED_DIM": dim,
+        "TEI_RUNTIME_VERSION": "1.9.3",
         "TEI_EMBED_BATCH": "16",
     }
 
@@ -42,6 +43,7 @@ class EmbeddingProfileTests(unittest.TestCase):
                 "TEI_EMBED_MODEL": "",
                 "TEI_EMBED_REVISION": "",
                 "TEI_EMBED_DIM": "",
+                "TEI_RUNTIME_VERSION": "",
             },
             clear=False,
         ):
@@ -53,6 +55,7 @@ class EmbeddingProfileTests(unittest.TestCase):
             "e9b6763023c676ca8431644204f50c2b100d9aab",
         )
         self.assertEqual(profile["dimension"], 768)
+        self.assertEqual(profile["runtime_version"], "1.9.3")
         self.assertEqual(profile["input_policy"], "nomic-v1.5-search-prefixes-v1")
         self.assertTrue(profile["normalize"])
         self.assertTrue(profile["truncate"])
@@ -111,6 +114,7 @@ class EmbeddingProfileTests(unittest.TestCase):
                 {
                     "model_id": profile["TEI_EMBED_MODEL"],
                     "model_sha": profile["TEI_EMBED_REVISION"],
+                    "version": profile["TEI_RUNTIME_VERSION"],
                     "model_dtype": "float32",
                     "model_type": {"embedding": {"pooling": "mean"}},
                 }
@@ -121,10 +125,12 @@ class EmbeddingProfileTests(unittest.TestCase):
             llm_providers.urllib.request,
             "urlopen",
             side_effect=responses,
-        ), patch.object(llm_providers, "_record_usage"):
+        ), patch.object(llm_providers, "_record_usage") as recorded:
             result = llm_providers.verify_embedding_backend()
         self.assertEqual(result["dimension"], 2)
         self.assertEqual(result["model"], profile["TEI_EMBED_MODEL"])
+        self.assertEqual(result["runtime_version"], profile["TEI_RUNTIME_VERSION"])
+        recorded.assert_not_called()
 
     def test_readiness_rejects_wrong_revision(self):
         with patch.dict(os.environ, _tei_env("2"), clear=False), patch.object(
@@ -134,6 +140,7 @@ class EmbeddingProfileTests(unittest.TestCase):
                 {
                     "model_id": "nomic-ai/nomic-embed-text-v1.5",
                     "model_sha": "wrong",
+                    "version": "1.9.3",
                     "model_dtype": "float32",
                     "model_type": {"embedding": {"pooling": "mean"}},
                 }
@@ -159,6 +166,27 @@ class EmbeddingProfileTests(unittest.TestCase):
             stale = dict(active)
             stale["revision"] = "old-revision"
             self.assertFalse(llm_providers.embedding_profile_matches(stale))
+            stale = dict(active)
+            stale["runtime_version"] = "1.8.1"
+            self.assertFalse(llm_providers.embedding_profile_matches(stale))
+
+    def test_readiness_rejects_wrong_runtime(self):
+        profile = _tei_env("2")
+        with patch.dict(os.environ, profile, clear=False), patch.object(
+            llm_providers.urllib.request,
+            "urlopen",
+            return_value=_FakeResponse(
+                {
+                    "model_id": profile["TEI_EMBED_MODEL"],
+                    "model_sha": profile["TEI_EMBED_REVISION"],
+                    "version": "1.8.1",
+                    "model_dtype": "float32",
+                    "model_type": {"embedding": {"pooling": "mean"}},
+                }
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime mismatch"):
+                llm_providers.verify_embedding_backend()
 
     def test_retrieval_falls_back_when_widths_disagree(self):
         chunks = [

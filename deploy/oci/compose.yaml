@@ -1,6 +1,8 @@
 services:
   embeddings:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9
+    # The paid OCI target is VM.Standard.E4.Flex (AMD x86_64).
+    platform: linux/amd64
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
     command:
       - --model-id
       - nomic-ai/nomic-embed-text-v1.5
@@ -8,8 +10,10 @@ services:
       - e9b6763023c676ca8431644204f50c2b100d9aab
       - --dtype
       - float32
+      - --pooling
+      - mean
     volumes:
-      - /srv/bridgeguard/models:/data
+      - ${BRIDGEGUARD_MODELS_DIR:-/srv/bridgeguard/models}:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:80/health"]
       interval: 10s
@@ -23,8 +27,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
     env_file:
-      - path: /etc/bridgeguard/bridgeguard.env
-      - path: /etc/bridgeguard/ai.env
+      - path: ${BRIDGEGUARD_ENV_FILE:-/etc/bridgeguard/bridgeguard.env}
+      - path: ${BRIDGEGUARD_AI_ENV_FILE:-/etc/bridgeguard/ai.env}
         required: false
     environment:
       BRIDGEGUARD_ENV: production
@@ -36,8 +40,9 @@ services:
       TEI_EMBED_MODEL: nomic-ai/nomic-embed-text-v1.5
       TEI_EMBED_REVISION: e9b6763023c676ca8431644204f50c2b100d9aab
       TEI_EMBED_DIM: "768"
+      TEI_RUNTIME_VERSION: "1.9.3"
     volumes:
-      - /srv/bridgeguard/data:/data
+      - ${BRIDGEGUARD_DATA_DIR_HOST:-/srv/bridgeguard/data}:/data
     restart: unless-stopped
     expose:
       - "8000"
@@ -46,10 +51,11 @@ services:
         condition: service_healthy
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    platform: linux/amd64
+    image: cloudflare/cloudflared:2026.7.2-amd64
     command: tunnel --no-autoupdate run
     env_file:
-      - /etc/bridgeguard/cloudflare.env
+      - ${CLOUDFLARE_ENV_FILE:-/etc/bridgeguard/cloudflare.env}
     depends_on:
       app:
         condition: service_healthy

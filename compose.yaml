@@ -1,6 +1,7 @@
 services:
   embeddings:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    platform: linux/amd64
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
     command:
       - --model-id
       - nomic-ai/nomic-embed-text-v1.5
@@ -8,6 +9,8 @@ services:
       - e9b6763023c676ca8431644204f50c2b100d9aab
       - --dtype
       - float32
+      - --pooling
+      - mean
     volumes:
       - ./backend/data/models:/data
     ports:
@@ -24,7 +27,7 @@ services:
     build:
       context: .
     env_file:
-      - backend/.env
+      - path: ${BRIDGEGUARD_ENV_FILE:-backend/.env}
     environment:
       BRIDGEGUARD_DATA_DIR: /data
       FRONTEND_DIST: /app/static
@@ -33,6 +36,7 @@ services:
       TEI_EMBED_MODEL: nomic-ai/nomic-embed-text-v1.5
       TEI_EMBED_REVISION: e9b6763023c676ca8431644204f50c2b100d9aab
       TEI_EMBED_DIM: "768"
+      TEI_RUNTIME_VERSION: "1.9.3"
     ports:
       - "8000:8000"
     volumes:

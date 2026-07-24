@@ -3,6 +3,8 @@
 .claude
 .codex
 **/.env
+keys
+**/*.key
 **/.venv
 **/__pycache__
 **/*.pyc
@@ -11,4 +13,3 @@ frontend/dist
 backend/static
 backend/data
 *.log
-

@@ -25,7 +25,13 @@ jobs:
           OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_KNOWN_HOSTS: ${{ secrets.OCI_KNOWN_HOSTS }}
           OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
+          OCI_USER: ${{ secrets.OCI_USER }}
         run: |
+          set -eu
+          test -n "$OCI_HOST" || { echo "::error::Missing production environment secret: OCI_HOST"; exit 1; }
+          test -n "$OCI_KNOWN_HOSTS" || { echo "::error::Missing production environment secret: OCI_KNOWN_HOSTS"; exit 1; }
+          test -n "$OCI_SSH_KEY" || { echo "::error::Missing production environment secret: OCI_SSH_KEY"; exit 1; }
+          test -n "$OCI_USER" || { echo "::error::Missing production environment secret: OCI_USER"; exit 1; }
           install -m 700 -d ~/.ssh
           printf '%s\n' "$OCI_SSH_KEY" > ~/.ssh/bridgeguard
           chmod 600 ~/.ssh/bridgeguard
@@ -36,14 +42,27 @@ jobs:
         env:
           OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_USER: ${{ secrets.OCI_USER }}
+          DEPLOY_SHA: ${{ github.sha }}
         run: |
-          ssh -i ~/.ssh/bridgeguard "$OCI_USER@$OCI_HOST" '
-            set -eu
+          set -eu
+          ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -i ~/.ssh/bridgeguard \
+            "$OCI_USER@$OCI_HOST" "bash -s -- '$DEPLOY_SHA'" <<'REMOTE'
+            set -Eeuo pipefail
+            deploy_sha="$1"
             cd /opt/bridgeguard
             git fetch origin main
-            git checkout main
-            git pull --ff-only origin main
-            docker compose -f deploy/oci/compose.yaml up -d --build
-            docker compose -f deploy/oci/compose.yaml exec -T app \
-              python -c "import urllib.request; print(urllib.request.urlopen(\"http://127.0.0.1:8000/ready\", timeout=10).read().decode())"
-          '
+            git cat-file -e "${deploy_sha}^{commit}"
+            git merge-base --is-ancestor "$deploy_sha" origin/main
+            git checkout --detach "$deploy_sha"
+
+            sh deploy/oci/preflight.sh
+            sh deploy/oci/backup.sh
+            docker compose -f deploy/oci/compose.yaml pull embeddings cloudflared
+            docker compose -f deploy/oci/compose.yaml up \
+              -d --build --remove-orphans --wait --wait-timeout 600
+            sh deploy/oci/verify.sh
+          REMOTE

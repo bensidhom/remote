@@ -8,11 +8,15 @@ caches so their parsed chunks can be re-embedded by the pinned TEI profile.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import shutil
 import sqlite3
+import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 DIRECTORIES = (
@@ -33,6 +37,7 @@ TARGET_EMBEDDING_PROFILE = {
     "provider": "tei",
     "model": "nomic-ai/nomic-embed-text-v1.5",
     "revision": "e9b6763023c676ca8431644204f50c2b100d9aab",
+    "runtime_version": "1.9.3",
     "dimension": 768,
     "input_policy": "nomic-v1.5-search-prefixes-v1",
     "normalize": True,
@@ -43,15 +48,38 @@ TARGET_EMBEDDING_PROFILE = {
 }
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _copy_file(source: Path, destination: Path, stats: dict) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
-        if destination.stat().st_size == source.stat().st_size:
+        if (
+            destination.stat().st_size == source.stat().st_size
+            and _sha256(destination) == _sha256(source)
+        ):
             stats["already_present"] += 1
             return
         stats["conflicts"].append(str(destination))
         return
-    shutil.copy2(source, destination)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.copying-",
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copy2(source, temporary)
+        if _sha256(temporary) != _sha256(source):
+            raise OSError(f"checksum mismatch while copying {source}")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
     stats["files_copied"] += 1
     stats["bytes_copied"] += source.stat().st_size
 
@@ -100,31 +128,46 @@ def invalidate_legacy_report_vectors(destination_root: Path) -> dict:
         payload["embedding_profile"] = None
         payload.pop("embedding_model", None)
         payload.pop("embedding_dim", None)
-        cache_file.write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=cache_file.parent,
+            prefix=f".{cache_file.name}.updating-",
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                json.dump(
+                    payload,
+                    temporary,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, cache_file)
+        finally:
+            Path(temporary_name).unlink(missing_ok=True)
         result["caches"] += 1
         result["chunks"] += len(payload["chunks"])
     return result
 
 
 def _portable_path(raw_path: str, source_root: Path) -> Path | None:
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        relative = path
-    else:
+    raw = str(raw_path)
+    path = Path(raw)
+    relative = None
+    if path.is_absolute():
         try:
             relative = path.resolve().relative_to(source_root.resolve())
         except ValueError:
-            parts = list(path.parts)
-            try:
-                relative = Path(*parts[parts.index("attachments") :])
-            except ValueError:
-                return None
-    if not relative.parts or relative.parts[0].lower() != "attachments":
+            pass
+    candidate_parts = list(relative.parts) if relative is not None else list(path.parts)
+    if "\\" in raw:
+        candidate_parts = list(PureWindowsPath(raw).parts)
+    lower_parts = [part.lower() for part in candidate_parts]
+    try:
+        attachment_index = lower_parts.index("attachments")
+    except ValueError:
         return None
-    return relative
+    return Path("attachments", *candidate_parts[attachment_index + 1 :])
 
 
 def merge_attachment_rows(source_root: Path, destination_root: Path) -> dict:
@@ -137,11 +180,18 @@ def merge_attachment_rows(source_root: Path, destination_root: Path) -> dict:
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_file = backup_dir / f"bridge_attachments_before_local_merge_{stamp}.json"
+    database_backup = backup_dir / f"snbi_bridges_before_local_merge_{stamp}.db"
+
+    with closing(sqlite3.connect(destination_db)) as live_database:
+        with closing(sqlite3.connect(database_backup)) as backup_database:
+            live_database.backup(backup_database)
 
     inserted = 0
     skipped = 0
     source_uri = f"file:{source_db.resolve().as_posix()}?mode=ro&immutable=1"
-    with sqlite3.connect(source_uri, uri=True) as source, sqlite3.connect(destination_db) as destination:
+    with closing(sqlite3.connect(source_uri, uri=True)) as source, closing(
+        sqlite3.connect(destination_db)
+    ) as destination:
         destination.row_factory = sqlite3.Row
         current = [
             dict(row)
@@ -211,6 +261,7 @@ def merge_attachment_rows(source_root: Path, destination_root: Path) -> dict:
         "inserted": inserted,
         "skipped": skipped,
         "backup": str(backup_file),
+        "database_backup": str(database_backup),
     }
 
 
@@ -228,6 +279,12 @@ def main() -> None:
         raise SystemExit("Source and destination must both exist")
 
     copied = copy_portable_artifacts(source, destination)
+    if copied["conflicts"]:
+        print(json.dumps({"copy": copied}, indent=2))
+        raise SystemExit(
+            "Migration stopped before database changes because destination "
+            "files conflict with the source"
+        )
     invalidated = invalidate_legacy_report_vectors(destination)
     attachments = merge_attachment_rows(source, destination)
     print(
