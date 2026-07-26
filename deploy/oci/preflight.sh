@@ -36,7 +36,22 @@ data_owner="$(stat -c '%u' "$data_dir" 2>/dev/null || printf 'unknown')"
 [ "$data_owner" = "10001" ] ||
   fail "$data_dir must be owned by container uid 10001 (found $data_owner)"
 
-python3 - "$data_dir" "${BRIDGEGUARD_MIN_BRIDGES:-1}" <<'PY'
+if [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null 2>&1 ||
+    fail "sudo is required to inspect the container-owned databases"
+  sudo -n true >/dev/null 2>&1 ||
+    fail "passwordless sudo is required to inspect the container-owned databases"
+fi
+
+run_data_python() {
+  if [ "$(id -u)" -eq 0 ]; then
+    python3 "$@"
+  else
+    sudo -n python3 "$@"
+  fi
+}
+
+run_data_python - "$data_dir" "${BRIDGEGUARD_MIN_BRIDGES:-1}" <<'PY'
 import json
 import sqlite3
 import sys

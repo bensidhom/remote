@@ -44,7 +44,7 @@ sudo install -d -o "$USER" -g "$USER" /opt/bridgeguard
 sudo install -d -o 10001 -g 10001 /srv/bridgeguard/data
 sudo install -d -o "$USER" -g "$USER" /srv/bridgeguard/models
 sudo install -d -o "$USER" -g "$USER" /srv/bridgeguard/import/local-data
-sudo install -d -m 700 /etc/bridgeguard
+sudo install -d -o root -g docker -m 750 /etc/bridgeguard
 
 git clone https://github.com/bensidhom/remote.git /opt/bridgeguard
 cd /opt/bridgeguard
@@ -70,7 +70,8 @@ Keep real secrets outside Git:
 ```bash
 sudo cp backend/.env.example /etc/bridgeguard/bridgeguard.env
 sudo cp deploy/oci/cloudflare.env.example /etc/bridgeguard/cloudflare.env
-sudo chmod 600 /etc/bridgeguard/bridgeguard.env /etc/bridgeguard/cloudflare.env
+sudo chown root:docker /etc/bridgeguard/*.env
+sudo chmod 640 /etc/bridgeguard/*.env
 ```
 
 Set at least:
