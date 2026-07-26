@@ -1,6 +1,6 @@
 // frontend/src/pages/Editor.tsx
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import JSZip from 'jszip';
 import { Edit3, Save, Plus, Loader2, Download } from 'lucide-react';
@@ -360,6 +360,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
   const [bridgeValidation, setBridgeValidation] = useState<any | null>(null);
   const [fieldMetadata, setFieldMetadata] = useState<any | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const loadRequestIdRef = useRef(0);
 
   const sanitizeFileSegment = (value: string) => {
     return value.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -417,25 +418,45 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     }, 0);
   };
 
-  const fetchBridgeValidation = async (bridge: Bridge) => {
-    const yearQuery = selectedExportYear ? `?year=${selectedExportYear}` : '';
+  const fetchBridgeValidation = async (
+    bridge: Bridge,
+    snapshotYear: number | null = selectedExportYear,
+    requestId?: number,
+  ) => {
     try {
-      const res = await axios.get(`/api/validate-bridge/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}${yearQuery}`);
-      setBridgeValidation(res.data);
+      const res = await axios.get(
+        `/api/validate-bridge/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}`,
+        { params: { year: snapshotYear ?? undefined } },
+      );
+      if (requestId === undefined || requestId === loadRequestIdRef.current) {
+        setBridgeValidation(res.data);
+      }
     } catch (err) {
       console.error('Failed to load bridge validation:', err);
-      setBridgeValidation(null);
+      if (requestId === undefined || requestId === loadRequestIdRef.current) {
+        setBridgeValidation(null);
+      }
     }
   };
 
-  const fetchFieldMetadata = async (bridge: Bridge) => {
-    const yearQuery = selectedExportYear ? `?year=${selectedExportYear}` : '';
+  const fetchFieldMetadata = async (
+    bridge: Bridge,
+    snapshotYear: number | null = selectedExportYear,
+    requestId?: number,
+  ) => {
     try {
-      const res = await axios.get(`/api/bridge-field-metadata/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}${yearQuery}`);
-      setFieldMetadata(res.data);
+      const res = await axios.get(
+        `/api/bridge-field-metadata/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}`,
+        { params: { year: snapshotYear ?? undefined } },
+      );
+      if (requestId === undefined || requestId === loadRequestIdRef.current) {
+        setFieldMetadata(res.data);
+      }
     } catch (err) {
       console.error('Failed to load bridge field metadata:', err);
-      setFieldMetadata(null);
+      if (requestId === undefined || requestId === loadRequestIdRef.current) {
+        setFieldMetadata(null);
+      }
     }
   };
 
@@ -533,10 +554,8 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     if (!bridge.BG14) bridge.BG14 = 'N';
 
     const features = Array.isArray(bridge.Features) ? bridge.Features : [];
-    const hasWaterway = features.some((feature: Record<string, any>) => String(feature.BF01 || '').startsWith('W'));
-    if (hasWaterway && String(bridge.BC09 || '').toUpperCase() === 'N') {
-      bridge.BC09 = '0';
-    }
+    // Keep direct-transition condition values unchanged. Invalid combinations
+    // such as BC09=N with a W## feature remain visible for validation/review.
     features.forEach((feature: Record<string, any>) => {
       const featureType = String(feature.BF01 || '');
       if (featureType.startsWith('W') && !feature.BN01) {
@@ -662,14 +681,19 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     setMessage({ type: 'success', text: 'Downloaded bridge JSON file (SNBI schema format).' });
   };
 
-  // Load bridges when state changes
+  // Load the bridge selector from the same snapshot used by the Editor.
   useEffect(() => {
-    if (!selectedStateCode) return;
+    if (!selectedStateCode || selectedExportYear === null) {
+      setBridges([]);
+      return;
+    }
 
     const fetchBridges = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`/api/table/bridges?state_code=${selectedStateCode}`);
+        const response = await axios.get('/api/table/bridges', {
+          params: { state_code: selectedStateCode, year: selectedExportYear },
+        });
         setBridges(response.data);
       } catch (err) {
         console.error(err);
@@ -680,7 +704,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     };
 
     fetchBridges();
-  }, [selectedStateCode]);
+  }, [selectedStateCode, selectedExportYear]);
 
   // Load available years when state changes
   useEffect(() => {
@@ -701,7 +725,11 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
   }, [selectedStateCode]);
 
   // Load full bridge data when a bridge is selected
-  const loadBridgeDetails = async (bridge: Bridge) => {
+  const loadBridgeDetails = async (
+    bridge: Bridge,
+    snapshotYear: number | null = selectedExportYear,
+  ) => {
+    const requestId = ++loadRequestIdRef.current;
     setSelectedBridge(bridge);
     setLoading(true);
     setBridgeData(null);
@@ -710,8 +738,12 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     setFieldMetadata(null);
 
     try {
-      console.log(`Loading bridge details for ${bridge.state_code}/${bridge.bridge_number}`);
-      const response = await axios.get(`/api/bridge/${bridge.state_code}/${bridge.bridge_number}`);
+      console.log(`Loading bridge details for ${bridge.state_code}/${bridge.bridge_number}, snapshot ${snapshotYear ?? 'latest'}`);
+      const response = await axios.get(
+        `/api/bridge/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}`,
+        { params: { year: snapshotYear ?? undefined } },
+      );
+      if (requestId !== loadRequestIdRef.current) return;
       console.log('Bridge data received:', response.data);
       setBridgeData(response.data);
 
@@ -719,7 +751,14 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       const childPromises = CHILD_TABLES.map(async (table) => {
         try {
           console.log(`Loading ${table} for bridge ${bridge.bridge_number}`);
-          const res = await axios.get(`/api/table/${table}?state_code=${bridge.state_code}&bridge_number=${bridge.bridge_number}&limit=100`);
+          const res = await axios.get(`/api/table/${table}`, {
+            params: {
+              state_code: bridge.state_code,
+              bridge_number: bridge.bridge_number,
+              limit: 100,
+              year: snapshotYear ?? undefined,
+            },
+          });
           console.log(`${table} data:`, res.data);
           return { table, data: res.data };
         } catch (error) {
@@ -729,15 +768,19 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       });
 
       const results = await Promise.all(childPromises);
+      if (requestId !== loadRequestIdRef.current) return;
       const newChildData: Record<string, TableRow[]> = {};
       results.forEach(({ table, data }) => {
         newChildData[table] = data;
       });
       setChildData(newChildData);
-      await fetchBridgeValidation(bridge);
-      await fetchFieldMetadata(bridge);
+      await Promise.all([
+        fetchBridgeValidation(bridge, snapshotYear, requestId),
+        fetchFieldMetadata(bridge, snapshotYear, requestId),
+      ]);
 
     } catch (err: any) {
+      if (requestId !== loadRequestIdRef.current) return;
       console.error('Failed to load bridge details:', err);
       setMessage({
         type: 'error',
@@ -747,7 +790,9 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       setChildData({});
       setFieldMetadata(null);
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -766,14 +811,20 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     setMessage({ type: 'info', text: 'Saving bridge changes to database...' });
     try {
       const response = await axios.put(
-        `/api/bridge/${selectedBridge.state_code}/${selectedBridge.bridge_number}`,
-        bridgeData
+        `/api/bridge/${selectedBridge.state_code}/${encodeURIComponent(selectedBridge.bridge_number)}`,
+        bridgeData,
+        { params: { year: selectedExportYear ?? undefined } },
       );
       const saved = response.data?.data || bridgeData;
       setBridgeData(saved);
-      await fetchBridgeValidation(selectedBridge);
-      await fetchFieldMetadata(selectedBridge);
-      setMessage({ type: 'success', text: 'Main bridge data saved successfully!' });
+      await Promise.all([
+        fetchBridgeValidation(selectedBridge, selectedExportYear),
+        fetchFieldMetadata(selectedBridge, selectedExportYear),
+      ]);
+      setMessage({
+        type: 'success',
+        text: `Main bridge data saved successfully${selectedExportYear ? ` for the ${selectedExportYear} snapshot` : ''}!`,
+      });
     } catch (err: any) {
       setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to save changes' });
     } finally {
@@ -783,9 +834,10 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
 
   useEffect(() => {
     if (selectedBridge) {
-      fetchBridgeValidation(selectedBridge);
-      fetchFieldMetadata(selectedBridge);
+      loadBridgeDetails(selectedBridge, selectedExportYear);
     }
+    // Reload the complete snapshot—not just its annotations—when the year changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedExportYear]);
 
   const handleChildTableChange = (table: string, index: number, field: string, value: any) => {
@@ -884,7 +936,16 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
           <label className="block text-sm font-medium mb-3 text-gray-700 dark:text-gray-300">Select State</label>
           <select
             value={selectedStateCode || ''}
-            onChange={(e) => setSelectedStateCode(Number(e.target.value))}
+            onChange={(e) => {
+              loadRequestIdRef.current += 1;
+              setSelectedStateCode(Number(e.target.value));
+              setSelectedExportYear(null);
+              setSelectedBridge(null);
+              setBridgeData(null);
+              setChildData({});
+              setBridgeValidation(null);
+              setFieldMetadata(null);
+            }}
             className="w-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-2xl px-5 py-4 focus:outline-none focus:ring-2 focus:ring-violet-500 text-gray-900 dark:text-white"
           >
             <option value="">— Choose State —</option>
@@ -929,12 +990,15 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
           <div className="flex flex-col md:flex-row md:items-end gap-4">
             <div className="flex-1">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Inspection Year
+                SNBI Snapshot &amp; NBI Source Year
               </label>
               {availableYears.length > 0 ? (
                 <select
                   value={selectedExportYear ?? ''}
-                  onChange={(e) => setSelectedExportYear(Number(e.target.value))}
+                  onChange={(e) => {
+                    loadRequestIdRef.current += 1;
+                    setSelectedExportYear(Number(e.target.value));
+                  }}
                   className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-2xl px-4 py-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500"
                 >
                   {availableYears.map((y) => (
@@ -947,7 +1011,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                 </div>
               )}
               <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
-                The selected year controls which yearly SNBI snapshot is exported. Internal database fields are not included in the JSON files.
+                The selected year scopes the bridge values, child tables, NBI provenance, validation, saves, and exports together.
               </p>
               {exportValidation?.summary && (
                 <div className="mt-3 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30 p-3">
@@ -985,6 +1049,16 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
             </div>
           ) : (
             <>
+              {selectedExportYear && (
+                <div className="mx-8 mt-6 flex flex-wrap items-center gap-2 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200">
+                  <span className="font-semibold">SNBI snapshot {selectedExportYear}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>NBI source notes {selectedExportYear}</span>
+                  <span className="text-xs text-sky-700 dark:text-sky-300">
+                    Every value shown or saved below uses this same inventory year.
+                  </span>
+                </div>
+              )}
               {/* Bridge-level FHWA transition notes (e.g. non-highway bridge) */}
               {((fieldMetadata?.bridge_notes?.length ?? 0) > 0 || selectedBridge?.fhwa_omit) && (
                 <div className="mx-8 mt-6 space-y-2">

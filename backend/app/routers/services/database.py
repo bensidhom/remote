@@ -2346,13 +2346,53 @@ def save_table_data(db_path: str, table: str, state_code: int, bridge_number: st
         conn.close()
 
 
-def get_bridge_details(db_path: str, state_code: int, bridge_number: str) -> Dict:
-    """Get detailed information for a specific bridge."""
+def get_bridge_details(
+    db_path: str,
+    state_code: int,
+    bridge_number: str,
+    year: Optional[int] = None,
+) -> Optional[Dict]:
+    """Get one bridge snapshot and its same-year child records.
+
+    When ``year`` is omitted, use the latest snapshot available for this
+    bridge.  Older implementations fetched an arbitrary bridge row and all
+    child rows across every year, which could mix historical SNBI values with
+    provenance from a different inventory snapshot.
+    """
     conn = get_connection(db_path)
     cur = conn.cursor()
 
-    # Get main bridge data
-    cur.execute("SELECT * FROM bridges WHERE state_code=? AND bridge_number=?", (state_code, bridge_number))
+    if year is None:
+        cur.execute(
+            """
+            SELECT MAX(data_year)
+            FROM bridges
+            WHERE state_code = ? AND bridge_number = ?
+            """,
+            (state_code, bridge_number),
+        )
+        row = cur.fetchone()
+        effective_year = row[0] if row else None
+    else:
+        effective_year = int(year)
+
+    if effective_year is None:
+        year_clause = "data_year IS NULL"
+        year_params: tuple = ()
+    else:
+        year_clause = "data_year = ?"
+        year_params = (effective_year,)
+
+    # Get the requested main bridge snapshot.
+    cur.execute(
+        f"""
+        SELECT *
+        FROM bridges
+        WHERE state_code = ? AND bridge_number = ? AND {year_clause}
+        LIMIT 1
+        """,
+        (state_code, bridge_number, *year_params),
+    )
     bridge_row = cur.fetchone()
     
     if not bridge_row:
@@ -2362,11 +2402,25 @@ def get_bridge_details(db_path: str, state_code: int, bridge_number: str) -> Dic
     bridge_data = dict(zip([d[0] for d in cur.description], bridge_row))
     
     # Get features
-    cur.execute("SELECT * FROM features WHERE state_code=? AND bridge_number=?", (state_code, bridge_number))
+    cur.execute(
+        f"""
+        SELECT *
+        FROM features
+        WHERE state_code = ? AND bridge_number = ? AND {year_clause}
+        """,
+        (state_code, bridge_number, *year_params),
+    )
     features = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
     
     # Get elements
-    cur.execute("SELECT * FROM elements WHERE state_code=? AND bridge_number=?", (state_code, bridge_number))
+    cur.execute(
+        f"""
+        SELECT *
+        FROM elements
+        WHERE state_code = ? AND bridge_number = ? AND {year_clause}
+        """,
+        (state_code, bridge_number, *year_params),
+    )
     elements = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
     
     conn.close()
@@ -2627,9 +2681,10 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
             snbi["BG14"] = "N"
 
         features = snbi.get("Features") if isinstance(snbi.get("Features"), list) else []
-        has_waterway = any(isinstance(feature, dict) and str(feature.get("BF01") or "").startswith("W") for feature in features)
-        if has_waterway and str(snbi.get("BC09") or "").upper() == "N":
-            snbi["BC09"] = "0"
+        # Preserve transitioned condition values exactly.  In particular, do
+        # not reinterpret legacy BC09=N as 0 for waterway bridges: FHWA's
+        # validator should surface that inconsistent combination for agency
+        # review instead of the exporter inventing a different rating.
         for feature in features:
             if not isinstance(feature, dict):
                 continue
@@ -2779,16 +2834,16 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
 
 
 def get_available_years(db_path: str, state_code: int) -> List[int]:
-    """Return distinct report_years loaded for a state, sorted descending."""
+    """Return the state's actual bridge snapshot years, newest first."""
     conn = get_connection(db_path)
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT DISTINCT report_year
-            FROM inspection_report_history
-            WHERE state_code = ? AND report_year IS NOT NULL
-            ORDER BY report_year DESC
+            SELECT DISTINCT data_year
+            FROM bridges
+            WHERE state_code = ? AND data_year IS NOT NULL
+            ORDER BY data_year DESC
             """,
             (state_code,),
         )
@@ -2928,35 +2983,88 @@ def execute_readonly_sql(db_path: str, sql: str) -> Dict:
         conn.close()
 
 
-def update_bridge_main(db_path: str, state_code: int, bridge_number: str, updates: Dict[str, Any]) -> int:
-    """Update editable fields on the main bridges table for one bridge."""
+def update_bridge_main(
+    db_path: str,
+    state_code: int,
+    bridge_number: str,
+    updates: Dict[str, Any],
+    year: Optional[int] = None,
+) -> int:
+    """Update editable fields on exactly one bridge snapshot.
+
+    ``data_year`` identifies the snapshot and is immutable.  The query-string
+    year is authoritative when supplied; otherwise a payload ``data_year`` is
+    accepted for compatibility, falling back to the latest bridge snapshot.
+    """
     if not updates:
         return 0
 
     conn = get_connection(db_path)
     cur = conn.cursor()
     try:
+        payload_year_raw = updates.get("data_year")
+        payload_year: Optional[int] = None
+        if payload_year_raw not in (None, ""):
+            try:
+                payload_year = int(payload_year_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("data_year must be an integer") from exc
+
+        requested_year = int(year) if year is not None else None
+        if requested_year is not None and payload_year is not None and requested_year != payload_year:
+            raise ValueError(
+                f"Query year {requested_year} does not match payload data_year {payload_year}"
+            )
+
+        target_year = requested_year if requested_year is not None else payload_year
+        if target_year is None:
+            cur.execute(
+                """
+                SELECT MAX(data_year)
+                FROM bridges
+                WHERE state_code = ? AND bridge_number = ?
+                """,
+                (state_code, bridge_number),
+            )
+            row = cur.fetchone()
+            target_year = row[0] if row else None
+
         cols_df = pd.read_sql_query("PRAGMA table_info(bridges)", conn)
         bridge_columns = set(cols_df["name"].tolist())
 
         # Accept both DB column names and SNBI keys (mapped via constants.mapping)
         normalized: Dict[str, Any] = {}
         for key, value in updates.items():
-            if key in {"id", "state_code", "bridge_number", "Features", "Elements", "SpanSets", "Works"}:
+            if key in {
+                "id", "state_code", "bridge_number", "data_year",
+                "Features", "Elements", "SpanSets", "Works",
+            }:
                 continue
 
             db_col = mapping.get(key, key)
+            if db_col in {"id", "state_code", "bridge_number", "data_year"}:
+                continue
             if db_col in bridge_columns:
                 normalized[db_col] = value
 
         if not normalized:
             return 0
 
-        set_clause = ", ".join([f"{col} = ?" for col in normalized.keys()])
-        params = list(normalized.values()) + [state_code, bridge_number]
+        if target_year is None:
+            year_clause = "data_year IS NULL"
+            year_params: List[Any] = []
+        else:
+            year_clause = "data_year = ?"
+            year_params = [target_year]
 
+        set_clause = ", ".join([f"{col} = ?" for col in normalized.keys()])
+        params = list(normalized.values()) + [state_code, bridge_number] + year_params
         cur.execute(
-            f"UPDATE bridges SET {set_clause} WHERE state_code = ? AND bridge_number = ?",
+            f"""
+            UPDATE bridges
+            SET {set_clause}
+            WHERE state_code = ? AND bridge_number = ? AND {year_clause}
+            """,
             params,
         )
         conn.commit()

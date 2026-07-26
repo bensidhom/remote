@@ -1423,23 +1423,26 @@ def bridge_field_metadata(state_code: int, bridge_number: str, year: int = None)
 
 
 @app.get("/api/bridge/{state_code}/{bridge_number}")
-def get_bridge_details(state_code: int, bridge_number: str):
-    """Get detailed information for a specific bridge."""
-    data = get_bridge_details_db(USER_DB, state_code, bridge_number)
+def get_bridge_details(state_code: int, bridge_number: str, year: int = None):
+    """Get one yearly bridge snapshot, defaulting to the bridge's latest year."""
+    data = get_bridge_details_db(USER_DB, state_code, bridge_number, year=year)
     if data is None:
         raise HTTPException(status_code=404, detail="Bridge not found")
     return clean_nan_values(data)
 
 
 @app.put("/api/bridge/{state_code}/{bridge_number}")
-async def update_bridge(state_code: int, bridge_number: str, payload: dict):
-    """Persist edits for the main bridge record."""
+async def update_bridge(state_code: int, bridge_number: str, payload: dict, year: int = None):
+    """Persist edits for exactly one immutable yearly bridge snapshot."""
     try:
-        updated = update_bridge_main(USER_DB, state_code, bridge_number, payload)
+        updated = update_bridge_main(USER_DB, state_code, bridge_number, payload, year=year)
         if updated == 0:
             return JSONResponse(status_code=400, content={"status": "error", "detail": "No editable fields were provided or bridge was not found."})
-        data = get_bridge_details_db(USER_DB, state_code, bridge_number)
+        response_year = year if year is not None else payload.get("data_year")
+        data = get_bridge_details_db(USER_DB, state_code, bridge_number, year=response_year)
         return {"status": "success", "updated": updated, "data": clean_nan_values(data)}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"status": "error", "detail": str(e)})
     except Exception as e:
         print(f"Bridge update error: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})

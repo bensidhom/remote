@@ -80,7 +80,11 @@ def map_bridge_to_snbi(old: Dict[str, Any], unders: List[Dict[str, Any]]) -> Dic
     snbi['BL11'] = _clean_text(old.get('LOCATION_009'))
     # B.ID.02 (bridge name) has no legacy source; Item 6A names below-features.
 
-    snbi['BW01'] = safe_int(old.get('YEAR_BUILT_027'), 0)
+    # B.W.01 is a direct transition: preserve a reported four-digit Item 27
+    # value, but do not invent year 0 when the legacy source is blank/invalid.
+    year_built_raw = _clean_text(old.get('YEAR_BUILT_027'))
+    year_built = safe_int(year_built_raw, -1) if year_built_raw else -1
+    snbi['BW01'] = year_built if 0 < year_built <= 9999 else None
 
     snbi['BCL01'] = owner_maintenance_from_legacy(old.get('OWNER_022'))
     snbi['BCL02'] = owner_maintenance_from_legacy(old.get('MAINTENANCE_021'))
