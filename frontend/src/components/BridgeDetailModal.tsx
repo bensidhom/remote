@@ -299,17 +299,21 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
 
       <div className="shrink-0 mb-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 p-3">
         <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 cursor-pointer">
-            <input type="checkbox" checked={useVisual} onChange={(e) => setUseVisual(e.target.checked)} className="accent-brand-500 w-4 h-4" />
+          <label className={`inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 ${busy ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
+            <input type="checkbox" checked={useVisual} disabled={busy} onChange={(e) => setUseVisual(e.target.checked)} className="accent-brand-500 w-4 h-4" />
             <ScanSearch className="w-4 h-4" />
             Use visual investigation
           </label>
-          {useVisual && <span className="text-xs text-slate-500">Auto-selects likely report images and returns only detected matches.</span>}
+          <span className="text-xs text-slate-500">
+            {useVisual
+              ? 'Checked: scans likely report images and returns only detected matches.'
+              : 'Unchecked: uses database and report text only.'}
+          </span>
         </div>
       </div>
 
       <div className="flex-1 overflow-auto ui-scroll space-y-3">
-        {history.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">Ask anything about this bridge — its condition, history, dimensions, inspections, and the contents of its uploaded reports (text, tables, and photos). Try “show all images”, “analyze the cracks”, or “show page 3”.</p>}
+        {history.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">Ask about this bridge, its database record, and report text or tables. To inspect cracks or other visible defects, check Use visual investigation first. You can still request “show all images” or “show page 3” without running an inspection.</p>}
         {history.map((t, i) => (
           <div key={i} className="space-y-1.5">
             <div className="text-right"><span className="inline-block rounded-2xl bg-brand-600 text-white px-3.5 py-2 text-sm">{t.q}</span></div>

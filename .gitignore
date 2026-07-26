@@ -20,6 +20,8 @@ keys/
 # ---- App data (DBs, uploads, usage state, samples and RAG artifacts) ----
 # Production data is transferred to the persistent cloud volume separately.
 backend/data/
+# Local migration verification snapshots can approach a gigabyte.
+.migration-check/
 
 # ---- Built frontend staged into the backend ----
 backend/static/

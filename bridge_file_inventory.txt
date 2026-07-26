@@ -1,0 +1,60 @@
+BridgeGuard Bridge File Inventory
+Generated: 2026-07-24
+Source: OCI production data (/srv/bridgeguard/data/snbi_bridges.db)
+
+SUMMARY
+-------
+Registered attachment files:             25
+Bridges with inspection-report files:    10
+Bridges with registered point clouds:    15
+Bridges with processed point-cloud data: 16
+
+The point-cloud processing directory contains one additional bridge, 370320S,
+whose processed analysis exists but whose source attachment is not registered
+in the bridge_attachments database table. It is listed separately below.
+
+
+BRIDGES WITH INSPECTION-REPORT FILES (10)
+-----------------------------------------
+
+Bridge     Location                         File                  Size         Stored path
+01EH029    2.3 MI. N. GSPKWY                2010179_Report.pdf     34,185,133   attachments/reports/34_01EH029/20260708_205852_2010179_Report.pdf
+0823156    0.31 Mi North of Exit 25         0823156_Report.pdf    182,540,159   attachments/reports/34_0823156/0823156_Report.pdf
+1017150    .5 MI E OF I-78 EXIT-16          1017150_Report.pdf     18,487,145   attachments/reports/34_1017150/1017150_Report.pdf
+1414170    0.9 MI E OF I287 & I80 JC        1414170_Report.pdf     81,623,838   attachments/reports/34_1414170/1414170_Report.pdf
+1610166    1.5 MI EAST OF RT 20 JCT         1610166_Report.pdf     52,355,965   attachments/reports/34_1610166/1610166_Report.pdf
+1610167    0.4 MI WEST OF PAS RIV           1610167_Report.pdf     43,358,938   attachments/reports/34_1610167/1610167_Report.pdf
+1817156    0.4 MI E OF I-287 JCT            1817156_Report.pdf     49,704,122   attachments/reports/34_1817156/1817156_Report.pdf
+1817162    3.7 Mi East of I-287 Jct.        1817162_Report.pdf     81,887,785   attachments/reports/34_1817162/1817162_Report.pdf
+2010179    0.26 MILES W OF NJ 24            2010179_Report.pdf     34,185,133   attachments/reports/34_2010179/2010179_Report.pdf
+2113156    AT I-78 EXIT 4                   2113156_Report.pdf     66,710,226   attachments/reports/34_2113156/2113156_Report.pdf
+
+
+BRIDGES WITH REGISTERED POINT-CLOUD FILES (15)
+-----------------------------------------------
+
+All 15 registered point clouds also have a processed/analysis.json result.
+
+Bridge     Location                         File                  Size           Stored path
+0313151    3.5 miles south of I 295         0313151.e57            15,050,752   attachments/point_clouds/34_0313151/0313151.e57
+0406150    0.1 Mi E / Airport Circle        0406150.e57             9,992,192   attachments/point_clouds/34_0406150/0406150.e57
+0407151    0.44 MI EAST OF US 130           0407151.e57             8,119,296   attachments/point_clouds/34_0407151/0407151.e57
+0413152    1.04 MI. SW OF 70-38 JCT.        0413152.e57            18,956,288   attachments/point_clouds/34_0413152/0413152.e57
+0415152    0.3 MI SOUTH OF US30 INT         Bridge_0415152.txt      22,268,557   attachments/point_clouds/34_0415152/Bridge_0415152.txt
+0416151    0.5 MI N of Pennsauken Cr        0416151.xyz         1,132,952,489   attachments/point_clouds/34_0416151/0416151.xyz
+0429159    AT RT 70 INTERCHANGE             0429159.e57            12,367,872   attachments/point_clouds/34_0429159/0429159.e57
+0429160    AT I-295 EXIT 34                 0429160.e57            12,205,056   attachments/point_clouds/34_0429160/0429160.e57
+0821155    3.52 MI. NORTH OF US 322         0821155.xyz           564,327,330   attachments/point_clouds/34_0821155/0821155.xyz
+0954163    0.4 MI S of RT 139               0954163.xyz           469,424,417   attachments/point_clouds/34_0954163/0954163.xyz
+1816154    2 MI WEST OF I-287               1816154.xyz         1,029,310,163   attachments/point_clouds/34_1816154/1816154.xyz
+1816155    2 MI WEST OF I-287 JCT           1816155.xyz           467,483,223   attachments/point_clouds/34_1816155/1816155.xyz
+18G0701    0.29 MI S OF CAMPLAIN RD         18G0701.xyz           563,235,090   attachments/point_clouds/34_18G0701/18G0701.xyz
+350312S    AT RT73&ACE JUNCTION             Bridge_350312S.txt      39,559,390   attachments/point_clouds/34_350312S/Bridge_350312S.txt
+360982N    1.48 Mi w of NJ 18&138JCT        360982N.e57           861,049,856   attachments/point_clouds/34_360982N/360982N.e57
+
+
+PROCESSED POINT CLOUD WITHOUT A REGISTERED SOURCE ATTACHMENT (1)
+-----------------------------------------------------------------
+
+Bridge     Location                         Processed file
+370320S    2.75 MI N OF RT 52 CIRCLE        attachments/point_clouds/34_370320S/processed/analysis.json

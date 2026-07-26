@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="BridgeGuard technical product walkthrough and system architecture deck.">
+  <title>BridgeGuard — Technical Walkthrough</title>
+  <link rel="icon" href="assets/bridgeguard.png">
+  <script>document.documentElement.classList.add("js");</script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#deck">Skip to deck</a>
+
+  <header class="deck-hud" aria-label="Presentation controls">
+    <a class="brand" href="#slide-1" aria-label="BridgeGuard presentation home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 48 24" role="img">
+          <path d="M2 18h44M8 17V9m32 8V9M8 12h32M12 12c3-7 8-9 12-9s9 2 12 9" />
+        </svg>
+      </span>
+      <span>BridgeGuard</span>
+    </a>
+    <div class="hud-meta">
+      <span class="hud-label">Technical walkthrough</span>
+      <span class="slide-counter" aria-live="polite" aria-atomic="true"><strong id="current-slide">01</strong><span>/</span><span id="total-slides">12</span></span>
+    </div>
+    <div class="hud-controls">
+      <button class="icon-button" id="previous-slide" type="button" aria-label="Previous slide">
+        <span aria-hidden="true">←</span>
+      </button>
+      <button class="icon-button" id="next-slide" type="button" aria-label="Next slide">
+        <span aria-hidden="true">→</span>
+      </button>
+    </div>
+    <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
+  </header>
+
+  <nav class="slide-index" aria-label="Slide index">
+    <button type="button" data-slide="0" aria-label="Go to slide 1"><span>Overview</span></button>
+    <button type="button" data-slide="1" aria-label="Go to slide 2"><span>System</span></button>
+    <button type="button" data-slide="2" aria-label="Go to slide 3"><span>Map</span></button>
+    <button type="button" data-slide="3" aria-label="Go to slide 4"><span>Locate</span></button>
+    <button type="button" data-slide="4" aria-label="Go to slide 5"><span>Bridge</span></button>
+    <button type="button" data-slide="5" aria-label="Go to slide 6"><span>Files</span></button>
+    <button type="button" data-slide="6" aria-label="Go to slide 7"><span>3D scan</span></button>
+    <button type="button" data-slide="7" aria-label="Go to slide 8"><span>SNBI</span></button>
+    <button type="button" data-slide="8" aria-label="Go to slide 9"><span>Decision</span></button>
+    <button type="button" data-slide="9" aria-label="Go to slide 10"><span>Contracts</span></button>
+    <button type="button" data-slide="10" aria-label="Go to slide 11"><span>Architecture</span></button>
+    <button type="button" data-slide="11" aria-label="Go to slide 12"><span>Operate</span></button>
+  </nav>
+
+  <main class="deck" id="deck" tabindex="-1">
+    <section class="slide slide-cover is-dark" id="slide-1" data-title="Overview" aria-labelledby="slide-1-title" tabindex="-1">
+      <div class="cover-grid">
+        <div class="cover-copy reveal">
+          <p class="eyebrow">NJ bridge intelligence · technical product deck</p>
+          <h1 id="slide-1-title">From inventory<br>to <em>evidence.</em></h1>
+          <p class="lede">BridgeGuard connects SNBI records, inspection reports, imagery and 3D scans in one bridge-centered workspace.</p>
+          <div class="cover-badges" aria-label="Core platform facts">
+            <span>Map-first</span>
+            <span>CPU geometry</span>
+            <span>Cerebras generation + judgment</span>
+            <span>Nomic 768-D retrieval</span>
+          </div>
+        </div>
+
+        <div class="bridge-instrument reveal" aria-label="BridgeGuard evidence flow diagram">
+          <div class="instrument-label">Evidence trace / live system</div>
+          <svg class="bridge-drawing" viewBox="0 0 760 390" role="img" aria-label="A bridge cross-section connecting four evidence sources">
+            <defs>
+              <linearGradient id="deck-fill" x1="0" x2="1">
+                <stop offset="0" stop-color="#f0c95d" stop-opacity=".35"/>
+                <stop offset="1" stop-color="#f0c95d" stop-opacity=".06"/>
+              </linearGradient>
+              <filter id="soft-glow">
+                <feGaussianBlur stdDeviation="4" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <path class="gridline" d="M40 70H720M40 130H720M40 190H720M40 250H720M40 310H720"/>
+            <path class="gridline" d="M80 30V350M200 30V350M320 30V350M440 30V350M560 30V350M680 30V350"/>
+            <path class="bridge-fill" d="M88 219h584v28H88z"/>
+            <path class="bridge-line" d="M75 218h610M106 218c49-112 134-151 274-151s225 39 274 151"/>
+            <path class="bridge-line thin" d="M136 218c43-80 115-108 244-108s201 28 244 108"/>
+            <path class="bridge-line" d="M119 247v73m522-73v73M82 320h596"/>
+            <path class="bridge-line thin" d="M155 247l-18 73m468-73 18 73"/>
+            <g class="source-node" transform="translate(64 173)">
+              <circle r="24"/><text text-anchor="middle" y="5">DB</text>
+            </g>
+            <g class="source-node" transform="translate(270 58)">
+              <circle r="24"/><text text-anchor="middle" y="5">PDF</text>
+            </g>
+            <g class="source-node" transform="translate(490 83)">
+              <circle r="24"/><text text-anchor="middle" y="5">IMG</text>
+            </g>
+            <g class="source-node" transform="translate(696 173)">
+              <circle r="24"/><text text-anchor="middle" y="5">3D</text>
+            </g>
+            <g class="decision-node" transform="translate(380 229)" filter="url(#soft-glow)">
+              <circle r="39"/><text text-anchor="middle" y="-3">ONE</text><text text-anchor="middle" y="13">BRIDGE</text>
+            </g>
+            <path class="trace" d="M88 173C170 173 192 80 246 62M294 62C334 62 339 195 365 211M466 89C426 97 419 185 397 208M672 173C584 173 502 219 419 225"/>
+            <circle class="scanner-dot" r="6"><animateMotion dur="5s" repeatCount="indefinite" path="M88 173C170 173 192 80 246 62C334 62 339 195 365 211C419 185 426 97 466 89C502 219 584 173 672 173"/></circle>
+          </svg>
+          <div class="instrument-output">
+            <span>Input</span>
+            <i></i>
+            <strong>grounded bridge decision</strong>
+          </div>
+        </div>
+      </div>
+      <p class="slide-foot">Use ← → or scroll · built from the current local and hosted repositories</p>
+    </section>
+
+    <section class="slide" id="slide-2" data-title="System" aria-labelledby="slide-2-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <p class="eyebrow">01 · system thesis</p>
+        <h2 id="slide-2-title">One bridge becomes the unit of work.</h2>
+        <p>Every feature returns to a selected structure, instead of leaving inspectors to reconcile disconnected tools.</p>
+      </div>
+
+      <div class="system-thesis">
+        <figure class="screen-frame reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>BridgeGuard / workspace</small></div>
+          <img src="assets/workspace-map.png" alt="BridgeGuard map workspace with sidebar tools and New Jersey bridge inventory">
+          <figcaption>Live local capture · current map-first shell</figcaption>
+        </figure>
+
+        <div class="orbit-card reveal" aria-label="Evidence sources connected to one bridge">
+          <div class="orbit-center"><small>Selected</small><strong>Bridge</strong><span>state + structure ID</span></div>
+          <div class="orbit-item orbit-a"><b>01</b><span>SNBI record</span></div>
+          <div class="orbit-item orbit-b"><b>02</b><span>Report files</span></div>
+          <div class="orbit-item orbit-c"><b>03</b><span>Images</span></div>
+          <div class="orbit-item orbit-d"><b>04</b><span>Point cloud</span></div>
+          <div class="orbit-item orbit-e"><b>05</b><span>History</span></div>
+          <svg viewBox="0 0 560 430" aria-hidden="true">
+            <ellipse cx="280" cy="215" rx="205" ry="150"/>
+            <ellipse cx="280" cy="215" rx="145" ry="105"/>
+          </svg>
+        </div>
+      </div>
+      <div class="three-beats reveal">
+        <article><span>Find</span><p>Locate by county, condition, map marker or natural language.</p></article>
+        <article><span>Understand</span><p>Blend database fields with report text, tables, photos and history.</p></article>
+        <article><span>Measure</span><p>Turn a 3D scan into structural components and clearance evidence.</p></article>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-3" data-title="Map" aria-labelledby="slide-3-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div>
+          <p class="eyebrow">02 · operator walkthrough</p>
+          <h2 id="slide-3-title">Start with geography.<br>Filter with condition.</h2>
+        </div>
+        <p>The main screen is already the working map: county, inspection year, base layer and condition dimension stay visible while tools open above it.</p>
+      </div>
+
+      <div class="map-walkthrough">
+        <figure class="screen-frame screen-frame--dark reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>Map workspace</small></div>
+          <img src="assets/workspace-map.png" alt="BridgeGuard New Jersey map with county and year filters">
+          <div class="callout callout-1"><b>1</b><span>Choose county + year</span></div>
+          <div class="callout callout-2"><b>2</b><span>Color by condition</span></div>
+          <div class="callout callout-3"><b>3</b><span>Open a bridge</span></div>
+        </figure>
+        <div class="walkthrough-steps reveal">
+          <article>
+            <span class="step-no">01</span>
+            <div><h3>Scope</h3><p>State, county and data year constrain the records sent to the map.</p></div>
+            <code>GET /api/map-counties</code>
+          </article>
+          <article>
+            <span class="step-no">02</span>
+            <div><h3>Render</h3><p>Coordinates, identity and component ratings become map features.</p></div>
+            <code>GET /api/map-data</code>
+          </article>
+          <article>
+            <span class="step-no">03</span>
+            <div><h3>Act</h3><p>The selected marker exposes details, history, point cloud and LCCA.</p></div>
+            <code>state_code + bridge_number</code>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-4" data-title="Locate" aria-labelledby="slide-4-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <p class="eyebrow">03 · natural-language navigation</p>
+        <h2 id="slide-4-title">“Show bridge 0313151 on the map.”</h2>
+        <p>The sidebar recognizes a map intent before general chat, resolves the bridge record, switches county, zooms, and opens the bridge card.</p>
+      </div>
+
+      <div class="locate-layout">
+        <figure class="screen-frame reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>Bridgette → map</small></div>
+          <img src="assets/bridge-map-card.png" alt="BridgeGuard map focused on bridge 0313151 with its bridge card open">
+          <figcaption>Real result · NJ 73 over NJ 70 · Burlington County</figcaption>
+        </figure>
+        <div class="io-flow reveal" aria-label="Natural language map navigation input output diagram">
+          <div class="io-node input">
+            <small>Input</small>
+            <strong>bridge name or number</strong>
+            <span>free-text sidebar question</span>
+          </div>
+          <div class="io-arrow"><span>intent + identity</span></div>
+          <div class="io-node process">
+            <small>Process</small>
+            <strong>resolve + focus</strong>
+            <span>fetch statewide map index, match record, set county</span>
+          </div>
+          <div class="io-arrow"><span>focus event</span></div>
+          <div class="io-node output">
+            <small>Output</small>
+            <strong>map + bridge card</strong>
+            <span>zoomed location, ratings and action buttons</span>
+          </div>
+          <p class="edge-case"><b>Failure path:</b> a missing or ambiguous bridge returns a plain-language result without moving the map.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-5" data-title="Bridge" aria-labelledby="slide-5-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div>
+          <p class="eyebrow">04 · bridge workspace</p>
+          <h2 id="slide-5-title">A single card opens the full evidence stack.</h2>
+        </div>
+        <p>The bridge details modal preserves context while the user moves between condition history, attached files, 3D analysis, LCCA, grounded Q&amp;A, custom data and SNBI editing.</p>
+      </div>
+
+      <div class="bridge-workspace">
+        <figure class="screen-frame screen-frame--dark reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>Bridge 0313151 / details</small></div>
+          <img src="assets/bridge-details.png" alt="Bridge detail view with condition trend and maintenance timeline">
+        </figure>
+        <div class="tab-ledger reveal">
+          <article><b>History</b><span>observed ratings → forecast curve + maintenance timeline</span></article>
+          <article><b>Files</b><span>reports → extracted content + searchable evidence</span></article>
+          <article><b>Point Cloud</b><span>scan → components + geometry + clearance</span></article>
+          <article><b>LCCA</b><span>condition + policy → lifecycle cost comparison</span></article>
+          <article><b>Ask</b><span>question → bridge-scoped grounded answer</span></article>
+          <article><b>Edit</b><span>validated SNBI fields → saved bridge record</span></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-6" data-title="Files" aria-labelledby="slide-6-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <p class="eyebrow">05 · report intelligence</p>
+        <h2 id="slide-6-title">Attach to a bridge. Reuse the index.</h2>
+        <p>Files are stored against the bridge, parsed in the background and indexed with the pinned Nomic embedding profile.</p>
+      </div>
+
+      <div class="file-layout">
+        <div class="stacked-screens reveal">
+          <figure class="screen-frame">
+            <div class="screen-bar"><span></span><span></span><span></span><small>Bridge files</small></div>
+            <img src="assets/report-upload.png" alt="Bridge report upload surface">
+          </figure>
+          <figure class="screen-frame">
+            <div class="screen-bar"><span></span><span></span><span></span><small>Bridge Q&amp;A</small></div>
+            <img src="assets/bridge-qa.png" alt="Bridge-scoped question and answer interface">
+          </figure>
+        </div>
+
+        <div class="pipeline reveal" aria-label="Report ingestion and retrieval pipeline">
+          <div class="pipeline-row">
+            <div class="pipeline-node"><small>Input</small><strong>PDF · DOCX/XLSX · TXT/CSV · image</strong><span>≤ 50 MB per file</span></div>
+            <span class="pipeline-link">store</span>
+            <div class="pipeline-node"><small>Extract</small><strong>PDF text · pages · embedded media</strong><span>best-effort text; hosted build does not OCR</span></div>
+          </div>
+          <div class="pipeline-row reverse">
+            <div class="pipeline-node accent"><small>Index</small><strong>Nomic v1.5 · 768-D</strong><span>search_document prefix + normalized vectors</span></div>
+            <span class="pipeline-link">chunk</span>
+            <div class="pipeline-node"><small>Persist</small><strong>cache + embedding profile</strong><span>reused across restarts</span></div>
+          </div>
+          <div class="pipeline-row">
+            <div class="pipeline-node"><small>Query</small><strong>bridge question</strong><span>database + chosen report sources</span></div>
+            <span class="pipeline-link">retrieve</span>
+            <div class="pipeline-node output"><small>Output</small><strong>grounded answer + source</strong><span>pages and extracted images remain addressable</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-7" data-title="3D scan" aria-labelledby="slide-7-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div>
+          <p class="eyebrow">06 · point-cloud processing</p>
+          <h2 id="slide-7-title">A scan becomes measurable structure.</h2>
+        </div>
+        <p>Hosted processing keeps the numerical work on CPU and uses Cerebras for bounded scene judgment and component naming—without invoking the laptop GPU.</p>
+      </div>
+
+      <div class="point-layout">
+        <figure class="screen-frame screen-frame--dark reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>0313151 / saved analysis</small></div>
+          <img src="assets/point-cloud-analysis.png" alt="Point-cloud analysis with fitted components and clearance measurement">
+          <figcaption>345,795 cleaned points · 11 components · 19.66 ft clearance</figcaption>
+        </figure>
+        <div class="vertical-pipeline reveal" aria-label="Point cloud analysis stages">
+          <article><b>1</b><div><small>Upload</small><strong>raw LAS · PLY · E57 · XYZ · PCD · CSV · TXT · NPZ</strong></div></article>
+          <article><b>2</b><div><small>Parse + preview</small><strong>registered file → world coordinates + bounded render sample</strong></div></article>
+          <article><b>3</b><div><small>Analyze</small><strong>point payload → CPU cleaning, orientation, isolation and fitting</strong></div></article>
+          <article><b>4</b><div><small>AI judgment</small><strong>candidate image → component label + confidence</strong></div></article>
+          <article><b>5</b><div><small>Persist + download</small><strong>best-effort analysis JSON, cleaned NPZ and separate PLY route</strong></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-8" data-title="SNBI" aria-labelledby="slide-8-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <p class="eyebrow">07 · inventory ingestion</p>
+        <h2 id="slide-8-title">Normalize before the data reaches decisions.</h2>
+        <p>The converter handles legacy exchange formats; the loader validates New Jersey SNBI records and persists them by data year.</p>
+      </div>
+
+      <div class="ingestion-layout">
+        <figure class="screen-frame reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>Load / Delete Bridges</small></div>
+          <img src="assets/data-loader.png" alt="SNBI JSON loading and data-year management screen">
+        </figure>
+
+        <div class="dual-flow reveal">
+          <article>
+            <header><span>A</span><h3>Forward conversion</h3></header>
+            <div class="mini-flow">
+              <div><small>Input</small><strong>NBI TXT</strong><span>+ optional elements XML</span></div>
+              <i>→</i>
+              <div><small>Transform</small><strong>map + normalize</strong><span>NJ filter + validation</span></div>
+              <i>→</i>
+              <div><small>Output</small><strong>SNBI JSON</strong><span>coverage + warnings</span></div>
+            </div>
+            <code>POST /api/convert</code>
+          </article>
+          <article>
+            <header><span>B</span><h3>Database load</h3></header>
+            <div class="mini-flow">
+              <div><small>Input</small><strong>SNBI JSON[]</strong><span>BL01 + BID01 required</span></div>
+              <i>→</i>
+              <div><small>Validate</small><strong>schema + parity</strong><span>state code 34 only</span></div>
+              <i>→</i>
+              <div><small>Output</small><strong>year snapshot</strong><span>normalized relational rows</span></div>
+            </div>
+            <code>POST /api/load-json</code>
+          </article>
+          <article>
+            <header><span>C</span><h3>Reverse exchange</h3></header>
+            <div class="mini-flow">
+              <div><small>Input</small><strong>SNBI JSON</strong><span>single or array</span></div>
+              <i>→</i>
+              <div><small>Transform</small><strong>reverse map</strong><span>flatten nested fields</span></div>
+              <i>→</i>
+              <div><small>Output</small><strong>TXT · CSV · XML</strong><span>portable legacy package</span></div>
+            </div>
+            <code>POST /api/reverse-convert</code>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-9" data-title="Decision" aria-labelledby="slide-9-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div>
+          <p class="eyebrow">08 · decision surfaces</p>
+          <h2 id="slide-9-title">From statewide pattern to bridge action.</h2>
+        </div>
+        <p>KPIs summarize current inventory; history and forecasts expose deterioration; LCCA compares intervention timing and cost.</p>
+      </div>
+
+      <div class="decision-layout">
+        <figure class="screen-frame screen-frame--dark reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>2025 / New Jersey KPIs</small></div>
+          <img src="assets/kpi-dashboard.png" alt="New Jersey bridge KPI dashboard">
+        </figure>
+        <div class="decision-graph reveal" aria-label="Decision pipeline from inventory to lifecycle planning">
+          <div class="decision-stat"><strong>6,825</strong><span>bridges · 2025</span></div>
+          <svg viewBox="0 0 560 200" role="img" aria-label="Condition distribution and forecast curve">
+            <g class="bars">
+              <rect x="28" y="91" width="76" height="79"/><rect x="120" y="31" width="76" height="139"/><rect x="212" y="146" width="76" height="24"/>
+              <text x="66" y="188">GOOD</text><text x="158" y="188">FAIR</text><text x="250" y="188">POOR</text>
+            </g>
+            <path class="forecast-area" d="M340 48C378 57 393 73 420 82s42 34 61 42 29 24 52 35V170H340Z"/>
+            <path class="forecast-line" d="M340 48C378 57 393 73 420 82s42 34 61 42 29 24 52 35"/>
+            <circle cx="340" cy="48" r="5"/><circle cx="420" cy="82" r="5"/><circle cx="481" cy="124" r="5"/><circle cx="533" cy="159" r="5"/>
+            <text x="340" y="28">OBSERVED</text><text x="474" y="103">FORECAST</text>
+          </svg>
+          <div class="decision-chain">
+            <span>ratings by year</span><i>→</i><span>Markov condition path</span><i>→</i><span>maintenance scenario</span><i>→</i><strong>lifecycle cost</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-10" data-title="Contracts" aria-labelledby="slide-10-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <p class="eyebrow">09 · primary function contracts</p>
+        <h2 id="slide-10-title">Every major function has an explicit input and output.</h2>
+        <p>Select a function to inspect its runtime contract. These are product-level functions; lower-level helpers compose beneath them.</p>
+      </div>
+
+      <div class="contract-workbench reveal">
+        <div class="contract-tabs" role="tablist" aria-label="BridgeGuard function contracts" aria-orientation="vertical">
+          <button id="contract-tab-map" type="button" role="tab" aria-controls="contract-panel" aria-selected="true" data-contract="map">Map</button>
+          <button id="contract-tab-bridgette" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="bridgette">Bridgette</button>
+          <button id="contract-tab-converter" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="converter">Converter</button>
+          <button id="contract-tab-loader" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="loader">Loader</button>
+          <button id="contract-tab-reports" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="reports">Report RAG</button>
+          <button id="contract-tab-vision" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="vision">Vision</button>
+          <button id="contract-tab-pointcloud" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="pointcloud">Point cloud</button>
+          <button id="contract-tab-editor" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="editor">Editor</button>
+          <button id="contract-tab-decision" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="decision">Forecast / LCCA</button>
+          <button id="contract-tab-admin" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="admin">DB admin</button>
+        </div>
+        <div class="contract-panel" id="contract-panel" role="tabpanel" aria-labelledby="contract-tab-map" tabindex="0">
+          <header>
+            <div><small>Function</small><h3 id="contract-title">Map explorer</h3></div>
+            <code id="contract-route">GET /api/map-data</code>
+          </header>
+          <div class="contract-flow">
+            <article class="contract-node">
+              <small>Input</small>
+              <strong id="contract-input-title">state · county · year · condition key</strong>
+              <p id="contract-input-copy">Filter selections or a Bridgette focus request.</p>
+            </article>
+            <span class="contract-arrow" aria-hidden="true">→</span>
+            <article class="contract-node process">
+              <small>Behavior</small>
+              <strong id="contract-process-title">query + normalize + render</strong>
+              <p id="contract-process-copy">Returns map-safe identity, location and rating fields.</p>
+            </article>
+            <span class="contract-arrow" aria-hidden="true">→</span>
+            <article class="contract-node output">
+              <small>Output</small>
+              <strong id="contract-output-title">markers + selected bridge card</strong>
+              <p id="contract-output-copy">Actionable map context keyed by state and structure ID.</p>
+            </article>
+          </div>
+          <div class="contract-meta">
+            <p><span>Persists</span><strong id="contract-persists">No — read-only view state</strong></p>
+            <p><span>Guardrail</span><strong id="contract-guardrail">Invalid coordinates are excluded from rendering.</strong></p>
+          </div>
+        </div>
+      </div>
+      <div class="contract-print-grid" aria-label="All function contracts">
+        <div><b>Map</b><span>filters / focus request</span><strong>markers + bridge card</strong></div>
+        <div><b>Bridgette</b><span>plain-language question</span><strong>streamed answer / map focus</strong></div>
+        <div><b>Converter</b><span>NBI TXT + XML</span><strong>SNBI JSON + validation</strong></div>
+        <div><b>Loader</b><span>SNBI JSON + year</span><strong>year-versioned records</strong></div>
+        <div><b>Report RAG</b><span>bridge file + question</span><strong>index + grounded answer</strong></div>
+        <div><b>Vision</b><span>file/image + question</span><strong>answer + cited regions</strong></div>
+        <div><b>Point cloud</b><span>raw scan + analysis params</span><strong>components + clearance + files</strong></div>
+        <div><b>Editor</b><span>main-record field edits</span><strong>updated row + separate validation</strong></div>
+        <div><b>Forecast / LCCA</b><span>history + scenario</span><strong>condition path + lifecycle cost</strong></div>
+        <div><b>DB admin</b><span>table/query/row operation</span><strong>rows or mutation result</strong></div>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-11" data-title="Architecture" aria-labelledby="slide-11-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div>
+          <p class="eyebrow">10 · hosted architecture</p>
+          <h2 id="slide-11-title">One application boundary.<br>Two specialized AI roles.</h2>
+        </div>
+        <p>FastAPI serves the React application and JSON APIs. Generation stays separate from retrieval embeddings, while persistent bridge data remains on the OCI volume.</p>
+      </div>
+
+      <div class="architecture reveal" aria-label="BridgeGuard hosted system architecture">
+        <div class="arch-zone edge-zone">
+          <small>Public edge</small>
+          <article><span>01</span><strong>Public landing</strong><p>logo + workspace entry</p></article>
+          <article><span>02</span><strong>Cloudflare Access</strong><p>one-time PIN · approved emails</p></article>
+        </div>
+        <div class="arch-connector"><span>identity headers</span></div>
+        <div class="arch-zone app-zone">
+          <small>OCI · x86_64 · CPU</small>
+          <article class="wide"><span>03</span><strong>FastAPI + React</strong><p>/app + /api/* · role enforcement · streaming</p></article>
+          <article><span>04</span><strong>SQLite / SNBI</strong><p>bridge records · history · custom tables</p></article>
+          <article><span>05</span><strong>Persistent files</strong><p>reports · caches · point clouds · analysis</p></article>
+        </div>
+        <div class="arch-fan">
+          <span></span><span></span>
+        </div>
+        <div class="arch-services">
+          <article>
+            <small>Generation + judgment</small>
+            <strong>Cerebras</strong>
+            <p>Bridgette · report-image understanding · point-cloud scene review</p>
+          </article>
+          <article>
+            <small>Retrieval embeddings</small>
+            <strong>Nomic v1.5 / TEI</strong>
+            <p>pinned revision · normalized · 768 dimensions · CPU sidecar</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide slide-close" id="slide-12" data-title="Operate" aria-labelledby="slide-12-title" tabindex="-1">
+      <div class="close-layout">
+        <div class="close-copy reveal">
+          <p class="eyebrow">11 · operating envelope</p>
+          <h2 id="slide-12-title">Ready for controlled, bridge-by-bridge operation.</h2>
+          <p>Operate one large point-cloud job at a time on the current budget instance. Concurrency is not server-enforced; completed evidence is persisted for reuse.</p>
+          <div class="limits-grid">
+            <article><strong>50 MB</strong><span>report upload limit</span></article>
+            <article><strong>250 MB</strong><span>production point-cloud override · repo default 500 MB</span></article>
+            <article><strong>2 vCPU / 12 GB</strong><span>current OCI processing baseline</span></article>
+            <article><strong>CPU only</strong><span>no laptop GPU required</span></article>
+          </div>
+        </div>
+        <div class="readiness-board reveal">
+          <header><span>Hosted production inventory</span><b>READY</b></header>
+          <div class="readiness-row"><span>Inspection-report bridges</span><strong>10</strong></div>
+          <div class="readiness-row"><span>Registered point clouds</span><strong>15</strong></div>
+          <div class="readiness-row"><span>Processed point-cloud results</span><strong>16</strong></div>
+          <div class="readiness-row"><span>Report chunks embedded</span><strong>1,232</strong></div>
+          <p class="inventory-note">One legacy processed result is retained without a registered raw-source attachment.</p>
+          <div class="role-strip">
+            <div><small>Viewer</small><span>read · map · chat · run analysis</span></div>
+            <div><small>Editor</small><span>upload · edit · delete</span></div>
+            <div><small>Admin</small><span>database · runtime settings</span></div>
+          </div>
+        </div>
+      </div>
+      <footer class="closing-mark reveal">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 24"><path d="M2 18h44M8 17V9m32 8V9M8 12h32M12 12c3-7 8-9 12-9s9 2 12 9"/></svg>
+        </div>
+        <span>BridgeGuard</span>
+        <i></i>
+        <strong>inventory → evidence → action</strong>
+      </footer>
+    </section>
+  </main>
+
+  <div class="keyboard-hint" aria-hidden="true"><kbd>←</kbd><kbd>→</kbd> navigate</div>
+
+  <script src="deck.js"></script>
+</body>
+</html>

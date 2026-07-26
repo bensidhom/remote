@@ -1529,48 +1529,25 @@ async def process_bridge_ask(
         return _resp(f"Detected {len(img_chunks)} embedded image(s) across {len(reports_used)} report file(s).", vision=True)
 
     # ── visual / defect analysis ──
-    # ── text (hybrid: report excerpts + image descriptions + DB record) ──
+    # Deliberately absent from normal Ask. Raw-image analysis and defect
+    # detection are available only through /api/bridge-visual-investigation,
+    # which the bridge UI calls only when its visual-investigation checkbox is
+    # checked. This keeps visual mode request-scoped instead of inferring it
+    # from the wording of a question.
+
+    # ── text (report text/tables + DB record) ──
     # The report retrieval (embeddings) and the DB SQL-gen (an LLM call) are
     # INDEPENDENT, so when both sources are selected we run them CONCURRENTLY —
     # the file ranking overlaps the SQL generation instead of waiting for it. Both
     # run off the event loop so /api/ask-cancel stays responsive.
-    def _relevant_images(idxs, k=4):
-        """Image-description chunks worth showing for THIS question. An image is kept
-        only if its similarity is competitive with the best TEXT chunk (relative
-        threshold) and clears an absolute floor — so greetings / pure text+table /
-        DB questions surface NO images, while genuinely visual questions do. Makes
-        the displayed images DYNAMIC instead of always-4."""
-        if not idxs or not aligned:
-            return []
-        try:
-            from .rag_engine import _embed, _cosine_similarity
-            import numpy as _np
-            q = _embed([question])
-            if q is None:
-                return []
-            qe = q[0]
-            img_sims = _cosine_similarity(qe, embeddings[idxs])
-            best_txt = float(_cosine_similarity(qe, embeddings[txt_idx]).max()) if txt_idx else 0.0
-            floor = float(os.getenv('ASK_IMAGE_MIN_SIM', '0.42'))
-            thresh = max(floor, best_txt - 0.05)  # competitive with the best text chunk
-            order = _np.argsort(img_sims)[::-1][:k]
-            return [all_chunks[idxs[i]] for i in order if float(img_sims[i]) >= thresh]
-        except Exception as exc:
-            print(f"[bridge-ask] image relevance scoring failed: {exc}")
-            return []
-
     def _build_files_context():
-        # Text + TABLES are the primary source — keep generous excerpts (a table can
-        # sit mid-chunk, so don't over-truncate). Images are supplementary and only
-        # included when actually relevant (see _relevant_images), so text/DB answers
-        # aren't crowded out by — or attributed to — image descriptions.
+        # Text + TABLES are the only normal-Ask report sources. Image-description
+        # chunks are intentionally excluded: checking visual investigation is the
+        # sole action that authorizes a raw-image/VLM inspection.
         parts = []
         for c in _rank(txt_idx, k=6):
             parts.append(f"[Report text/table: {c.get('source')}]\n{c['text'][:2200]}")
-        ranked_imgs = _relevant_images(img_idx)
-        for c in ranked_imgs:
-            parts.append(f"[Report image description: {c.get('source')}]\n{c['text'][:700]}")
-        return '\n\n---\n\n'.join(parts), ranked_imgs
+        return '\n\n---\n\n'.join(parts)
 
     async def _build_db_context():
         # Bridgette-style: write + run SQL scoped to this bridge; fall back to the
@@ -1589,18 +1566,10 @@ async def process_bridge_ask(
                 ctx, meta = '', {}
         return ctx, sql, meta
 
-    (files_context, ranked_imgs), (db_context, db_sql, db_metadata) = await asyncio.gather(
+    files_context, (db_context, db_sql, db_metadata) = await asyncio.gather(
         asyncio.to_thread(_build_files_context),
         _build_db_context(),
     )
-
-    # The answer is grounded partly on these report-image DESCRIPTIONS, so surface
-    # the actual images alongside it (they were silently dropped before).
-    answer_images = []
-    for c in ranked_imgs:
-        enc = _encode(c.get('path'), c.get('ext') or 'png', _label(c))
-        if enc:
-            answer_images.append(enc)
 
     combined = db_context or ''
     if files_context:
@@ -1617,12 +1586,12 @@ async def process_bridge_ask(
     if defer_answer:
         return {'_defer': True, 'prompt': prompt, 'answer_model': ANSWER_MODEL or model,
                 'sources': sources or ['Database'], 'reports_used': reports_used,
-                'images': answer_images, 'output_format': output_format}
+                'images': [], 'output_format': output_format}
 
     # Run the (blocking, streaming) generation off the event loop so a parallel
     # /api/ask-cancel request can be served and actually stop it mid-generation.
     answer = await asyncio.to_thread(get_cerebras_answer, prompt, ANSWER_MODEL or model)
-    return _resp(answer, images=answer_images, sources=sources or ['Database'])
+    return _resp(answer, images=[], sources=sources or ['Database'])
 
 
 async def process_bridge_visual_investigation(
