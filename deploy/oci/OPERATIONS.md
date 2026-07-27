@@ -72,8 +72,10 @@ Git commit. Pipe it to `gh secret set` through standard input.
 4. Dispatch `.github/workflows/deploy-oci.yml` on `main`.
 5. Monitor the returned GitHub Actions run until it completes.
 6. The workflow checks out the exact tested SHA, runs preflight, creates an
-   online backup, pulls pinned dependencies, rebuilds the app, waits for
-   `/ready`, restarts Cloudflare Tunnel, and runs `deploy/oci/verify.sh`.
+   online backup (or checksum-verifies and reuses one created within the
+   previous hour during a retry), pulls pinned dependencies, rebuilds the app,
+   waits for `/ready`, restarts Cloudflare Tunnel, and runs
+   `deploy/oci/verify.sh`.
 7. Confirm the server checkout, container health, and readiness:
 
    ```powershell

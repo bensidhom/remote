@@ -60,7 +60,8 @@ jobs:
             git checkout --detach "$deploy_sha"
 
             sh deploy/oci/preflight.sh
-            sudo -n sh deploy/oci/backup.sh
+            sudo -n env BRIDGEGUARD_BACKUP_REUSE_SECONDS=3600 \
+              sh deploy/oci/backup.sh </dev/null
             docker compose -f deploy/oci/compose.yaml pull embeddings cloudflared
             docker compose -f deploy/oci/compose.yaml stop cloudflared
             docker compose -f deploy/oci/compose.yaml up \
