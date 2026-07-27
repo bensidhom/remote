@@ -60,7 +60,7 @@ jobs:
             git checkout --detach "$deploy_sha"
 
             sh deploy/oci/preflight.sh
-            sh deploy/oci/backup.sh
+            sudo -n sh deploy/oci/backup.sh
             docker compose -f deploy/oci/compose.yaml pull embeddings cloudflared
             docker compose -f deploy/oci/compose.yaml stop cloudflared
             docker compose -f deploy/oci/compose.yaml up \

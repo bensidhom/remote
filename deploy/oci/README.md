@@ -215,7 +215,7 @@ Create a consistent SQLite/file backup:
 
 ```bash
 cd /opt/bridgeguard/deploy/oci
-sh backup.sh
+sudo -n sh backup.sh
 ```
 
 Each backup contains online SQLite copies, persistent files, and a
