@@ -76,6 +76,8 @@ Git commit. Pipe it to `gh secret set` through standard input.
    previous hour during a retry), pulls pinned dependencies, rebuilds the app,
    waits for `/ready`, restarts Cloudflare Tunnel, and runs
    `deploy/oci/verify.sh`.
+   The complete remote payload is materialized before execution so a Docker
+   subprocess cannot consume later commands from the SSH input stream.
 7. Confirm the server checkout, container health, and readiness:
 
    ```powershell

@@ -50,7 +50,11 @@ jobs:
             -o ConnectTimeout=20 \
             -o StrictHostKeyChecking=yes \
             -i ~/.ssh/bridgeguard \
-            "$OCI_USER@$OCI_HOST" "bash -s -- '$DEPLOY_SHA'" <<'REMOTE'
+            "$OCI_USER@$OCI_HOST" \
+            "deploy_script=\$(mktemp /tmp/bridgeguard-deploy.XXXXXX); \
+             trap 'rm -f \"\$deploy_script\"' EXIT; \
+             cat >\"\$deploy_script\"; \
+             bash \"\$deploy_script\" '$DEPLOY_SHA'" <<'REMOTE'
             set -Eeuo pipefail
             deploy_sha="$1"
             cd /opt/bridgeguard
@@ -66,8 +70,8 @@ jobs:
             docker compose -f deploy/oci/compose.yaml stop cloudflared
             docker compose -f deploy/oci/compose.yaml up \
               -d --build --remove-orphans embeddings app
-            sh deploy/oci/wait-ready.sh deploy/oci/compose.yaml
+            sh deploy/oci/wait-ready.sh deploy/oci/compose.yaml </dev/null
             docker compose -f deploy/oci/compose.yaml up \
               -d --remove-orphans --wait --wait-timeout 120 cloudflared
-            sh deploy/oci/verify.sh
+            sh deploy/oci/verify.sh </dev/null
           REMOTE
