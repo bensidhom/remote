@@ -69,6 +69,17 @@ V3_MANIFEST = SchemaManifest(
     tables=(SCHEMA_MIGRATIONS_TABLE, *PROJECTION_CHILD_TABLES),
 )
 
+V11_VIEWS = tuple(
+    view
+    for view in AUTHORITATIVE_SCHEMA.views
+    if view.name
+    not in {
+        "v_bridge_span_sets",
+        "v_bridge_deck_material_summary",
+        "v_current_bridge_deck_material_summary",
+    }
+)
+
 
 def _apply_through_v3(connection: sqlite3.Connection):
     return apply_migrations(
@@ -594,7 +605,7 @@ def test_v6_response_audit_migration_is_additive_and_advances_only_schema_genera
                 and table not in KPI_PROGRAM_TABLES
                 and table not in POINT_CLOUD_RUN_TABLES
             ),
-            views=AUTHORITATIVE_SCHEMA.views,
+            views=V11_VIEWS,
         ),
     )
     timestamp = "2026-08-13T12:00:00Z"
@@ -625,7 +636,7 @@ def test_v6_response_audit_migration_is_additive_and_advances_only_schema_genera
                 and table not in KPI_PROGRAM_TABLES
                 and table not in POINT_CLOUD_RUN_TABLES
             ),
-            views=AUTHORITATIVE_SCHEMA.views,
+            views=V11_VIEWS,
         ),
     )
 
@@ -656,7 +667,7 @@ def test_v6_collision_rolls_back_without_history_or_generation_change():
             and table not in KPI_PROGRAM_TABLES
             and table not in POINT_CLOUD_RUN_TABLES
         ),
-        views=AUTHORITATIVE_SCHEMA.views,
+        views=V11_VIEWS,
     )
     apply_migrations(connection, migrations=MIGRATIONS[:5], manifest=v5_manifest)
     connection.execute("CREATE TABLE query_response_audit (unexpected TEXT)")
@@ -687,7 +698,7 @@ def test_v9_forecast_analytics_is_additive_immutable_and_advances_only_schema_ge
             and table not in KPI_PROGRAM_TABLES
             and table not in POINT_CLOUD_RUN_TABLES
         ),
-        views=AUTHORITATIVE_SCHEMA.views,
+        views=V11_VIEWS,
     )
     apply_migrations(connection, migrations=MIGRATIONS[:8], manifest=v8_manifest)
     timestamp = "2026-08-14T12:00:00Z"
@@ -715,7 +726,7 @@ def test_v9_forecast_analytics_is_additive_immutable_and_advances_only_schema_ge
                 if table not in KPI_PROGRAM_TABLES
                 and table not in POINT_CLOUD_RUN_TABLES
             ),
-            views=AUTHORITATIVE_SCHEMA.views,
+            views=V11_VIEWS,
         ),
     )
 
@@ -787,7 +798,7 @@ def test_v9_collision_rolls_back_without_partial_forecast_schema():
             and table not in KPI_PROGRAM_TABLES
             and table not in POINT_CLOUD_RUN_TABLES
         ),
-        views=AUTHORITATIVE_SCHEMA.views,
+        views=V11_VIEWS,
     )
     apply_migrations(connection, migrations=MIGRATIONS[:8], manifest=v8_manifest)
     connection.execute("CREATE TABLE forecast_datasets (unexpected TEXT)")
@@ -815,7 +826,7 @@ def test_v10_kpi_program_store_is_additive_immutable_and_generation_neutral():
             if table not in KPI_PROGRAM_TABLES
             and table not in POINT_CLOUD_RUN_TABLES
         ),
-        views=AUTHORITATIVE_SCHEMA.views,
+        views=V11_VIEWS,
     )
     apply_migrations(connection, migrations=MIGRATIONS[:9], manifest=v9_manifest)
     timestamp = "2026-08-14T15:00:00Z"
@@ -842,7 +853,7 @@ def test_v10_kpi_program_store_is_additive_immutable_and_generation_neutral():
                 for table in AUTHORITATIVE_SCHEMA.tables
                 if table not in POINT_CLOUD_RUN_TABLES
             ),
-            views=AUTHORITATIVE_SCHEMA.views,
+            views=V11_VIEWS,
         ),
     )
 
@@ -884,7 +895,7 @@ def test_v10_collision_rolls_back_without_partial_kpi_schema():
             if table not in KPI_PROGRAM_TABLES
             and table not in POINT_CLOUD_RUN_TABLES
         ),
-        views=AUTHORITATIVE_SCHEMA.views,
+        views=V11_VIEWS,
     )
     apply_migrations(connection, migrations=MIGRATIONS[:9], manifest=v9_manifest)
     connection.execute("CREATE TABLE kpi_measure_definitions (unexpected TEXT)")

@@ -178,6 +178,16 @@ def test_condition_precedence_and_county_aggregation_are_deterministic(test_work
             bc03=None,
             bc04=4,
         )
+        connection.execute(
+            "INSERT INTO span_sets "
+            "(state_code,bridge_number,data_year,span_configuration_designation,deck_material_and_type) "
+            "VALUES (34,'A',2025,'M01','CR-T')"
+        )
+        connection.execute(
+            "INSERT INTO span_sets "
+            "(state_code,bridge_number,data_year,span_configuration_designation,deck_material_and_type) "
+            "VALUES (34,'B',2025,'C01','0')"
+        )
         connection.commit()
 
         rows = connection.execute(
@@ -194,6 +204,20 @@ def test_condition_precedence_and_county_aggregation_are_deterministic(test_work
             "poor_bridge_count,unknown_condition_count,total_deck_area "
             "FROM v_county_bridge_inventory"
         ).fetchone() == ("Atlantic", 2, 0, 1, 1, 0, 4000.0)
+        assert connection.execute(
+            "SELECT bridge_number,deck_material_and_type FROM v_bridge_span_sets "
+            "ORDER BY bridge_number"
+        ).fetchall() == [("A", "CR-T"), ("B", "0")]
+        assert connection.execute(
+            "SELECT bridge_number,span_set_count,concrete_deck_span_count,"
+            "has_concrete_deck,has_known_deck_material "
+            "FROM v_bridge_deck_material_summary ORDER BY bridge_number"
+        ).fetchall() == [("A", 1, 1, 1, 1), ("B", 1, 0, 0, 0)]
+        assert connection.execute(
+            "SELECT bridge_number,span_set_count,concrete_deck_span_count,"
+            "has_concrete_deck,has_known_deck_material "
+            "FROM v_current_bridge_deck_material_summary ORDER BY bridge_number"
+        ).fetchall() == [("A", 1, 1, 1, 1), ("B", 1, 0, 0, 0)]
     finally:
         connection.close()
 

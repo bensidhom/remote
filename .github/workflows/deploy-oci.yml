@@ -76,7 +76,19 @@ jobs:
             cleanup_compose_env() {
               [ -z "$generated_compose_env" ] || rm -f "$generated_compose_env"
             }
-            trap cleanup_compose_env EXIT
+            recover_quiesced_release=false
+            cleanup_deploy() {
+              status="$?"
+              cleanup_compose_env
+              if [ "$status" -ne 0 ] && [ "$recover_quiesced_release" = true ]; then
+                printf 'deploy failed after quiescing; restarting application and tunnel\n' >&2
+                compose up -d --remove-orphans embeddings app || true
+                sh deploy/oci/wait-ready.sh "$compose_file" </dev/null || true
+                compose up -d --remove-orphans cloudflared || true
+              fi
+              exit "$status"
+            }
+            trap cleanup_deploy EXIT
             export BRIDGEGUARD_COMPOSE_ENV_FILE="$compose_env_candidate"
             cd /opt/bridgeguard
             compose_file="deploy/oci/compose.yaml"
@@ -97,10 +109,13 @@ jobs:
             sudo -n env BRIDGEGUARD_COMPOSE_ENV_FILE="$BRIDGEGUARD_COMPOSE_ENV_FILE" \
               BRIDGEGUARD_BACKUP_REUSE_SECONDS=3600 \
               sh deploy/oci/backup.sh </dev/null
+            recover_quiesced_release=true
+            sh deploy/oci/publish-legacy-data.sh </dev/null
             compose up \
               -d --remove-orphans embeddings app
             sh deploy/oci/wait-ready.sh "$compose_file" </dev/null
             compose up \
               -d --remove-orphans --wait --wait-timeout 120 cloudflared
             sh deploy/oci/verify.sh "$compose_file" </dev/null
+            recover_quiesced_release=false
           REMOTE

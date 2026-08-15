@@ -49,6 +49,8 @@ class ResourceGrain(str, Enum):
     CURRENT_BRIDGE = "one_row_per_bridge_latest_published_snapshot"
     BRIDGE_FEATURE = "one_row_per_bridge_feature_snapshot"
     BRIDGE_ROUTE = "one_row_per_bridge_route_snapshot"
+    BRIDGE_SPAN = "one_row_per_bridge_span_configuration_snapshot"
+    BRIDGE_DECK_SUMMARY = "one_row_per_published_bridge_snapshot_deck_material_summary"
     BRIDGE_ELEMENT = "one_row_per_bridge_element_snapshot"
     BRIDGE_WORK = "one_row_per_bridge_work_record_snapshot"
     POSTING_STATUS = "one_row_per_bridge_posting_status_snapshot"

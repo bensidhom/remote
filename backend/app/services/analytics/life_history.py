@@ -33,7 +33,10 @@ class LifeHistoryEvent:
             raise ValueError("event_id is required")
         if not component:
             raise ValueError("component is required")
-        if int(self.event_year) < 1800 or int(self.event_year) > 2300:
+        # The inventory contains legitimate surviving New Jersey structures
+        # whose reported construction/reconstruction history predates 1800.
+        # Retain those evidentiary events while keeping an explicit bound.
+        if int(self.event_year) < 1700 or int(self.event_year) > 2300:
             raise ValueError("event_year is outside the supported range")
         sources = tuple(str(value).strip() for value in self.source_record_ids)
         if any(not value for value in sources) or len(set(sources)) != len(sources):

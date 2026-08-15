@@ -464,6 +464,94 @@ BRIDGE_POSTING_STATUSES = SemanticResource(
 )
 
 
+BRIDGE_SPAN_SETS = SemanticResource(
+    resource_id="v_bridge_span_sets",
+    description=(
+        "SNBI span-configuration rows belonging only to published snapshots. "
+        "Use deck_material_and_type (BSP09) for deck-material questions; temporary "
+        "codes CP-T and CR-T are concrete transition codes."
+    ),
+    grain=ResourceGrain.BRIDGE_SPAN,
+    columns=_IDENTITY_COLUMNS
+    + (
+        _column("span_configuration_designation", SemanticDataType.TEXT, True, "BSP01 span configuration identifier."),
+        _column("number_of_spans", SemanticDataType.INTEGER, True, "BSP02 number of spans in this configuration.", unit="spans"),
+        _column("number_of_beam_lines", SemanticDataType.INTEGER, True, "BSP03 number of beam or girder lines."),
+        _column("span_material", SemanticDataType.TEXT, True, "BSP04 span material code."),
+        _column("span_continuity", SemanticDataType.TEXT, True, "BSP05 span continuity code."),
+        _column("span_type", SemanticDataType.TEXT, True, "BSP06 span type code."),
+        _column("span_protective_system", SemanticDataType.TEXT, True, "BSP07 span protective-system code."),
+        _column("deck_interaction", SemanticDataType.TEXT, True, "BSP08 deck interaction code."),
+        _column(
+            "deck_material_and_type",
+            SemanticDataType.TEXT,
+            True,
+            "BSP09 deck material/type code. Concrete is C01, C02, C03, C04, C05, CX, CP-T, or CR-T; 0 means no deck.",
+        ),
+        _column("wearing_surface", SemanticDataType.TEXT, True, "BSP10 wearing-surface code."),
+        _column("deck_protective_system", SemanticDataType.TEXT, True, "BSP11 deck protective-system code."),
+        _column("deck_reinforcing_protective_system", SemanticDataType.TEXT, True, "BSP12 deck reinforcing protective-system code."),
+        _column("deck_stay_in_place_forms", SemanticDataType.TEXT, True, "BSP13 deck stay-in-place forms code."),
+    ),
+    time_semantics="span data_year is the exact published parent snapshot year",
+    scope_fields=_SCOPE_FIELDS,
+    physical_relations=("v_bridge_span_sets", "published_snapshots", "span_sets"),
+    implementation_id="published_span_set_join_v1",
+)
+
+
+BRIDGE_DECK_MATERIAL_SUMMARY = SemanticResource(
+    resource_id="v_bridge_deck_material_summary",
+    description=(
+        "One row per published bridge snapshot summarizing BSP09 deck material across all "
+        "span configurations. A bridge has a concrete deck when any span-set BSP09 is "
+        "C01, C02, C03, C04, C05, CX, CP-T, or CR-T. Percentages use all selected "
+        "published bridge snapshots as the denominator unless the user explicitly asks "
+        "for only known deck materials."
+    ),
+    grain=ResourceGrain.BRIDGE_DECK_SUMMARY,
+    columns=_IDENTITY_COLUMNS
+    + (
+        _derived_column("span_set_count", SemanticDataType.INTEGER, False, "Number of span-configuration rows.", unit="span_sets"),
+        _derived_column("known_deck_material_span_count", SemanticDataType.INTEGER, False, "Span sets with a nonblank BSP09 other than 0.", unit="span_sets"),
+        _derived_column("concrete_deck_span_count", SemanticDataType.INTEGER, False, "Span sets whose BSP09 is one of the reviewed concrete codes.", unit="span_sets"),
+        _derived_column("has_concrete_deck", SemanticDataType.BOOLEAN, False, "True when any span-set BSP09 is C01-C05, CX, CP-T, or CR-T."),
+        _derived_column("has_known_deck_material", SemanticDataType.BOOLEAN, False, "True when any span set reports a nonzero deck-material code."),
+    ),
+    time_semantics="summary is evaluated at the exact published data_year",
+    scope_fields=_SCOPE_FIELDS,
+    physical_relations=(
+        "v_bridge_deck_material_summary",
+        "published_snapshots",
+        "span_sets",
+    ),
+    implementation_id="published_deck_material_summary_v1",
+)
+
+
+CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY = SemanticResource(
+    resource_id="v_current_bridge_deck_material_summary",
+    description=(
+        "One row per bridge at that bridge's independently selected latest published "
+        "snapshot, summarizing BSP09 deck material. Use this resource for current or "
+        "unspecified-year deck-material questions. Concrete means C01, C02, C03, C04, "
+        "C05, CX, CP-T, or CR-T; percentages use all current published bridges unless "
+        "the user explicitly requests a known-material denominator."
+    ),
+    grain=ResourceGrain.BRIDGE_DECK_SUMMARY,
+    columns=BRIDGE_DECK_MATERIAL_SUMMARY.columns,
+    time_semantics="one independently selected latest published snapshot per bridge",
+    scope_fields=_SCOPE_FIELDS,
+    physical_relations=(
+        "v_current_bridge_deck_material_summary",
+        "v_current_bridge_snapshots",
+        "published_snapshots",
+        "span_sets",
+    ),
+    implementation_id="current_published_deck_material_summary_v1",
+)
+
+
 BRIDGE_CONDITION = SemanticResource(
     resource_id="v_bridge_condition",
     description=(
@@ -531,6 +619,9 @@ _RESOURCES = (
     BRIDGE_ELEMENTS,
     BRIDGE_WORKS,
     BRIDGE_POSTING_STATUSES,
+    BRIDGE_SPAN_SETS,
+    BRIDGE_DECK_MATERIAL_SUMMARY,
+    CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY,
     BRIDGE_CONDITION,
     COUNTY_BRIDGE_INVENTORY,
 )
@@ -591,6 +682,25 @@ _JOINS = (
         "v_bridge_posting_statuses",
         JoinCardinality.ONE_TO_MANY,
         "Attach posting statuses for the same published snapshot.",
+    ),
+    _snapshot_join(
+        "published_to_span_sets",
+        "v_bridge_span_sets",
+        JoinCardinality.ONE_TO_MANY,
+        "Attach all span configurations for the same published snapshot.",
+    ),
+    _snapshot_join(
+        "published_to_deck_material_summary",
+        "v_bridge_deck_material_summary",
+        JoinCardinality.ONE_TO_ONE,
+        "Attach the single reviewed deck-material summary for the same published snapshot.",
+    ),
+    _snapshot_join(
+        "current_to_deck_material_summary",
+        "v_current_bridge_deck_material_summary",
+        JoinCardinality.ONE_TO_ONE,
+        "Attach the reviewed deck-material summary to each independently selected current snapshot.",
+        left_resource_id="v_current_bridge_snapshots",
     ),
     _snapshot_join(
         "current_to_condition",
@@ -677,11 +787,14 @@ __all__ = [
     "BRIDGE_FEATURES",
     "BRIDGE_POSTING_STATUSES",
     "BRIDGE_ROUTES",
+    "BRIDGE_SPAN_SETS",
+    "BRIDGE_DECK_MATERIAL_SUMMARY",
     "BRIDGE_WORKS",
     "CARRIED_HIGHWAY_FEATURES",
     "CATALOG_DEFINITION_VERSION",
     "COUNTY_BRIDGE_INVENTORY",
     "CURRENT_BRIDGE_SNAPSHOTS",
+    "CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY",
     "PUBLISHED_BRIDGE_SNAPSHOTS",
     "build_semantic_catalog",
     "semantic_catalog_hash",

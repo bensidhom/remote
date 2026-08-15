@@ -91,9 +91,11 @@ PROMPT_VERSION = "bridgette-semantic-query-v1"
 PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v1"
 MAX_GENERATION_ATTEMPTS = 2
 MAX_QUERY_CONTEXT_BYTES = 256 * 1024
-# Keep planning prompts bounded for predictable latency while retaining every
-# SNBI field in the complete compact index.
-MAX_PLAN_CONTEXT_BYTES = 48 * 1024
+# Keep planning prompts bounded while retaining the complete 154-field SNBI
+# index plus reviewed value domains (including BSP09 deck-material codes).
+# This remains well below the configured model context window and contains no
+# bridge-row corpus—only schema, definitions, mappings, units, and code lists.
+MAX_PLAN_CONTEXT_BYTES = 192 * 1024
 MAX_DETAILED_DICTIONARY_FIELDS = 18
 MAX_PLAN_RESPONSE_BYTES = 64 * 1024
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,254}$")
@@ -382,7 +384,7 @@ def build_sql_catalog(catalog: SemanticCatalog) -> SqlCatalog:
             bridge_column="bridge_number" if "bridge_number" in columns else None,
             time_semantics=(
                 TableTimeSemantics.CURRENT
-                if resource.resource_id == "v_current_bridge_snapshots"
+                if resource.resource_id.startswith("v_current_")
                 else TableTimeSemantics.HISTORY
             ),
         )
@@ -1188,7 +1190,11 @@ def execute_semantic_plan_query(
         official_information=official_information,
     )
     context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
-    active_plan_limits = plan_limits or PlanLimits(max_limit=min(request.max_rows, 200))
+    bounded_plan_limit = min(request.max_rows, 200)
+    active_plan_limits = plan_limits or PlanLimits(
+        max_limit=bounded_plan_limit,
+        max_lookup_limit=min(20, bounded_plan_limit),
+    )
     active_sql_limits = sql_limits or SqlLimits(max_rows=min(request.max_rows, 200))
     feedback: GenerationFeedback | None = None
 

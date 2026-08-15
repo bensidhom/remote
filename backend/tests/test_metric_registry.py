@@ -32,6 +32,10 @@ def test_registry_is_complete_deterministic_and_compatible_with_catalog():
 
     required = {
         "inventory.bridge_count",
+        "inventory.concrete_deck_bridge_count",
+        "inventory.concrete_deck_bridge_percent",
+        "inventory.current_concrete_deck_bridge_count",
+        "inventory.current_concrete_deck_bridge_percent",
         "inventory.good_bridge_count",
         "inventory.fair_bridge_count",
         "inventory.poor_bridge_count",

@@ -21,7 +21,7 @@ import sqlite3
 from typing import Iterable, Mapping, Sequence
 
 
-LATEST_SCHEMA_VERSION = 11
+LATEST_SCHEMA_VERSION = 13
 
 
 class SchemaDriftError(RuntimeError):
@@ -2331,6 +2331,73 @@ BRIDGE_POSTING_STATUSES_VIEW = _published_child_view(
     "child.load_posting_status, child.posting_status_change_date",
 )
 
+BRIDGE_SPAN_SETS_VIEW = _published_child_view(
+    "v_bridge_span_sets",
+    "span_sets",
+    "child.state_code, child.bridge_number, child.data_year, "
+    "child.span_configuration_designation, child.number_of_spans, "
+    "child.number_of_beam_lines, child.span_material, child.span_continuity, "
+    "child.span_type, child.span_protective_system, child.deck_interaction, "
+    "child.deck_material_and_type, child.wearing_surface, "
+    "child.deck_protective_system, child.deck_reinforcing_protective_system, "
+    "child.deck_stay_in_place_forms",
+)
+
+BRIDGE_DECK_MATERIAL_SUMMARY_VIEW = ViewSpec(
+    "v_bridge_deck_material_summary",
+    """CREATE VIEW v_bridge_deck_material_summary AS SELECT
+    ps.workspace_id, ps.snapshot_revision_id,
+    ps.state_code, ps.bridge_number, ps.data_year,
+    COUNT(s.id) AS span_set_count,
+    SUM(CASE WHEN s.deck_material_and_type IS NOT NULL
+              AND s.deck_material_and_type<>''
+              AND s.deck_material_and_type<>'0' THEN 1 ELSE 0 END)
+      AS known_deck_material_span_count,
+    SUM(CASE WHEN s.deck_material_and_type IN
+              ('C01','C02','C03','C04','C05','CX','CP-T','CR-T')
+             THEN 1 ELSE 0 END) AS concrete_deck_span_count,
+    CASE WHEN MAX(CASE WHEN s.deck_material_and_type IN
+              ('C01','C02','C03','C04','C05','CX','CP-T','CR-T')
+             THEN 1 ELSE 0 END)=1 THEN 1 ELSE 0 END AS has_concrete_deck,
+    CASE WHEN MAX(CASE WHEN s.deck_material_and_type IS NOT NULL
+              AND s.deck_material_and_type<>''
+              AND s.deck_material_and_type<>'0' THEN 1 ELSE 0 END)=1
+         THEN 1 ELSE 0 END AS has_known_deck_material
+    FROM published_snapshots ps LEFT JOIN span_sets s
+      ON s.state_code=ps.state_code AND s.bridge_number=ps.bridge_number
+     AND s.data_year=ps.data_year
+    GROUP BY ps.workspace_id, ps.snapshot_revision_id,
+             ps.state_code, ps.bridge_number, ps.data_year""",
+)
+
+CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY_VIEW = ViewSpec(
+    "v_current_bridge_deck_material_summary",
+    """CREATE VIEW v_current_bridge_deck_material_summary AS SELECT
+    current.workspace_id, current.snapshot_revision_id,
+    current.state_code, current.bridge_number, current.data_year,
+    COUNT(s.id) AS span_set_count,
+    SUM(CASE WHEN s.deck_material_and_type IS NOT NULL
+              AND s.deck_material_and_type<>''
+              AND s.deck_material_and_type<>'0' THEN 1 ELSE 0 END)
+      AS known_deck_material_span_count,
+    SUM(CASE WHEN s.deck_material_and_type IN
+              ('C01','C02','C03','C04','C05','CX','CP-T','CR-T')
+             THEN 1 ELSE 0 END) AS concrete_deck_span_count,
+    CASE WHEN MAX(CASE WHEN s.deck_material_and_type IN
+              ('C01','C02','C03','C04','C05','CX','CP-T','CR-T')
+             THEN 1 ELSE 0 END)=1 THEN 1 ELSE 0 END AS has_concrete_deck,
+    CASE WHEN MAX(CASE WHEN s.deck_material_and_type IS NOT NULL
+              AND s.deck_material_and_type<>''
+              AND s.deck_material_and_type<>'0' THEN 1 ELSE 0 END)=1
+         THEN 1 ELSE 0 END AS has_known_deck_material
+    FROM v_current_bridge_snapshots current LEFT JOIN span_sets s
+      ON s.state_code=current.state_code
+     AND s.bridge_number=current.bridge_number
+     AND s.data_year=current.data_year
+    GROUP BY current.workspace_id, current.snapshot_revision_id,
+             current.state_code, current.bridge_number, current.data_year""",
+)
+
 QUERY_SEMANTIC_VIEWS: tuple[ViewSpec, ...] = (
     PUBLISHED_BRIDGES_VIEW,
     CURRENT_BRIDGES_VIEW,
@@ -2342,6 +2409,9 @@ QUERY_SEMANTIC_VIEWS: tuple[ViewSpec, ...] = (
     BRIDGE_ELEMENTS_VIEW,
     BRIDGE_WORKS_VIEW,
     BRIDGE_POSTING_STATUSES_VIEW,
+    BRIDGE_SPAN_SETS_VIEW,
+    BRIDGE_DECK_MATERIAL_SUMMARY_VIEW,
+    CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY_VIEW,
 )
 
 SCHEMA_MIGRATIONS_TABLE = TableSpec(

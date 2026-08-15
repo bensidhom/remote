@@ -291,7 +291,7 @@ def test_original_paint_color_abstains_and_never_substitutes_material() -> None:
     ]
     assert {
         field.query_availability for field in result.nearby_supported_fields
-    } == {"snbi_dictionary_only"}
+    } == {"semantic_catalog"}
 
 
 @pytest.mark.parametrize(

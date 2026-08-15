@@ -49,6 +49,9 @@ def test_prompt_is_static_logical_allowlist_and_never_leaks_physical_discovery()
         "v_bridge_features",
         "v_carried_highway_features",
         "v_bridge_condition",
+        "v_bridge_span_sets",
+        "v_bridge_deck_material_summary",
+        "v_current_bridge_deck_material_summary",
         "v_county_bridge_inventory",
     }
 
@@ -114,6 +117,11 @@ def test_time_and_condition_semantics_are_not_global_latest_or_ambiguous():
     current = catalog.resources_by_id["v_current_bridge_snapshots"]
     condition = catalog.resources_by_id["v_bridge_condition"]
     carried = catalog.resources_by_id["v_carried_highway_features"]
+    spans = catalog.resources_by_id["v_bridge_span_sets"]
+    deck_summary = catalog.resources_by_id["v_bridge_deck_material_summary"]
+    current_deck_summary = catalog.resources_by_id[
+        "v_current_bridge_deck_material_summary"
+    ]
 
     assert "per bridge" in current.time_semantics
     assert "database-wide maximum" in current.description
@@ -130,6 +138,11 @@ def test_time_and_condition_semantics_are_not_global_latest_or_ambiguous():
         "condition_conflict",
     }.issubset(condition.column_ids)
     assert "H01" in carried.description
+    assert "BSP09" in spans.description
+    assert "CR-T" in spans.columns_by_id["deck_material_and_type"].description
+    assert "all selected published bridge snapshots" in deck_summary.description
+    assert deck_summary.grain.value == "one_row_per_published_bridge_snapshot_deck_material_summary"
+    assert "independently selected latest" in current_deck_summary.time_semantics
 
 
 def test_catalog_rejects_invalid_generation_identity():

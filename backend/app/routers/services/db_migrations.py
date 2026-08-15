@@ -695,6 +695,19 @@ _NJ_COUNTIES: tuple[tuple[int, str], ...] = (
 def _migration_0005_create_query_boundary(
     connection: sqlite3.Connection,
 ) -> None:
+    # Migration 5 must remain frozen to the objects that existed at version 5.
+    # Later views live in the authoritative manifest too, but are introduced by
+    # their own checksummed migrations.
+    version_5_views = tuple(
+        view
+        for view in QUERY_SEMANTIC_VIEWS
+        if view.name
+        not in {
+            "v_bridge_span_sets",
+            "v_bridge_deck_material_summary",
+            "v_current_bridge_deck_material_summary",
+        }
+    )
     collisions = tuple(
         table.name
         for table in QUERY_SUPPORT_TABLES
@@ -702,7 +715,7 @@ def _migration_0005_create_query_boundary(
     )
     view_collisions = tuple(
         view.name
-        for view in QUERY_SEMANTIC_VIEWS
+        for view in version_5_views
         if view_exists(connection, view.name)
     )
     if collisions or view_collisions:
@@ -725,7 +738,7 @@ def _migration_0005_create_query_boundary(
         _create_table_triggers(connection, table)
         assert_table_matches(connection, table)
 
-    for view in QUERY_SEMANTIC_VIEWS:
+    for view in version_5_views:
         connection.execute(view.sql)
 
     connection.execute(
@@ -894,6 +907,43 @@ def _migration_0011_create_point_cloud_run_store(
     )
 
 
+def _migration_0012_create_deck_material_query_views(
+    connection: sqlite3.Connection,
+) -> None:
+    view_names = {"v_bridge_span_sets", "v_bridge_deck_material_summary"}
+    collisions = tuple(name for name in sorted(view_names) if view_exists(connection, name))
+    if collisions:
+        raise SchemaDriftError(
+            tuple(
+                f"{name}: untracked deck-material query view exists before migration 12"
+                for name in collisions
+            )
+        )
+    for view in QUERY_SEMANTIC_VIEWS:
+        if view.name in view_names:
+            connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (12,),
+    )
+
+
+def _migration_0013_create_current_deck_material_query_view(
+    connection: sqlite3.Connection,
+) -> None:
+    view_name = "v_current_bridge_deck_material_summary"
+    if view_exists(connection, view_name):
+        raise SchemaDriftError(
+            (f"{view_name}: untracked current deck-material view exists before migration 13",)
+        )
+    view = next(view for view in QUERY_SEMANTIC_VIEWS if view.name == view_name)
+    connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (13,),
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -1034,6 +1084,28 @@ MIGRATIONS: tuple[Migration, ...] = (
             "enforce workspace-scoped foreign keys and advance schema generation without changing data generation",
         ),
         operation=_migration_0011_create_point_cloud_run_store,
+    ),
+    Migration(
+        version=12,
+        name="create_deck_material_query_views",
+        descriptor=(
+            "create a publication-only span-set query view exposing BSP01 through BSP13",
+            "create one publication-only bridge snapshot deck-material summary row",
+            "define concrete deck codes as C01-C05, CX, CP-T, and CR-T",
+            "expose known-material and concrete-material counts without raw-table access",
+            "advance workspace schema generation without changing data generation",
+        ),
+        operation=_migration_0012_create_deck_material_query_views,
+    ),
+    Migration(
+        version=13,
+        name="create_current_deck_material_query_view",
+        descriptor=(
+            "create a bounded current-snapshot BSP09 deck-material summary view",
+            "preserve historical deck-material views for exact-year and trend queries",
+            "advance schema generation without changing data generation",
+        ),
+        operation=_migration_0013_create_current_deck_material_query_view,
     ),
 )
 

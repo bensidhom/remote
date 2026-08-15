@@ -10,7 +10,11 @@ from types import MappingProxyType
 import uuid
 
 from app.routers.services.db_migrations import migrate_database
-from app.services.conversion.canonical_json import canonical_json_text
+from app.services.conversion.canonical_json import (
+    CanonicalJsonLimits,
+    canonical_json_bytes,
+    canonical_json_text,
+)
 from app.services.forecasting_v2.estimator import AnnualMarkovModel, ForecastModelConfig
 from app.services.forecasting_v2.evaluation import HindcastReport
 from app.services.forecasting_v2.models import ForecastQualification
@@ -18,6 +22,11 @@ from app.services.forecasting_v2.models import ForecastQualification
 
 _NAMESPACE = uuid.UUID("caa20cd2-0cf2-4de0-adae-7889e3228285")
 MODEL_SERIALIZATION_VERSION = "annual-markov-model-v1"
+FORECAST_MODEL_JSON_LIMITS = CanonicalJsonLimits(
+    max_depth=64,
+    max_nodes=1_000_000,
+    max_bytes=64 * 1024 * 1024,
+)
 
 
 class ForecastStoreError(RuntimeError):
@@ -67,7 +76,7 @@ def serialize_annual_markov_model(model: AnnualMarkovModel) -> str:
             for key, matrix in sorted(model.transition_counts.items(), key=lambda item: repr(item[0]))
         ],
     }
-    return canonical_json_text(payload)
+    return canonical_json_text(payload, FORECAST_MODEL_JSON_LIMITS)
 
 
 def deserialize_annual_markov_model(serialized: str) -> AnnualMarkovModel:
@@ -130,7 +139,22 @@ def _evaluation_summary(report: HindcastReport) -> str:
 
 
 def _evaluation_rows(report: HindcastReport) -> str:
-    return canonical_json_text([row.canonical_payload() for row in report.rows])
+    # Statewide hindcasts can contain hundreds of thousands of predictions.
+    # The exact rows are persisted below in forecast_hindcast_predictions; do
+    # not duplicate that entire corpus in one unbounded JSON cell.  Keep a
+    # deterministic receipt over length-delimited canonical row records instead.
+    digest = __import__("hashlib").sha256()
+    for row in report.rows:
+        encoded = canonical_json_bytes(row.canonical_payload())
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return canonical_json_text(
+        {
+            "format": "relational-hindcast-rows-v1",
+            "row_count": len(report.rows),
+            "rows_sha256": digest.hexdigest(),
+        }
+    )
 
 
 def persist_forecast_package(

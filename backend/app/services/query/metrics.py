@@ -245,6 +245,18 @@ _FEATURE_DIMENSIONS = (
     "v_carried_highway_features.nhs_designation",
     "v_carried_highway_features.functional_classification",
 )
+_DECK_MATERIAL_DIMENSIONS = (
+    "v_bridge_deck_material_summary.state_code",
+    "v_bridge_deck_material_summary.data_year",
+    "v_bridge_deck_material_summary.has_concrete_deck",
+    "v_bridge_deck_material_summary.has_known_deck_material",
+)
+_CURRENT_DECK_MATERIAL_DIMENSIONS = (
+    "v_current_bridge_deck_material_summary.state_code",
+    "v_current_bridge_deck_material_summary.data_year",
+    "v_current_bridge_deck_material_summary.has_concrete_deck",
+    "v_current_bridge_deck_material_summary.has_known_deck_material",
+)
 
 
 DEFAULT_METRIC_REGISTRY = MetricRegistry(
@@ -262,6 +274,74 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             denominator_semantics="Not a ratio; grain guarantees one row per bridge and exact data year.",
             time_semantics="Explicit year is exact; latest must use v_current_bridge_snapshots per bridge.",
             allowed_dimensions=_SNAPSHOT_DIMENSIONS,
+            classification=MetricClassification.OPERATIONAL_INVENTORY,
+        ),
+        MetricDefinition(
+            metric_id="inventory.concrete_deck_bridge_count",
+            label="Concrete-deck bridge count",
+            description=(
+                "Published bridge snapshots having at least one span-set BSP09 code in "
+                "C01, C02, C03, C04, C05, CX, CP-T, or CR-T."
+            ),
+            source_resource_id="v_bridge_deck_material_summary",
+            expression="SUM(has_concrete_deck)",
+            required_columns=("has_concrete_deck",),
+            unit="bridges",
+            null_semantics="Every published bridge summary is 1 or 0; missing and no-deck material are not concrete.",
+            denominator_semantics="Not a ratio; one summary row exists per published bridge snapshot.",
+            time_semantics="Explicit year is exact; latest is independently selected per bridge.",
+            allowed_dimensions=_DECK_MATERIAL_DIMENSIONS,
+            classification=MetricClassification.OPERATIONAL_INVENTORY,
+        ),
+        MetricDefinition(
+            metric_id="inventory.concrete_deck_bridge_percent",
+            label="Concrete-deck bridge percentage",
+            description=(
+                "Percentage of selected published bridge snapshots having at least one "
+                "concrete BSP09 deck-material code."
+            ),
+            source_resource_id="v_bridge_deck_material_summary",
+            expression="100.0 * SUM(has_concrete_deck) / NULLIF(COUNT(*), 0)",
+            required_columns=("has_concrete_deck",),
+            unit="percent",
+            null_semantics="Missing, unknown, and code 0 deck material remain in the denominator and not the numerator.",
+            denominator_semantics="All selected published bridge snapshots; zero selected rows produce null.",
+            time_semantics="Explicit year is exact; latest is independently selected per bridge.",
+            allowed_dimensions=_DECK_MATERIAL_DIMENSIONS,
+            classification=MetricClassification.OPERATIONAL_INVENTORY,
+        ),
+        MetricDefinition(
+            metric_id="inventory.current_concrete_deck_bridge_count",
+            label="Current concrete-deck bridge count",
+            description=(
+                "Current published bridges having at least one span-set BSP09 code in "
+                "C01, C02, C03, C04, C05, CX, CP-T, or CR-T."
+            ),
+            source_resource_id="v_current_bridge_deck_material_summary",
+            expression="SUM(has_concrete_deck)",
+            required_columns=("has_concrete_deck",),
+            unit="bridges",
+            null_semantics="Every current published bridge summary is 1 or 0; missing and no-deck material are not concrete.",
+            denominator_semantics="Not a ratio; one summary row exists per current published bridge.",
+            time_semantics="Each bridge contributes its independently selected latest published snapshot.",
+            allowed_dimensions=_CURRENT_DECK_MATERIAL_DIMENSIONS,
+            classification=MetricClassification.OPERATIONAL_INVENTORY,
+        ),
+        MetricDefinition(
+            metric_id="inventory.current_concrete_deck_bridge_percent",
+            label="Current concrete-deck bridge percentage",
+            description=(
+                "Percentage of current published bridges having at least one concrete "
+                "BSP09 deck-material code."
+            ),
+            source_resource_id="v_current_bridge_deck_material_summary",
+            expression="100.0 * SUM(has_concrete_deck) / NULLIF(COUNT(*), 0)",
+            required_columns=("has_concrete_deck",),
+            unit="percent",
+            null_semantics="Missing, unknown, and code 0 deck material remain in the denominator and not the numerator.",
+            denominator_semantics="All current published bridges; zero selected rows produce null.",
+            time_semantics="Each bridge contributes its independently selected latest published snapshot.",
+            allowed_dimensions=_CURRENT_DECK_MATERIAL_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(

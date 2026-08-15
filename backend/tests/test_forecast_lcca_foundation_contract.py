@@ -115,6 +115,26 @@ def test_authoritative_work_requires_source_evidence():
         )
 
 
+def test_life_history_accepts_documented_pre_1800_inventory_work():
+    event = LifeHistoryEvent(
+        event_id="inventory-work:1798",
+        event_year=1798,
+        component="bridge",
+        treatment_id="br1",
+        evidence_class=EvidenceClass.INVENTORY_REPORTED_WORK,
+        source_record_ids=("revision-1798",),
+    )
+
+    history = BridgeLifeHistory.build(
+        bridge_id="34-1105151",
+        construction_year=1798,
+        latest_observed_year=2025,
+        events=(event,),
+    )
+
+    assert history.inventory_reported_events == (event,)
+
+
 def test_njdot_treatment_profile_has_published_cycles_and_component_scope():
     library = DEFAULT_NJDOT_TREATMENT_LIBRARY
     assert library.library_id == "njdot_preventive_maintenance_2016_tamp"

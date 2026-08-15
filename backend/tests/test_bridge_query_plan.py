@@ -614,6 +614,18 @@ def test_current_resource_and_county_aggregate_time_semantics(catalog) -> None:
         "latest_requires_bridge_identity",
         lambda: validate_bridge_query_plan(county, catalog),
     )
+    deck_percent = BridgeQueryPlan(
+        "aggregate",
+        "v_current_bridge_deck_material_summary",
+        metric_ids=("inventory.current_concrete_deck_bridge_percent",),
+        time_scope=PlanTimeScope("latest"),
+    )
+    compiled = compile_bridge_query_plan(
+        deck_percent,
+        catalog,
+        QueryScope("workspace-a", 34, "latest"),
+    )
+    assert "MAX(" not in compiled.compiled_sql.sql
 
 
 def test_limit_complexity_duplicates_and_order_are_bounded(catalog) -> None:

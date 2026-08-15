@@ -981,7 +981,10 @@ def validate_bridge_query_plan(
         raise PlanValidationError(
             "intent_time_mismatch", "Trend time scope requires trend intent for aggregate plans"
         )
-    if resource.grain is ResourceGrain.CURRENT_BRIDGE and plan.time_scope.mode is not TimeMode.LATEST:
+    if (
+        resource.resource_id.startswith("v_current_")
+        and plan.time_scope.mode is not TimeMode.LATEST
+    ):
         raise PlanValidationError(
             "current_resource_requires_latest",
             "Current-snapshot resources can only be used with latest time mode",
@@ -1188,7 +1191,7 @@ def _build_sql_catalog(catalog: SemanticCatalog) -> SqlCatalog:
             bridge_column="bridge_number" if "bridge_number" in columns else None,
             time_semantics=(
                 TableTimeSemantics.CURRENT
-                if resource.grain is ResourceGrain.CURRENT_BRIDGE
+                if resource.resource_id.startswith("v_current_")
                 else TableTimeSemantics.HISTORY
             ),
         )

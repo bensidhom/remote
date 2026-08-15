@@ -25,7 +25,11 @@ from app.routers.services.snbi_schema import (
     NESTED_ARRAY_SPECS,
     TOP_LEVEL_FIELDS,
 )
-from app.services.conversion.canonical_json import canonical_json_text, canonical_sha256
+from app.services.conversion.canonical_json import (
+    canonical_json_bytes,
+    canonical_json_text,
+    canonical_sha256,
+)
 from app.services.conversion.canonical_schema import (
     CanonicalResourceLimitError,
     normalize_canonical_document,
@@ -117,6 +121,7 @@ class LegacyBackfillResult:
 class _Inventory:
     manifest: BackfillManifest
     documents: tuple[dict[str, Any], ...]
+    repair_issues: tuple[tuple[dict[str, Any], ...], ...]
 
 
 def _now() -> str:
@@ -255,7 +260,7 @@ def _fetch_children(
 
 def _reconstruct_document(
     connection: sqlite3.Connection, bridge: sqlite3.Row
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     state_code = bridge["state_code"]
     bridge_number = bridge["bridge_number"]
     data_year = bridge["data_year"]
@@ -303,18 +308,63 @@ def _reconstruct_document(
             "source_integrity_error", "A route references a missing feature"
         )
 
+    # Ten historical projection snapshots contain the transition placeholder
+    # RECONSTRUCTED beside BR1 for the same year, and that year is also BW01.
+    # SNBI Works are keyed by BW02, so retaining both would create an invalid
+    # duplicate logical child.  Preserve the valid BR1 construction event and
+    # record the redundant placeholder as explicit reconstruction evidence.
+    repair_issues: list[dict[str, Any]] = []
+    works_by_year: dict[Any, list[dict[str, Any]]] = {}
+    for work in document["Works"]:
+        works_by_year.setdefault(work.get("BW02"), []).append(work)
+    repaired_works: list[dict[str, Any]] = []
+    for year, works in works_by_year.items():
+        codes = {str(work.get("BW03", "")) for work in works}
+        if len(works) == 2 and codes == {"BR1", "RECONSTRUCTED"} and year == document.get("BW01"):
+            repaired_works.append(next(work for work in works if work.get("BW03") == "BR1"))
+            repair_issues.append(
+                {
+                    "code": "collapsed_redundant_reconstructed_placeholder",
+                    "json_pointer": "/Works",
+                    "work_year": year,
+                    "retained_work_code": "BR1",
+                    "removed_placeholder": "RECONSTRUCTED",
+                    "reason": "BW02 equals BW01 and SNBI Works require one logical row per work year",
+                }
+            )
+        else:
+            repaired_works.extend(works)
+    document["Works"] = repaired_works
+
     normalization = normalize_canonical_document(
         document, profile_id="research_historical_import"
     )
     if normalization.has_errors:
+        diagnostics: list[str] = []
+        diagnostics.extend(
+            f"unknown:{item.path}" for item in normalization.unknown_tags[:3]
+        )
+        diagnostics.extend(
+            f"container:{item.path}" for item in normalization.wrong_container_types[:3]
+        )
+        diagnostics.extend(
+            f"rejected:{item.path}:{item.code}"
+            for item in normalization.rejected_values[:3]
+        )
+        diagnostics.extend(
+            f"duplicate:{item.duplicate_path}"
+            for item in normalization.duplicate_logical_child_keys[:3]
+        )
+        summary = ", ".join(diagnostics[:5]) or "unspecified canonical error"
         raise LegacyBackfillError(
             "source_integrity_error",
-            "A reconstructed snapshot is not a lossless canonical SNBI document",
+            "A reconstructed snapshot is not a lossless canonical SNBI document "
+            f"({key[0]}:{key[1]}:{key[2]}; {summary})",
         )
     normalized = normalization.normalized_document
     for section in ALL_NESTED_ARRAY_NAMES:
         normalized.setdefault(section, [])
-    return normalized
+    return normalized, tuple(repair_issues)
 
 
 def _manifest_payload(
@@ -328,6 +378,11 @@ def _manifest_payload(
     table_counts: Sequence[tuple[str, int]],
     snapshots: Sequence[BackfillSnapshotPlan],
 ) -> dict[str, Any]:
+    snapshot_digest = hashlib.sha256()
+    for snapshot in snapshots:
+        encoded = canonical_json_bytes(asdict(snapshot))
+        snapshot_digest.update(len(encoded).to_bytes(8, byteorder="big"))
+        snapshot_digest.update(encoded)
     return {
         "format_version": _FORMAT_VERSION,
         "source_database_sha256": database_sha256,
@@ -337,7 +392,11 @@ def _manifest_payload(
         "quick_check": quick_check,
         "foreign_key_violations": [list(row) for row in foreign_key_violations],
         "table_counts": [list(row) for row in table_counts],
-        "snapshots": [asdict(snapshot) for snapshot in snapshots],
+        "snapshots": {
+            "format": "length-prefixed-rfc8785-jcs-v1",
+            "count": len(snapshots),
+            "sha256": snapshot_digest.hexdigest(),
+        },
     }
 
 
@@ -392,12 +451,13 @@ def _inventory(path: Path, profile_id: str) -> _Inventory:
             "SELECT * FROM bridges ORDER BY state_code, bridge_number COLLATE BINARY, data_year"
         ).fetchall()
         documents: list[dict[str, Any]] = []
+        repair_issues: list[tuple[dict[str, Any], ...]] = []
         plans: list[BackfillSnapshotPlan] = []
         for bridge in bridges:
             # Use the requested profile for normalization diagnostics.  The
             # manifest remains deterministic because profile does not alter
             # accepted canonical values.
-            document = _reconstruct_document(connection, bridge)
+            document, document_repairs = _reconstruct_document(connection, bridge)
             if profile_id != "research_historical_import":
                 normalization = normalize_canonical_document(
                     document, profile_id=profile_id
@@ -420,6 +480,7 @@ def _inventory(path: Path, profile_id: str) -> _Inventory:
                 )
             )
             documents.append(document)
+            repair_issues.append(document_repairs)
     except LegacyBackfillError:
         raise
     except (sqlite3.Error, CanonicalResourceLimitError, ValueError, TypeError) as exc:
@@ -456,7 +517,11 @@ def _inventory(path: Path, profile_id: str) -> _Inventory:
         snapshots=tuple(plans),
         manifest_sha256=canonical_sha256(payload),
     )
-    return _Inventory(manifest=manifest, documents=tuple(documents))
+    return _Inventory(
+        manifest=manifest,
+        documents=tuple(documents),
+        repair_issues=tuple(repair_issues),
+    )
 
 
 def _insert_workspace(
@@ -718,8 +783,14 @@ def _apply(
             ),
         )
 
-        for ordinal, (plan, document, revision_id) in enumerate(
-            zip(manifest.snapshots, inventory.documents, revision_ids, strict=True)
+        for ordinal, (plan, document, document_repairs, revision_id) in enumerate(
+            zip(
+                manifest.snapshots,
+                inventory.documents,
+                inventory.repair_issues,
+                revision_ids,
+                strict=True,
+            )
         ):
             record_id = _stable_id("legacy-backfill-record", artifact_id, ordinal, plan.canonical_sha256)
             raw_json = canonical_json_text(document)
@@ -740,7 +811,8 @@ def _apply(
                     plan.canonical_sha256,
                     canonical_json_text(
                         {
-                            "warning": "Relational projection is reconstructed research evidence, not original upload bytes"
+                            "warning": "Relational projection is reconstructed research evidence, not original upload bytes",
+                            "repairs": list(document_repairs),
                         }
                     ),
                     plan.state_code,
@@ -820,6 +892,7 @@ def _apply(
                             "research_only": True,
                             "field_lineage_available": False,
                             "original_source_bytes_available": False,
+                            "reconstruction_repairs": list(document_repairs),
                         }
                     ),
                     now,
@@ -835,8 +908,14 @@ def _apply(
                     _stable_id("legacy-backfill-validation-issue", validation_id),
                     request.workspace_id,
                     validation_id,
-                    "Snapshot was reconstructed from BridgeGuard relational projection; original bytes and field lineage are unavailable",
-                    canonical_json_text({"manifest_sha256": manifest.manifest_sha256}),
+                    "Snapshot was reconstructed from BridgeGuard relational projection; original bytes and field lineage are unavailable"
+                    + ("; redundant legacy work placeholder was collapsed" if document_repairs else ""),
+                    canonical_json_text(
+                        {
+                            "manifest_sha256": manifest.manifest_sha256,
+                            "reconstruction_repairs": list(document_repairs),
+                        }
+                    ),
                     now,
                 ),
             )

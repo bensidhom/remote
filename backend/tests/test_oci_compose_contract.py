@@ -12,6 +12,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "oci" / "compose.yaml"
 PREFLIGHT_FILE = REPO_ROOT / "deploy" / "oci" / "preflight.sh"
+PUBLISH_LEGACY_FILE = REPO_ROOT / "deploy" / "oci" / "publish-legacy-data.sh"
+DEPLOY_WORKFLOW_FILE = REPO_ROOT / ".github" / "workflows" / "deploy-oci.yml"
 IDENTITY_KEYS = (
     "BRIDGEGUARD_DEPLOYMENT_MODE",
     "BRIDGEGUARD_WORKSPACE_ID",
@@ -52,6 +54,24 @@ def test_preflight_labels_research_and_does_not_require_commercial_receipts():
     assert "dedicated deployment marker" not in script
     assert "database/customer binding mismatch" not in script
     assert "database migration generation mismatch" not in script
+
+
+def test_deploy_publishes_and_validates_a_shadow_database_before_restart():
+    script = PUBLISH_LEGACY_FILE.read_text(encoding="utf-8")
+    workflow = DEPLOY_WORKFLOW_FILE.read_text(encoding="utf-8")
+
+    assert "snbi_bridges.published.next.db" in script
+    assert "backfill_legacy_projection.py dry-run" in script
+    assert "backfill_legacy_projection.py apply" in script
+    assert "train_published_forecast.py" in script
+    assert "validate_published_database.py" in script
+    assert "PRAGMA wal_checkpoint(TRUNCATE)" in script
+    assert "os.replace(candidate, source)" in script
+    assert "published_snapshots" in script
+    backup_index = workflow.index("sh deploy/oci/backup.sh")
+    publish_index = workflow.index("sh deploy/oci/publish-legacy-data.sh")
+    restart_index = workflow.index("-d --remove-orphans embeddings app", publish_index)
+    assert backup_index < publish_index < restart_index
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker Compose is unavailable")

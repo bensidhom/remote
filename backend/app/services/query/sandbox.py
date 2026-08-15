@@ -23,7 +23,11 @@ from typing import Any
 from .registry import DEFAULT_REQUEST_REGISTRY, RequestRegistry
 
 
-HARD_MAX_DEADLINE_SECONDS = 2.0
+# Full-state aggregates over reviewed current-snapshot views can legitimately
+# scan several hundred thousand historical child rows on the production-sized
+# SQLite database.  Five seconds remains a strict server-owned deadline while
+# allowing those bounded aggregates to complete.
+HARD_MAX_DEADLINE_SECONDS = 5.0
 HARD_MAX_ROWS = 200
 HARD_MAX_RESULT_COLUMNS = 40
 HARD_MAX_CELL_BYTES = 16 * 1024

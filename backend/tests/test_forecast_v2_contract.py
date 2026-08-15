@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -329,6 +330,14 @@ def test_forecast_package_is_immutable_idempotent_and_round_trips(tmp_path):
         assert connection.execute(
             "SELECT COUNT(*) FROM forecast_hindcast_predictions"
         ).fetchone() == (len(evaluation.rows),)
+        rows_receipt = json.loads(
+            connection.execute(
+                "SELECT rows_json FROM forecast_evaluation_runs"
+            ).fetchone()[0]
+        )
+        assert rows_receipt["format"] == "relational-hindcast-rows-v1"
+        assert rows_receipt["row_count"] == len(evaluation.rows)
+        assert len(rows_receipt["rows_sha256"]) == 64
     finally:
         connection.close()
 

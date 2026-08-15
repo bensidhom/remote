@@ -358,7 +358,7 @@ def test_registry_cleanup_is_deterministic_after_success_and_failure(test_worksp
 
 def test_policy_caps_cannot_be_raised_by_a_caller():
     with pytest.raises(ValueError):
-        SandboxPolicy(deadline_seconds=2.1)
+        SandboxPolicy(deadline_seconds=5.1)
     with pytest.raises(ValueError):
         SandboxPolicy(max_rows=201)
     with pytest.raises(ValueError):
