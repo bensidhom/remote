@@ -42,6 +42,25 @@ SAVE_DIR = str(DATA_DIR / 'exports')                 # SNBI/NBI export output
 RAG_WORKING_DIR = os.getenv('RAG_WORKING_DIR', str(DATA_DIR / 'rag_storage'))  # embeddings, images, KG
 TEMP_DIR = Path(os.getenv('SNBI_TEMP_DIR', str(DATA_DIR / 'temp')))            # scratch
 
+# Import-time users create attachment/temp/cache directories below, before the
+# FastAPI lifespan runs.  In a dedicated/commercial process, enforce the full
+# marker-backed boundary first so a hostile path cannot cause even an empty
+# directory to be created outside the customer root during module import.
+_deployment_mode = os.getenv('BRIDGEGUARD_DEPLOYMENT_MODE', 'research_shared').strip().lower()
+_commercial_gate = os.getenv('BRIDGEGUARD_REQUIRE_COMMERCIAL_READY', '').strip().lower() in {
+    '1', 'true', 'yes', 'on',
+}
+if _deployment_mode == 'dedicated_customer' or _commercial_gate:
+    try:
+        from app.services.operations.deployment import require_deployment_policy
+    except ImportError:  # direct ``backend/app`` execution compatibility
+        from services.operations.deployment import require_deployment_policy
+
+    require_deployment_policy(
+        data_directory=DATA_DIR,
+        require_commercial=_commercial_gate,
+    )
+
 # Create the directories up front (DB files are created by their writers/SQLite).
 for _d in (DATA_DIR, Path(ATTACHMENTS_DIR), Path(SAVE_DIR), Path(RAG_WORKING_DIR), TEMP_DIR):
     try:

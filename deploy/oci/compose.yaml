@@ -31,13 +31,26 @@ services:
       context: ../..
       dockerfile: Dockerfile
     env_file:
-      - path: ${BRIDGEGUARD_ENV_FILE:-/etc/bridgeguard/bridgeguard.env}
       - path: ${BRIDGEGUARD_AI_ENV_FILE:-/etc/bridgeguard/ai.env}
         required: false
+      # Keep the customer/deployment file last: Compose applies later env files
+      # last.  AI-only settings must never override customer identity or roles.
+      - path: ${BRIDGEGUARD_ENV_FILE:-/etc/bridgeguard/bridgeguard.env}
     environment:
       BRIDGEGUARD_ENV: production
+      # This repository and OCI stack are research-only. Keep commercial and
+      # scientific-publication interlocks out of the deploy path while the UI
+      # continues to label derived outputs as screening/research evidence.
+      BRIDGEGUARD_DEPLOYMENT_MODE: research_shared
+      BRIDGEGUARD_REQUIRE_COMMERCIAL_READY: "false"
+      # Workspace identity, worker count, and role lists come only
+      # from BRIDGEGUARD_ENV_FILE. Service-level environment values override
+      # env_file values, so do not mirror those values here with host-shell
+      # interpolation defaults.
       BRIDGEGUARD_COOKIE_SECURE: "true"
       BRIDGEGUARD_DATA_DIR: /data
+      RAG_WORKING_DIR: /data/rag_storage
+      SNBI_TEMP_DIR: /data/temp
       FRONTEND_DIST: /app/static
       PORT: "8000"
       TEI_EMBED_BASE_URL: http://embeddings:80

@@ -21,6 +21,20 @@ TEI = "tei"
 
 # ── Model defaults ───────────────────────────────────────────────────
 _CEREBRAS_MODEL_DEFAULT = "gemma-4-31b"
+_SERVER_MODEL_OVERRIDES = frozenset({"gemma-4-31b", "gpt-oss-120b"})
+_CEREBRAS_VISION_MODEL_DEFAULT = "gemma-4-31b"
+_CEREBRAS_MODEL_CAPABILITIES = {
+    "gemma-4-31b": {
+        "text": True,
+        "vision": True,
+        "json_schema": True,
+    },
+    "gpt-oss-120b": {
+        "text": True,
+        "vision": False,
+        "json_schema": True,
+    },
+}
 _TEI_EMBED_MODEL_DEFAULT = "nomic-ai/nomic-embed-text-v1.5"
 _TEI_EMBED_REVISION_DEFAULT = "20d1e6057a2e1fa08b45123e41ce9381fc338f0e"
 _TEI_RUNTIME_VERSION_DEFAULT = "1.9.3"
@@ -34,7 +48,7 @@ _CEREBRAS_MODEL_LIMITS = {
     "gemma-4-31b": {
         "context": 65536,
         "requests": {"minute": 5, "hour": 150, "day": 2400},
-        "tokens": {"minute": 30000, "hour": 1000000, "day": 1000000},
+        "tokens": {"minute": None, "hour": 1000000, "day": 1000000},
     },
 }
 
@@ -111,10 +125,12 @@ def embedding_profile_matches(value) -> bool:
 # restart-scoped; use embedding_profile() for the authoritative active values.
 EMBED_DIM = embedding_profile()["dimension"]
 
-# Cache one Cerebras SDK client per api-key (its constructor spins up an HTTP
-# client; recreating it per call is wasteful).
+# Cache one Cerebras SDK client per api-key and timeout. The SDK applies its
+# timeout at client construction, so reusing a client built for a different
+# operation would silently ignore the caller's deadline.
 _cerebras_client = None
 _cerebras_client_key = None
+_cerebras_client_timeout = None
 _cerebras_lock = threading.Lock()
 
 _USAGE_FILE = os.path.join(str(DATA_DIR), "api_usage.json")
@@ -218,6 +234,40 @@ def _cerebras_model_name() -> str:
 def generation_model() -> str:
     """Return the server-controlled Cerebras model used by every generation call."""
     return _cerebras_model_name()
+
+
+def vision_model() -> str:
+    """Return the server-controlled model reserved for multimodal work."""
+
+    return (
+        os.getenv("CEREBRAS_VISION_MODEL", _CEREBRAS_VISION_MODEL_DEFAULT).strip()
+        or _CEREBRAS_VISION_MODEL_DEFAULT
+    )
+
+
+def generation_model_capabilities(model: str | None = None) -> dict:
+    selected = str(model or generation_model()).strip()
+    capabilities = _CEREBRAS_MODEL_CAPABILITIES.get(selected)
+    if capabilities is None:
+        return {
+            "model": selected,
+            "known": False,
+            "text": False,
+            "vision": False,
+            "json_schema": False,
+        }
+    return {"model": selected, "known": True, **capabilities}
+
+
+def require_generation_capability(capability: str, *, model: str | None = None) -> dict:
+    if capability not in {"text", "vision", "json_schema"}:
+        raise RuntimeError("unsupported generation capability check")
+    capabilities = generation_model_capabilities(model)
+    if not capabilities.get(capability):
+        raise RuntimeError(
+            f"configured model {capabilities['model']!r} does not have reviewed {capability} capability"
+        )
+    return capabilities
 
 
 def _record_usage(provider: str, category: str, estimated_tokens: int = 0,
@@ -335,6 +385,11 @@ def status() -> dict:
         "provider": CEREBRAS,
         "cerebras_key_set": bool(os.getenv("CEREBRAS_API_KEY", "").strip()),
         "cerebras_model": generation_model(),
+        "cerebras_model_capabilities": generation_model_capabilities(),
+        "cerebras_vision_model": vision_model(),
+        "cerebras_vision_model_capabilities": generation_model_capabilities(
+            vision_model()
+        ),
         "embedding_provider": embed_profile["provider"],
         "embed_model": embed_profile["model"],
         "embed_dim": embed_profile["dimension"],
@@ -346,15 +401,28 @@ def status() -> dict:
 def _get_cerebras_client(timeout: int):
     """Lazily build (and cache by api-key) a Cerebras SDK client. Imported here
     so the module stays importable without cerebras-cloud-sdk installed."""
-    global _cerebras_client, _cerebras_client_key
+    global _cerebras_client, _cerebras_client_key, _cerebras_client_timeout
     key = os.environ.get("CEREBRAS_API_KEY", "").strip()
     if not key:
         raise RuntimeError("CEREBRAS_API_KEY is not set")
     with _cerebras_lock:
-        if _cerebras_client is None or _cerebras_client_key != key:
+        requested_timeout = float(timeout)
+        if (
+            _cerebras_client is None
+            or _cerebras_client_key != key
+            or _cerebras_client_timeout != requested_timeout
+        ):
             from cerebras.cloud.sdk import Cerebras
-            _cerebras_client = Cerebras(api_key=key, timeout=float(timeout))
+            # BridgeGuard already owns its narrow retry policy for explicit 429
+            # responses in ``_cerebras_call``. Disable the SDK's implicit
+            # transport retries so a 120-second request cannot become 360s.
+            _cerebras_client = Cerebras(
+                api_key=key,
+                timeout=requested_timeout,
+                max_retries=0,
+            )
             _cerebras_client_key = key
+            _cerebras_client_timeout = requested_timeout
         return _cerebras_client
 
 
@@ -370,16 +438,40 @@ def _cerebras_messages(prompt: str, images_b64=None) -> list:
     return [{"role": "user", "content": prompt}]
 
 
-def _cerebras_create_kwargs(model, messages, num_predict, temperature, stream):
-    # The server owns model selection; client model hints are ignored.
+def _selected_generation_model(server_model_override=None) -> str:
+    selected_model = generation_model()
+    if server_model_override is not None:
+        candidate = str(server_model_override).strip()
+        if candidate not in _SERVER_MODEL_OVERRIDES:
+            raise RuntimeError("unsupported server-controlled Cerebras model override")
+        selected_model = candidate
+    return selected_model
+
+
+def _cerebras_create_kwargs(
+    model,
+    messages,
+    num_predict,
+    temperature,
+    stream,
+    response_format=None,
+    server_model_override=None,
+):
+    # The server owns model selection; legacy/client model hints remain ignored.
+    # A narrow, allowlisted override is available only to trusted server call
+    # sites such as Bridgette, so browser-supplied model names cannot route API
+    # traffic to arbitrary provider models.
+    selected_model = _selected_generation_model(server_model_override)
     kwargs = {
         "messages": messages,
-        "model": generation_model(),
+        "model": selected_model,
         "max_completion_tokens": num_predict,
         "temperature": 0.0 if temperature is None else temperature,
         "top_p": 1,
         "stream": stream,
     }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
     # reasoning_effort is a Cerebras-specific knob (see reference usage). It is
     # OFF by default: on reasoning models (e.g. gemma-4-31b) the hidden reasoning
     # consumes the token budget and leaves message.content EMPTY when num_predict
@@ -440,13 +532,140 @@ def _cerebras_generate(prompt, images_b64=None, timeout=300, num_predict=1024,
     return text
 
 
-def _cerebras_stream(prompt, images_b64=None, timeout=300, num_predict=1024,
-                     model=None, temperature=0.0):
+def _typed_messages_have_images(messages) -> bool:
+    found = False
+    if not isinstance(messages, list) or not messages:
+        raise RuntimeError("typed generation messages are invalid")
+    for message in messages:
+        if not isinstance(message, dict) or set(message) != {"role", "content"}:
+            raise RuntimeError("typed generation message shape is invalid")
+        if message["role"] not in {"system", "user", "assistant"}:
+            raise RuntimeError("typed generation message role is invalid")
+        content = message["content"]
+        if isinstance(content, str):
+            if not content.strip():
+                raise RuntimeError("typed generation message is empty")
+            continue
+        if not isinstance(content, list) or not content:
+            raise RuntimeError("typed generation content is invalid")
+        for item in content:
+            if not isinstance(item, dict):
+                raise RuntimeError("typed generation content item is invalid")
+            kind = item.get("type")
+            if kind == "text":
+                if set(item) != {"type", "text"} or not str(item["text"]).strip():
+                    raise RuntimeError("typed generation text item is invalid")
+            elif kind == "image_url":
+                image_url = item.get("image_url")
+                if (
+                    set(item) != {"type", "image_url"}
+                    or not isinstance(image_url, dict)
+                    or set(image_url) - {"url", "detail"}
+                    or not str(image_url.get("url") or "").startswith(
+                        ("data:image/png;base64,", "data:image/jpeg;base64,")
+                    )
+                ):
+                    raise RuntimeError("typed generation image item is invalid")
+                found = True
+            else:
+                raise RuntimeError("typed generation content type is unsupported")
+    return found
+
+
+def _estimate_typed_messages(messages) -> int:
+    text_items = []
+    image_count = 0
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, str):
+            text_items.append(content)
+        else:
+            for item in content:
+                if item.get("type") == "text":
+                    text_items.append(str(item.get("text") or ""))
+                elif item.get("type") == "image_url":
+                    image_count += 1
+    return _estimate_tokens(text_items) + 750 * image_count
+
+
+def generate_messages(
+    messages,
+    *,
+    timeout=300,
+    num_predict=1024,
+    temperature=0.0,
+    response_format=None,
+    server_model_override=None,
+) -> dict:
+    """Typed text/multimodal completion with model and usage receipt.
+
+    Browser callers cannot choose ``server_model_override``; this entry point is
+    intended for trusted server orchestration such as point-cloud review.
+    """
+
+    has_images = _typed_messages_have_images(messages)
+    selected_model = _selected_generation_model(server_model_override)
+    require_generation_capability("vision" if has_images else "text", model=selected_model)
+    if response_format is not None:
+        require_generation_capability("json_schema", model=selected_model)
+    client = _get_cerebras_client(timeout)
+    completion = _cerebras_call(
+        client,
+        _cerebras_create_kwargs(
+            None,
+            messages,
+            num_predict,
+            temperature,
+            False,
+            response_format=response_format,
+            server_model_override=selected_model,
+        ),
+    )
+    usage = _usage_from_obj(completion)
+    try:
+        text = _message_text(completion.choices[0].message)
+    except Exception:
+        text = ""
+    estimated = _estimate_typed_messages(messages) + _estimate_tokens(text)
+    _record_usage(
+        CEREBRAS,
+        "images" if has_images else "qa",
+        estimated_tokens=estimated,
+        usage=usage,
+    )
+    return {
+        "text": text,
+        "provider": CEREBRAS,
+        "model": selected_model,
+        "usage": usage,
+        "has_images": has_images,
+    }
+
+
+def _cerebras_stream(
+    prompt,
+    images_b64=None,
+    timeout=300,
+    num_predict=1024,
+    model=None,
+    temperature=0.0,
+    response_format=None,
+    server_model_override=None,
+):
     client = _get_cerebras_client(timeout)
     messages = _cerebras_messages(prompt, images_b64)
     estimated_in = _estimate_tokens(prompt) + (750 * len(images_b64 or []))
     stream_obj = _cerebras_call(
-        client, _cerebras_create_kwargs(model, messages, num_predict, temperature, True)
+        client,
+        _cerebras_create_kwargs(
+            model,
+            messages,
+            num_predict,
+            temperature,
+            True,
+            response_format=response_format,
+            server_model_override=server_model_override,
+        ),
     )
     out_chunks = []
     try:
@@ -478,10 +697,25 @@ def generate(prompt, images_b64=None, timeout=300, num_predict=1024,
                               num_predict=num_predict, model=model, temperature=temperature)
 
 
-def stream(prompt, images_b64=None, timeout=300, num_predict=1024, model=None):
+def stream(
+    prompt,
+    images_b64=None,
+    timeout=300,
+    num_predict=1024,
+    model=None,
+    response_format=None,
+    server_model_override=None,
+):
     """Stream Cerebras text/image completion; closing aborts generation."""
-    yield from _cerebras_stream(prompt, images_b64=images_b64, timeout=timeout,
-                                num_predict=num_predict, model=model)
+    yield from _cerebras_stream(
+        prompt,
+        images_b64=images_b64,
+        timeout=timeout,
+        num_predict=num_predict,
+        model=model,
+        response_format=response_format,
+        server_model_override=server_model_override,
+    )
 
 
 # ── Embeddings (pinned Nomic v1.5 via Hugging Face TEI) ──────────────

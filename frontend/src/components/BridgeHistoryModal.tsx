@@ -1,485 +1,294 @@
-// frontend/src/components/BridgeHistoryModal.tsx
-// Bridge condition history + maintenance-aware forecast overlay. Observed ratings
-// are solid lines; the baseline forecast (no future work) is dashed and strictly
-// degrading. A future-year selector simulates a maintenance event and overlays a
-// "what-if" line that bumps up at the chosen year then keeps degrading.
-//
-// Lines are drawn with a tiny per-metric vertical offset so deck/super/sub stay
-// visible when their ratings coincide; tooltips always show the TRUE rating.
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts';
+import { History, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Button, Modal } from './ui';
+import { useDataGenerationEpoch } from '../lib/dataGeneration';
 
-// Integer condition-rating ticks (0..9) so the axis reads every grade.
 const RATING_TICKS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-import { Loader2, History, Sparkles, Wrench } from 'lucide-react';
-import { Modal, Button } from './ui';
+const DEFAULT_HORIZON = 10;
 
-interface HistoryPoint { year: number; deck: number | null; superstructure: number | null; substructure: number | null; source?: string; }
-interface HistoryEvent { year: number; event_type: string; label: string; }
-interface BridgeHistoryData {
-  bridge_name?: string;
-  year_built?: number;
-  deck_condition_rating?: number | string | null;
-  superstructure_condition_rating?: number | string | null;
-  substructure_condition_rating?: number | string | null;
-  historical_points?: HistoryPoint[];
-  history_events?: HistoryEvent[];
-  condition_trend?: { years: number[]; deck: Array<number | null>; superstructure: Array<number | null>; substructure: Array<number | null> };
+interface ForecastPoint {
+  year: number;
+  yhat: number;
+  p10: number;
+  p50: number;
+  p90: number;
+  standard_deviation: number;
+  fallback_level: string;
+  action_id?: string | null;
 }
 
-interface ForecastPoint { year: number; yhat: number; yhat_lower?: number; yhat_upper?: number; confidence?: string; trend_direction?: string; }
-interface SimPoint { year: number; yhat: number; }
-interface MetricSeries { observed?: Array<{ year: number; value: number }>; forecast?: ForecastPoint[]; simulated?: SimPoint[]; bump?: number; bump_source?: 'learned' | 'default'; }
-interface BridgeForecast { run_id?: number; engine?: string | null; metrics?: Record<string, MetricSeries>; }
+interface ObservedPoint {
+  year: number;
+  value: number;
+  snapshot_revision_id: string;
+}
+
+interface MetricSeries {
+  observed: ObservedPoint[];
+  forecast: ForecastPoint[];
+}
+
+interface BridgeForecast {
+  run_id: string;
+  state_code: number;
+  bridge_number: string;
+  snapshot_revision_id: string;
+  as_of_year: number;
+  horizon_years: number;
+  model_version_id: string;
+  model_id: string;
+  evaluation_run_id: string;
+  evaluation_receipt_id: string;
+  qualification: string;
+  source_data_generation: number;
+  metrics: Record<string, MetricSeries>;
+}
 
 interface Props {
   stateCode: number | string;
   bridgeNumber: string;
   bridgeName?: string;
+  dataYear?: number | string | null;
   onClose: () => void;
   embedded?: boolean;
 }
 
 interface ChartRow {
   year: number;
-  deck?: number | null; superstructure?: number | null; substructure?: number | null;
-  deck_f?: number | null; super_f?: number | null; sub_f?: number | null;
-  deck_lo?: number | null; deck_hi?: number | null;
-  deck_band?: [number, number] | null;
-  deck_s?: number | null; super_s?: number | null; sub_s?: number | null;
+  deck?: number;
+  superstructure?: number;
+  substructure?: number;
+  deckForecast?: number;
+  superstructureForecast?: number;
+  substructureForecast?: number;
+  deckPredictionRange?: [number, number];
 }
 
-// Visual-only vertical offsets so coincident lines don't hide each other.
-const OFFSET = { deck: 0.07, superstructure: 0, substructure: -0.07 } as const;
-const off = (v: number | null | undefined, k: keyof typeof OFFSET) => (v == null ? null : v + OFFSET[k]);
-
-// Map each Line's display name back to its offset so the tooltip can show the
-// true rating rather than the offset plotting value.
-const NAME_OFFSET: Record<string, number> = {
-  Deck: OFFSET.deck, Superstructure: OFFSET.superstructure, Substructure: OFFSET.substructure,
-  'Deck (forecast)': OFFSET.deck, 'Super (forecast)': OFFSET.superstructure, 'Sub (forecast)': OFFSET.substructure,
-  'Deck (with work)': OFFSET.deck, 'Super (with work)': OFFSET.superstructure, 'Sub (with work)': OFFSET.substructure,
-  'Deck lower': OFFSET.deck, 'Deck upper': OFFSET.deck,
-};
-const tipFormatter = (value: any, name: string) => {
-  if (value == null) return ['—', name];
-  // Confidence band arrives as a [lower, upper] pair — show it as a range.
-  if (Array.isArray(value)) {
-    const ofs = OFFSET.deck;
-    const [lo, hi] = value.map((v) => Number(v) - ofs);
-    return [`${lo.toFixed(1)} – ${hi.toFixed(1)}`, name];
-  }
-  const t = Number(value) - (NAME_OFFSET[name] ?? 0);
-  return [Number.isInteger(t) ? String(t) : t.toFixed(2), name];
+const ratingColor = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) return '#94a3b8';
+  if (value >= 7) return '#16a34a';
+  if (value >= 5) return '#ca8a04';
+  return '#dc2626';
 };
 
-const ratingColor = (val: number | string | null | undefined) => {
-  const n = Number(val);
-  if (isNaN(n) || val == null) return '#94a3b8';
-  if (n >= 7) return '#22c55e';
-  if (n >= 5) return '#eab308';
-  return '#ef4444';
-};
-const ratingLabel = (val: number | string | null | undefined) => {
-  const n = Number(val);
-  if (isNaN(n) || val == null) return 'N/A';
-  if (n >= 7) return `Good (${n})`;
-  if (n >= 5) return `Fair (${n})`;
-  return `Poor (${n})`;
+const ratingLabel = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) return 'Unknown';
+  const className = value >= 7 ? 'Good' : value >= 5 ? 'Fair' : 'Poor';
+  return `${className} (${value.toFixed(1)})`;
 };
 
-const DEFAULT_HORIZON = 10;
-
-// Chart components (color encodes which member; line style encodes the scenario).
-const LEGEND_COMPONENTS = [
-  { label: 'Deck', color: '#22c55e' },
-  { label: 'Superstructure', color: '#eab308' },
-  { label: 'Substructure', color: '#ef4444' },
-] as const;
-
-// A short SVG sample of a line style, used in the custom legend.
-const LineSample: React.FC<{ dash?: string }> = ({ dash }) => (
-  <svg width="28" height="10" className="shrink-0" aria-hidden>
-    <line x1="1" y1="5" x2="27" y2="5" stroke="#64748b" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={dash} />
-  </svg>
-);
-
-// Visual styling per event type (shared by the chart markers + timeline).
-const EVENT_STYLE: Record<string, { color: string; label: string }> = {
-  work: { color: '#10b981', label: 'Work' },
-  posting: { color: '#f59e0b', label: 'Posting' },
-  inspection: { color: '#6366f1', label: 'Inspection' },
-  milestone: { color: '#8b5cf6', label: 'Milestone' },
+const latestObserved = (series: MetricSeries | undefined): number | null => {
+  const rows = [...(series?.observed || [])].sort((left, right) => left.year - right.year);
+  return rows.length ? Number(rows[rows.length - 1].value) : null;
 };
-const eventStyle = (type: string) => EVENT_STYLE[type] || { color: '#6366f1', label: type };
 
-const BridgeHistoryModal: React.FC<Props> = ({ stateCode, bridgeNumber, bridgeName, onClose, embedded }) => {
-  const [data, setData] = useState<BridgeHistoryData | null>(null);
+const BridgeHistoryModal: React.FC<Props> = ({
+  stateCode,
+  bridgeNumber,
+  bridgeName,
+  dataYear,
+  onClose,
+  embedded,
+}) => {
   const [forecast, setForecast] = useState<BridgeForecast | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [training, setTraining] = useState(false);
-  const [simYear, setSimYear] = useState<number | ''>('');
-  const [simForecast, setSimForecast] = useState<BridgeForecast | null>(null);
-  const [simLoading, setSimLoading] = useState(false);
   const [horizonYears, setHorizonYears] = useState(DEFAULT_HORIZON);
-  const autoRanRef = useRef<string | null>(null);
-  const appliedHorizonRef = useRef<number>(DEFAULT_HORIZON);
+  const dataGenerationEpoch = useDataGenerationEpoch();
 
-  const loadForecast = useCallback(async (): Promise<BridgeForecast | null> => {
-    try {
-      const res = await axios.get<BridgeForecast>(`/api/forecasts/bridge/${stateCode}/${bridgeNumber}`);
-      const fc = res.data && res.data.metrics ? res.data : null;
-      setForecast(fc);
-      return fc;
-    } catch {
-      setForecast(null);
-      return null;
-    }
-  }, [stateCode, bridgeNumber]);
-
-  const generateForecast = useCallback(async (horizon: number) => {
-    setTraining(true);
-    appliedHorizonRef.current = horizon;
-    try {
-      await axios.post(`/api/forecasts/train-bridge/${stateCode}/${bridgeNumber}?horizon_years=${horizon}`);
-      await loadForecast();
-    } catch {
-      /* surfaced via empty forecast */
-    } finally {
-      setTraining(false);
-    }
-  }, [stateCode, bridgeNumber, loadForecast]);
-
-  useEffect(() => {
-    const key = `${stateCode}-${bridgeNumber}`;
-    let cancelled = false;
+  const loadForecast = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setSimYear('');
-    setSimForecast(null);
-    (async () => {
-      try {
-        const res = await axios.get<BridgeHistoryData>(`/api/bridge-history/${stateCode}/${bridgeNumber}`);
-        if (!cancelled) setData(res.data);
-      } catch {
-        if (!cancelled) setError('Failed to load bridge history');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-      // Auto-run the forecast on open (no button click). Retrain once per bridge
-      // per session if there are no predictions yet OR the stored forecast is not
-      // net-degrading (i.e. it's stale data from an older model — the current
-      // model always projects a decline when no future work is assumed).
-      const fc = await loadForecast();
-      const metricsArr = fc?.metrics ? Object.values(fc.metrics) : [];
-      const hasPoints = metricsArr.some((m) => (m.forecast || []).length > 0);
-      const netDegrading = hasPoints && metricsArr.every((m) => {
-        const f = m.forecast || [];
-        if (f.length < 2) return true;
-        return f[f.length - 1].yhat < f[0].yhat - 1e-6;
-      });
-      if ((!hasPoints || !netDegrading) && !cancelled && autoRanRef.current !== key) {
-        autoRanRef.current = key;
-        await generateForecast(horizonYears);
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stateCode, bridgeNumber]);
-
-  const runSimulation = useCallback(async (year: number, horizon: number) => {
-    setSimLoading(true);
     try {
-      const res = await axios.get<BridgeForecast>(
-        `/api/forecasts/bridge/${stateCode}/${bridgeNumber}/simulate?maintenance_year=${year}&horizon_years=${horizon}`
+      const stateResponse = await axios.get<{ data_generation: number }>('/api/revisions/state');
+      const generation = Number(stateResponse.data.data_generation);
+      if (!Number.isSafeInteger(generation) || generation < 0) {
+        throw new Error('The published data generation is invalid.');
+      }
+      const requestedYear = dataYear == null || dataYear === '' ? null : Number(dataYear);
+      if (requestedYear != null && (!Number.isSafeInteger(requestedYear) || requestedYear < 1900)) {
+        throw new Error('The selected inventory year is invalid.');
+      }
+      const key = [
+        'history-v2',
+        String(stateCode),
+        bridgeNumber,
+        requestedYear ?? 'latest',
+        horizonYears,
+        generation,
+      ].join(':');
+      const response = await axios.post<BridgeForecast>(
+        '/api/forecasts/v2/bridge',
+        {
+          state_code: Number(stateCode),
+          bridge_number: bridgeNumber,
+          as_of_year: requestedYear,
+          horizon_years: horizonYears,
+          expected_data_generation: generation,
+          mode: 'no_action',
+        },
+        { headers: { 'Idempotency-Key': key } },
       );
-      setSimForecast(res.data && res.data.metrics ? res.data : null);
-    } catch {
-      setSimForecast(null);
+      setForecast(response.data);
+    } catch (reason: any) {
+      setForecast(null);
+      setError(
+        reason?.response?.data?.detail?.message ||
+        reason?.response?.data?.detail ||
+        reason?.message ||
+        'The exact-revision forecast could not be loaded.',
+      );
     } finally {
-      setSimLoading(false);
+      setLoading(false);
     }
-  }, [stateCode, bridgeNumber]);
+  }, [stateCode, bridgeNumber, dataYear, horizonYears]);
 
-  const commitHorizon = useCallback(() => {
-    if (horizonYears === appliedHorizonRef.current) return;
-    generateForecast(horizonYears);
-    if (simYear !== '') runSimulation(Number(simYear), horizonYears);
-  }, [horizonYears, simYear, generateForecast, runSimulation]);
+  useEffect(() => {
+    void loadForecast();
+  }, [loadForecast, dataGenerationEpoch]);
 
-  const observed: HistoryPoint[] = useMemo(() => (
-    data?.historical_points && data.historical_points.length > 0
-      ? [...data.historical_points].sort((a, b) => a.year - b.year)
-      : data?.condition_trend && data.condition_trend.years.length > 0
-        ? data.condition_trend.years.map((yr, i) => ({
-            year: yr,
-            deck: data.condition_trend!.deck[i],
-            superstructure: data.condition_trend!.superstructure[i],
-            substructure: data.condition_trend!.substructure[i],
-          }))
-        : []
-  ), [data]);
-
-  const fc = forecast?.metrics;
-  const deckFc = fc?.deck?.forecast || [];
-  const superFc = fc?.superstructure?.forecast || [];
-  const subFc = fc?.substructure?.forecast || [];
-  const forecastStart = [deckFc, superFc, subFc].flatMap((a) => a.map((p) => p.year)).reduce((m, y) => Math.min(m, y), Infinity);
-
-  const forecastYears = useMemo(() => {
-    const ys = new Set<number>();
-    [deckFc, superFc, subFc].forEach((arr) => arr.forEach((p) => ys.add(p.year)));
-    return Array.from(ys).sort((a, b) => a - b);
-  }, [deckFc, superFc, subFc]);
-
-  const simMetrics = simForecast?.metrics;
-
-  // Merge observed + forecast + simulation into one year-keyed series (offsets applied).
-  const series = useMemo(() => {
+  const chartRows = useMemo(() => {
     const rows = new Map<number, ChartRow>();
-    const setRow = (year: number, patch: Partial<ChartRow>) =>
+    const update = (year: number, patch: Partial<ChartRow>) => {
       rows.set(year, { ...(rows.get(year) || { year }), year, ...patch });
-
-    for (const p of observed) {
-      setRow(p.year, { deck: off(p.deck, 'deck'), superstructure: off(p.superstructure, 'superstructure'), substructure: off(p.substructure, 'substructure') });
-    }
-    for (const p of deckFc) {
-      const lo = off(p.yhat_lower, 'deck');
-      const hi = off(p.yhat_upper, 'deck');
-      setRow(p.year, {
-        deck_f: off(p.yhat, 'deck'), deck_lo: lo, deck_hi: hi,
-        deck_band: (lo != null && hi != null) ? [lo, hi] : null,
+    };
+    const metrics = forecast?.metrics || {};
+    for (const point of metrics.deck?.observed || []) update(point.year, { deck: point.value });
+    for (const point of metrics.superstructure?.observed || []) update(point.year, { superstructure: point.value });
+    for (const point of metrics.substructure?.observed || []) update(point.year, { substructure: point.value });
+    for (const point of metrics.deck?.forecast || []) {
+      update(point.year, {
+        deckForecast: point.yhat,
+        deckPredictionRange: [point.p10, point.p90],
       });
     }
-    for (const p of superFc) setRow(p.year, { super_f: off(p.yhat, 'superstructure') });
-    for (const p of subFc) setRow(p.year, { sub_f: off(p.yhat, 'substructure') });
-    for (const p of (simMetrics?.deck?.simulated || [])) setRow(p.year, { deck_s: off(p.yhat, 'deck') });
-    for (const p of (simMetrics?.superstructure?.simulated || [])) setRow(p.year, { super_s: off(p.yhat, 'superstructure') });
-    for (const p of (simMetrics?.substructure?.simulated || [])) setRow(p.year, { sub_s: off(p.yhat, 'substructure') });
+    for (const point of metrics.superstructure?.forecast || []) update(point.year, { superstructureForecast: point.yhat });
+    for (const point of metrics.substructure?.forecast || []) update(point.year, { substructureForecast: point.yhat });
 
-    // Seed the forecast & simulation lines at the last observed year so they
-    // connect smoothly to the observed history.
-    if (observed.length && Number.isFinite(forecastStart)) {
+    // Connect each forecast to the final observed point without changing the
+    // stored values or presenting the expected path as an observation.
+    for (const [component, target] of [
+      ['deck', 'deckForecast'],
+      ['superstructure', 'superstructureForecast'],
+      ['substructure', 'substructureForecast'],
+    ] as const) {
+      const observed = [...(metrics[component]?.observed || [])].sort((a, b) => a.year - b.year);
+      if (!observed.length || !(metrics[component]?.forecast || []).length) continue;
       const last = observed[observed.length - 1];
-      const boundary = rows.get(last.year);
-      if (boundary) {
-        if (deckFc.length && last.deck != null) {
-          const v = off(last.deck, 'deck');
-          boundary.deck_f = v;
-          if (v != null) boundary.deck_band = [v, v];  // connect the band to the last observed point
-        }
-        if (superFc.length && last.superstructure != null) boundary.super_f = off(last.superstructure, 'superstructure');
-        if (subFc.length && last.substructure != null) boundary.sub_f = off(last.substructure, 'substructure');
-        if (simMetrics?.deck?.simulated?.length && last.deck != null) boundary.deck_s = off(last.deck, 'deck');
-        if (simMetrics?.superstructure?.simulated?.length && last.superstructure != null) boundary.super_s = off(last.superstructure, 'superstructure');
-        if (simMetrics?.substructure?.simulated?.length && last.substructure != null) boundary.sub_s = off(last.substructure, 'substructure');
-      }
+      update(last.year, { [target]: last.value });
+      if (component === 'deck') update(last.year, { deckPredictionRange: [last.value, last.value] });
     }
-    return Array.from(rows.values()).sort((a, b) => a.year - b.year);
-  }, [observed, deckFc, superFc, subFc, simMetrics, forecastStart]);
+    return [...rows.values()].sort((left, right) => left.year - right.year);
+  }, [forecast]);
 
-  const hasForecast = deckFc.length + superFc.length + subFc.length > 0;
-
-  // The same maintenance/posting event repeats in every yearly snapshot, so
-  // collapse to unique events for a clean timeline.
-  const dedupedEvents = useMemo(() => {
-    const seen = new Set<string>();
-    const out: HistoryEvent[] = [];
-    for (const ev of (data?.history_events || [])) {
-      const key = `${ev.year}|${ev.event_type}|${(ev.label || '').trim().toLowerCase()}`;
-      if (!seen.has(key)) { seen.add(key); out.push(ev); }
-    }
-    return out.sort((a, b) => a.year - b.year);
-  }, [data]);
+  const metrics = forecast?.metrics || {};
+  const currentRatings = [
+    { label: 'Deck', value: latestObserved(metrics.deck) },
+    { label: 'Superstructure', value: latestObserved(metrics.superstructure) },
+    { label: 'Substructure', value: latestObserved(metrics.substructure) },
+  ];
+  const firstForecastYear = Math.min(
+    ...Object.values(metrics).flatMap((series) => series.forecast.map((point) => point.year)),
+  );
 
   return (
-    <Modal open onClose={onClose} inline={embedded} size="lg" title="Bridge History & Forecast" icon={<History className="w-5 h-5" />}>
-      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-1 mb-5">
-        {bridgeName || 'Bridge'} · {bridgeNumber}{data?.year_built ? ` · Built ${data.year_built}` : ''}
-      </p>
-
-      {loading && (
-        <div className="text-center py-12">
-          <Loader2 className="w-9 h-9 text-brand-500 mx-auto animate-spin" />
-          <p className="text-slate-500 dark:text-slate-400 mt-3">Loading history…</p>
-        </div>
-      )}
-      {error && <p className="text-red-500 text-center py-8">{error}</p>}
-
-      {data && !loading && (
-        <div className="space-y-6">
-          {/* Current ratings */}
-          <div className="flex gap-3 flex-wrap">
-            {[
-              { label: 'Deck', val: data.deck_condition_rating },
-              { label: 'Superstructure', val: data.superstructure_condition_rating },
-              { label: 'Substructure', val: data.substructure_condition_rating },
-            ].map(({ label, val }) => (
-              <div key={label} className="flex-1 min-w-[180px] rounded-xl px-4 py-3 bg-slate-50 dark:bg-slate-800/60" style={{ borderLeft: `4px solid ${ratingColor(val)}` }}>
-                <div className="text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">{label}</div>
-                <div className="font-bold text-base" style={{ color: ratingColor(val) }}>{ratingLabel(val)}</div>
-              </div>
-            ))}
+    <Modal open onClose={onClose} inline={embedded} size="lg" title="Bridge History & Forecast" icon={<History className="h-5 w-5" />}>
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="font-semibold text-slate-900 dark:text-white">{bridgeName || `Bridge ${bridgeNumber}`}</p>
+            <p className="text-sm text-slate-500">Bridge {bridgeNumber}{dataYear ? ` · selected inventory year ${dataYear}` : ' · latest published year'}</p>
           </div>
-
-          {/* Forecast control row */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <h3 className="font-semibold text-slate-700 dark:text-slate-200">Condition Trend &amp; {horizonYears}-yr Forecast</h3>
-            <div className="flex items-center gap-2">
-              {training && (
-                <span className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Training…
-                </span>
-              )}
-              <Button size="sm" variant="secondary" icon={<Sparkles className="w-3.5 h-3.5" />} onClick={() => generateForecast(horizonYears)} disabled={training}>
-                {training ? 'Training…' : 'Retrain'}
-              </Button>
-            </div>
-          </div>
-
-          {/* Forecast horizon slider */}
-          <div className="flex items-center gap-3 flex-wrap text-sm">
-            <span className="font-medium text-slate-600 dark:text-slate-300 whitespace-nowrap">
-              Forecast horizon: <span className="font-bold">{horizonYears}</span> year{horizonYears === 1 ? '' : 's'}
-            </span>
-            <input
-              type="range"
-              min={1}
-              max={50}
-              step={1}
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-semibold text-slate-500" htmlFor="history-horizon">Horizon</label>
+            <select
+              id="history-horizon"
               value={horizonYears}
-              onChange={(e) => setHorizonYears(Number(e.target.value))}
-              onPointerUp={commitHorizon}
-              onKeyUp={commitHorizon}
-              disabled={training}
-              className="flex-1 min-w-[160px] accent-brand-500"
-            />
+              onChange={(event) => setHorizonYears(Number(event.target.value))}
+              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900"
+            >
+              {[1, 3, 5, 10, 15, 20, 30, 50].map((years) => <option key={years} value={years}>{years} years</option>)}
+            </select>
+            <Button size="sm" variant="secondary" icon={<RefreshCw className="h-4 w-4" />} onClick={() => void loadForecast()} disabled={loading}>
+              Refresh
+            </Button>
           </div>
-
-          {/* Maintenance simulation control */}
-          {hasForecast && forecastYears.length > 0 && (
-            <div className="flex items-center gap-3 flex-wrap text-sm bg-slate-50 dark:bg-slate-800/60 rounded-xl px-4 py-3">
-              <span className="flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300">
-                <Wrench className="w-4 h-4" /> Simulate maintenance in
-              </span>
-              <select
-                value={simYear}
-                onChange={(e) => {
-                  const v = e.target.value ? Number(e.target.value) : '';
-                  setSimYear(v);
-                  if (v) runSimulation(v, horizonYears); else setSimForecast(null);
-                }}
-                className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-1.5 text-slate-800 dark:text-slate-100"
-              >
-                <option value="">— no simulation —</option>
-                {forecastYears.map((y) => <option key={y} value={y}>{y}</option>)}
-              </select>
-              {simLoading && <Loader2 className="w-4 h-4 animate-spin text-brand-500" />}
-            </div>
-          )}
-
-          {/* Chart */}
-          {series.length > 1 ? (
-            <div>
-            <ResponsiveContainer width="100%" height={320}>
-              <ComposedChart data={series}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
-                <XAxis dataKey="year" tick={{ fontSize: 12, fill: '#94a3b8' }} />
-                <YAxis domain={[0, 9]} ticks={RATING_TICKS} interval={0} tick={{ fontSize: 12, fill: '#94a3b8' }} allowDecimals={false} />
-                <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid rgba(148,163,184,0.3)' }} formatter={tipFormatter} />
-                {/* Shaded deck forecast confidence band (drawn behind the lines). */}
-                <Area type="monotone" dataKey="deck_band" name="Deck confidence range" stroke="#22c55e" strokeOpacity={0.35} strokeWidth={1} fill="#22c55e" fillOpacity={0.18} connectNulls legendType="none" isAnimationActive={false} />
-                {Number.isFinite(forecastStart) && (
-                  <ReferenceLine x={forecastStart} stroke="#6366f1" strokeDasharray="4 4" label={{ value: 'forecast', position: 'top', fontSize: 10, fill: '#6366f1' }} />
-                )}
-                {simYear !== '' && (
-                  <ReferenceLine x={simYear} stroke="#0ea5e9" strokeDasharray="2 2" label={{ value: 'work', position: 'top', fontSize: 10, fill: '#0ea5e9' }} />
-                )}
-                {dedupedEvents.slice(0, 12).map((ev, i) => (
-                  <ReferenceLine key={i} x={ev.year} stroke={eventStyle(ev.event_type).color} strokeOpacity={0.5} strokeDasharray="4 3" ifOverflow="extendDomain" />
-                ))}
-                {/* Observed (solid) */}
-                <Line type="monotone" dataKey="deck" stroke="#22c55e" strokeWidth={2.5} strokeOpacity={0.9} name="Deck" dot={{ r: 3 }} connectNulls />
-                <Line type="monotone" dataKey="superstructure" stroke="#eab308" strokeWidth={2.5} strokeOpacity={0.9} name="Superstructure" dot={{ r: 4 }} connectNulls />
-                <Line type="monotone" dataKey="substructure" stroke="#ef4444" strokeWidth={2.5} strokeOpacity={0.9} name="Substructure" dot={{ r: 3 }} connectNulls />
-                {/* Baseline forecast (dashed) */}
-                <Line type="monotone" dataKey="deck_f" stroke="#22c55e" strokeWidth={2} strokeDasharray="6 4" name="Deck (forecast)" dot={false} connectNulls />
-                <Line type="monotone" dataKey="super_f" stroke="#eab308" strokeWidth={2} strokeDasharray="6 4" name="Super (forecast)" dot={false} connectNulls />
-                <Line type="monotone" dataKey="sub_f" stroke="#ef4444" strokeWidth={2} strokeDasharray="6 4" name="Sub (forecast)" dot={false} connectNulls />
-                {/* Deck confidence edges (solid, clearer than before) */}
-                <Line type="monotone" dataKey="deck_lo" stroke="#16a34a" strokeOpacity={0.6} strokeWidth={1.25} name="Deck lower" dot={false} connectNulls legendType="none" />
-                <Line type="monotone" dataKey="deck_hi" stroke="#16a34a" strokeOpacity={0.6} strokeWidth={1.25} name="Deck upper" dot={false} connectNulls legendType="none" />
-                {/* Maintenance simulation (dotted) */}
-                <Line type="monotone" dataKey="deck_s" stroke="#16a34a" strokeWidth={2} strokeDasharray="1 3" name="Deck (with work)" dot={{ r: 2 }} connectNulls />
-                <Line type="monotone" dataKey="super_s" stroke="#ca8a04" strokeWidth={2} strokeDasharray="1 3" name="Super (with work)" dot={{ r: 2 }} connectNulls />
-                <Line type="monotone" dataKey="sub_s" stroke="#dc2626" strokeWidth={2} strokeDasharray="1 3" name="Sub (with work)" dot={{ r: 2 }} connectNulls />
-              </ComposedChart>
-            </ResponsiveContainer>
-
-            {/* Custom legend: colour = which member, line style = which scenario */}
-            <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 px-4 py-2.5 text-xs">
-              <div className="flex items-center gap-3">
-                <span className="font-semibold text-slate-500 dark:text-slate-400">Member</span>
-                {LEGEND_COMPONENTS.map((c) => (
-                  <span key={c.label} className="flex items-center gap-1.5">
-                    <span className="inline-block w-3 h-3 rounded-full" style={{ background: c.color }} />
-                    <span className="text-slate-600 dark:text-slate-300">{c.label}</span>
-                  </span>
-                ))}
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="font-semibold text-slate-500 dark:text-slate-400">Line</span>
-                <span className="flex items-center gap-1.5"><LineSample /><span className="text-slate-600 dark:text-slate-300">Observed</span></span>
-                {hasForecast && (
-                  <span className="flex items-center gap-1.5"><LineSample dash="6 4" /><span className="text-slate-600 dark:text-slate-300">Forecast</span></span>
-                )}
-                {simYear !== '' && simForecast && (
-                  <span className="flex items-center gap-1.5"><LineSample dash="1 3" /><span className="text-slate-600 dark:text-slate-300">With maintenance</span></span>
-                )}
-              </div>
-            </div>
-            </div>
-          ) : (
-            <div className="text-center py-6 px-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 text-sm">
-              Not enough data points to show a trend. Load multiple report years to build a forecast.
-            </div>
-          )}
-
-          {/* Maintenance & event timeline (deduplicated) — horizontal timeline */}
-          {dedupedEvents.length > 0 && (
-            <div>
-              <h4 className="font-semibold text-sm text-slate-600 dark:text-slate-300 mb-3">Maintenance &amp; Event Timeline</h4>
-              <div className="overflow-x-auto ui-scroll pb-2">
-                <div className="flex min-w-min">
-                  {dedupedEvents.map((ev, i) => {
-                    const { color, label: typeLabel } = eventStyle(ev.event_type);
-                    return (
-                      <div key={i} className="flex w-32 shrink-0 flex-col items-center px-1">
-                        {/* Above the line: year + type badge */}
-                        <div className="flex h-12 flex-col items-center justify-end gap-1">
-                          <span className="text-sm font-bold text-slate-800 dark:text-slate-100">{ev.year}</span>
-                          <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background: `${color}22`, color }}>{typeLabel}</span>
-                        </div>
-                        {/* The line + the event dot sitting on it (connects across items) */}
-                        <div className="relative flex h-4 w-full items-center justify-center">
-                          <div className="absolute inset-x-0 top-1/2 h-0.5 -translate-y-1/2 bg-slate-200 dark:bg-slate-700" />
-                          <span className="relative z-10 h-3.5 w-3.5 rounded-full border-2 border-white dark:border-slate-900 shadow-sm" style={{ background: color }} />
-                        </div>
-                        {/* Below the line: event label */}
-                        <p className="mt-1.5 text-center text-xs leading-snug text-slate-600 dark:text-slate-300">{ev.label}</p>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
         </div>
-      )}
+
+        {loading && (
+          <div className="py-12 text-center text-slate-500">
+            <Loader2 className="mx-auto h-9 w-9 animate-spin text-brand-500" />
+            <p className="mt-3">Loading the exact published history and annual forecast…</p>
+          </div>
+        )}
+        {error && !loading && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <p className="font-semibold">Forecast unavailable</p>
+            <p className="mt-1">{error}</p>
+            <p className="mt-2 text-xs">Fit and historically validate a v2 model from the Forecasts page, then retry.</p>
+          </div>
+        )}
+
+        {forecast && !loading && (
+          <>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {currentRatings.map(({ label, value }) => (
+                <div key={label} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-900/60" style={{ borderLeftColor: ratingColor(value), borderLeftWidth: 4 }}>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+                  <p className="mt-1 font-bold" style={{ color: ratingColor(value) }}>{ratingLabel(value)}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-xs text-slate-700 dark:border-indigo-900 dark:bg-indigo-950/20 dark:text-slate-300 md:grid-cols-2">
+              <p><span className="font-semibold">Exact source:</span> {forecast.as_of_year} · revision {forecast.snapshot_revision_id}</p>
+              <p><span className="font-semibold">Forecast package:</span> {forecast.model_version_id}</p>
+              <p><span className="font-semibold">Historical evaluation:</span> {forecast.evaluation_receipt_id}</p>
+              <p className="flex items-center gap-1.5"><ShieldCheck className="h-4 w-4 text-indigo-600" /><span className="font-semibold">Status:</span> {forecast.qualification.split('_').join(' ')}</p>
+            </div>
+
+            {chartRows.length > 1 ? (
+              <div className="rounded-2xl border border-slate-200 p-3 dark:border-slate-700">
+                <ResponsiveContainer width="100%" height={340}>
+                  <ComposedChart data={chartRows}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
+                    <XAxis dataKey="year" tick={{ fontSize: 12, fill: '#64748b' }} />
+                    <YAxis domain={[0, 9]} ticks={RATING_TICKS} interval={0} allowDecimals={false} tick={{ fontSize: 12, fill: '#64748b' }} />
+                    <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid #cbd5e1' }} />
+                    <Area dataKey="deckPredictionRange" name="Deck p10–p90 prediction range" stroke="#16a34a" fill="#22c55e" fillOpacity={0.14} connectNulls />
+                    {Number.isFinite(firstForecastYear) && <ReferenceLine x={firstForecastYear} stroke="#4f46e5" strokeDasharray="4 4" label={{ value: 'forecast', position: 'top', fill: '#4f46e5', fontSize: 10 }} />}
+                    <Line dataKey="deck" name="Deck observed" stroke="#16a34a" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
+                    <Line dataKey="superstructure" name="Superstructure observed" stroke="#ca8a04" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
+                    <Line dataKey="substructure" name="Substructure observed" stroke="#dc2626" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
+                    <Line dataKey="deckForecast" name="Deck expected" stroke="#16a34a" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls />
+                    <Line dataKey="superstructureForecast" name="Superstructure expected" stroke="#ca8a04" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls />
+                    <Line dataKey="substructureForecast" name="Substructure expected" stroke="#dc2626" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls />
+                  </ComposedChart>
+                </ResponsiveContainer>
+                <p className="mt-2 text-xs text-slate-500">Solid lines are published observations. Dashed lines are the annual no-action expected path; the shaded band is a model prediction range, not a confidence guarantee.</p>
+              </div>
+            ) : (
+              <div className="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500 dark:bg-slate-900/60">Not enough published observations are available to plot this bridge.</div>
+            )}
+
+            <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950/20 dark:text-sky-200">
+              Rehabilitation and maintenance simulations are in the LCCA tab, where each yearly action is checked against bridge materials, a named treatment library, cost evidence, and this same forecast package.
+            </div>
+          </>
+        )}
+      </div>
     </Modal>
   );
 };

@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bridge-guard.com/schemas/fhwa-rule-registry-v1.schema.json",
+  "title": "BridgeGuard FHWA rule-bundle registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "registry_id",
+    "observed_on",
+    "artifacts",
+    "bundles"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "registry_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "observed_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "bundles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/bundle"
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "nullableDate": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date"
+    },
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stringList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "identifierList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "role",
+        "authority",
+        "legal_status",
+        "state",
+        "source_url",
+        "published_on",
+        "published_label",
+        "updated_on",
+        "media_type",
+        "local_path",
+        "sha256",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "$ref": "#/$defs/identifier"
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        },
+        "legal_status": {
+          "enum": [
+            "regulatory_ibr",
+            "operational",
+            "informational_pending_rulemaking",
+            "legacy_reference",
+            "pending_publication"
+          ]
+        },
+        "state": {
+          "enum": [
+            "vendored_verified",
+            "vendored_unverified",
+            "remote_unverified",
+            "unavailable"
+          ]
+        },
+        "source_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "published_on": {
+          "$ref": "#/$defs/nullableDate"
+        },
+        "published_label": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "updated_on": {
+          "$ref": "#/$defs/nullableDate"
+        },
+        "retrieved_on": {
+          "$ref": "#/$defs/nullableDate"
+        },
+        "reviewed_on": {
+          "$ref": "#/$defs/nullableDate"
+        },
+        "reviewed_by": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "parser_version": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "compiler_version": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "supersedes": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "superseded_by": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "media_type": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "local_path": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "notes": {
+          "$ref": "#/$defs/stringList"
+        }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "profile_kind",
+        "legal_status",
+        "compliance_use",
+        "implementation_status",
+        "enabled",
+        "effective_submission_years",
+        "artifact_ids",
+        "inherits",
+        "disabled_reason",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile_kind": {
+          "enum": [
+            "regulatory_baseline",
+            "submission",
+            "informational_preview",
+            "research_import",
+            "native_ingestion"
+          ]
+        },
+        "legal_status": {
+          "enum": [
+            "regulatory_ibr",
+            "operational_submission",
+            "informational_pending_rulemaking",
+            "internal_non_submission",
+            "disabled_pending_publication"
+          ]
+        },
+        "compliance_use": {
+          "enum": [
+            "regulatory_baseline_comparison",
+            "submission_support_draft_external_verification_required",
+            "informational_only",
+            "research_only_not_for_submission",
+            "native_ingestion_validation_only",
+            "disabled"
+          ]
+        },
+        "implementation_status": {
+          "const": "registry_only"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "effective_submission_years": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 2000,
+            "maximum": 2200
+          }
+        },
+        "artifact_ids": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "inherits": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "disabled_reason": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "notes": {
+          "$ref": "#/$defs/stringList"
+        }
+      }
+    }
+  }
+}

@@ -9,11 +9,17 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from .constants import mapping, BRIDGE_EXCLUDE_KEYS, STATE_MAP, REVERSE_MAPPING
+from .constants import mapping, STATE_MAP, REVERSE_MAPPING
 from .editor_metadata import build_editor_metadata
-from .snbi_schema import NESTED_ARRAY_SPECS
-from .snbi_rules import CODE_LISTS
-from .utils import safe_insert, USER_DB, SAVE_DIR, resource_path, init_db_if_needed
+from .snbi_schema import (
+    ALL_NESTED_ARRAY_NAMES,
+    NESTED_ARRAY_SPECS,
+    SCHEMA_CODES,
+    TOP_LEVEL_FIELDS,
+)
+from .utils import USER_DB, SAVE_DIR, resource_path, init_db_if_needed
+from .db_migrations import apply_migrations
+from .sqlite_runtime import require_safe_sqlite_wal_runtime
 
 
 def _extract_year_from_value(value: Any) -> Optional[int]:
@@ -335,12 +341,48 @@ def _migrate_add_year_support(conn: sqlite3.Connection, cursor: sqlite3.Cursor):
         print("[DB migration] fhwa_omit column added to bridges table.")
 
 
-def init_db(db_path: str = USER_DB):
+def _configured_journal_mode() -> str:
+    """Select WAL in production and a safe non-WAL mode for isolated tests.
+
+    Developers may request WAL explicitly, but the runtime gate below still
+    rejects an affected SQLite build.  Tests use DELETE so an old host Python
+    cannot accidentally be described as WAL-safe.
+    """
+
+    configured = os.getenv("BRIDGEGUARD_SQLITE_JOURNAL_MODE", "").strip().lower()
+    if configured:
+        if configured not in {"wal", "delete"}:
+            raise RuntimeError(
+                "BRIDGEGUARD_SQLITE_JOURNAL_MODE must be 'wal' or 'delete'"
+            )
+        return configured
+    if os.getenv("BRIDGEGUARD_ENV", "").strip().lower() == "test":
+        return "delete"
+    return "wal"
+
+
+def init_db(
+    db_path: str = USER_DB,
+    *,
+    allow_bundled_seed: bool = True,
+    journal_mode_override: str | None = None,
+):
     """Initialize database - create tables and copy initial DB if needed."""
-    init_db_if_needed()  # This is from utils.py
+    # Reject a vulnerable WAL runtime before opening the file or creating any
+    # application table; callers outside FastAPI receive the same protection.
+    journal_mode = (
+        str(journal_mode_override).strip().lower()
+        if journal_mode_override is not None
+        else _configured_journal_mode()
+    )
+    if journal_mode not in {"wal", "delete"}:
+        raise RuntimeError("journal_mode_override must be 'wal' or 'delete'")
+    require_safe_sqlite_wal_runtime(journal_mode)
+    if allow_bundled_seed:
+        init_db_if_needed()  # This is from utils.py
 
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute(f"PRAGMA journal_mode = {journal_mode};")
     conn.execute("PRAGMA synchronous = NORMAL;")
     cursor = conn.cursor()
 
@@ -353,7 +395,7 @@ def init_db(db_path: str = USER_DB):
             bridge_name TEXT,
             previous_bridge_number TEXT,
             county_code INTEGER,
-            place_code INTEGER,
+            place_code TEXT,
             highway_agency_district TEXT,
             latitude REAL,
             longitude REAL,
@@ -734,6 +776,11 @@ def init_db(db_path: str = USER_DB):
     _migrate_add_year_support(conn, cursor)
 
     conn.commit()
+    # PR4 owns all further relational changes through immutable, checksummed
+    # migrations.  Run only after the legacy bootstrap has completed and no
+    # transaction is active; the runner acquires its own BEGIN IMMEDIATE lock.
+    apply_migrations(conn, app_revision="bridgeguard-pr4")
+    cursor.close()
     conn.close()
     print(f"Database initialized at: {db_path}")
 
@@ -745,8 +792,10 @@ def ensure_schema(db_path: str = USER_DB):
 
 def get_connection(db_path: str = USER_DB):
     """Get database connection."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 10000;")
+    conn.execute("PRAGMA trusted_schema = OFF;")
     return conn
 
 
@@ -990,304 +1039,380 @@ def apply_validated_inspection_report_records(
 
 
 # ====================== LOADER ======================
-def load_json_to_db(db_path: str, data: List[Dict], data_year_override: Optional[int] = None) -> tuple:
-    """Load SNBI JSON data into SQLite database.
+_LOAD_SECTION_TABLES = {
+    "Elements": "elements",
+    "Features": "features",
+    "Inspections": "inspections",
+    "PostingEvaluations": "posting_evaluations",
+    "PostingStatuses": "posting_statuses",
+    "SpanSets": "span_sets",
+    "SubstructureSets": "substructure_sets",
+    "Works": "works",
+    "Routes": "routes",
+}
 
-    Returns a 4-tuple: (inserted_new, already_existed, skipped, skipped_reasons)
-    - inserted_new:    rows actually written to the database for the first time.
-    - already_existed: rows whose (state_code, bridge_number) already existed
-                       (silently ignored by INSERT OR IGNORE).
-    - skipped:         rows that could not be processed at all (missing keys,
-                       mapping errors, etc.).
-    - skipped_reasons: human-readable explanation for each skipped row (capped at
-                       50) so the loader UI can show exactly why a bridge dropped.
+_CANONICAL_METADATA_KEYS = {
+    "_SourceData",
+    "_TransitionLineage",
+    "_TransitionReview",
+    "_TransitionIssues",
+    "_TransitionCoverage",
+    "_CanonicalNormalization",
+    "_ValidationReport",
+}
+
+# SQLite has no lossless BOOLEAN storage class. These private sentinels keep
+# an explicitly supplied False distinct from the integer or code value 0.
+_SQL_BOOL_FALSE = "\x00bridgeguard:boolean:false"
+_SQL_BOOL_TRUE = "\x00bridgeguard:boolean:true"
+
+
+def _encode_projection_value(value: Any) -> Any:
+    if value is False:
+        return _SQL_BOOL_FALSE
+    if value is True:
+        return _SQL_BOOL_TRUE
+    return value
+
+
+def _decode_projection_value(value: Any) -> Any:
+    if value == _SQL_BOOL_FALSE:
+        return False
+    if value == _SQL_BOOL_TRUE:
+        return True
+    return value
+
+
+def _preflight_snbi_batch(data: Any) -> List[str]:
+    """Validate every bridge and child section before opening a transaction."""
+    errors: List[str] = []
+    if not isinstance(data, list):
+        return ["Payload must be a JSON array of bridge objects"]
+
+    def _field_error(path: str, tag: Any, expected_section: str) -> None:
+        label = str(tag)
+        if label in SCHEMA_CODES or label == "Routes":
+            errors.append(f"{path}: {label} is not valid in {expected_section}")
+        else:
+            errors.append(f"{path}: unknown field {label}")
+
+    for bridge_index, bridge in enumerate(data):
+        bridge_path = f"Record {bridge_index}"
+        if not isinstance(bridge, dict):
+            errors.append(f"{bridge_path}: bridge must be an object")
+            continue
+
+        for key in bridge:
+            if (
+                key in TOP_LEVEL_FIELDS
+                or key in ALL_NESTED_ARRAY_NAMES
+                or key in _CANONICAL_METADATA_KEYS
+            ):
+                continue
+            _field_error(bridge_path, key, "the bridge section")
+
+        if bridge.get("BL01") is None or bridge.get("BL01") == "":
+            errors.append(f"{bridge_path}: missing required identifier BL01")
+        if bridge.get("BID01") is None or bridge.get("BID01") == "":
+            errors.append(f"{bridge_path}: missing required identifier BID01")
+        if "_SourceData" in bridge and not isinstance(bridge["_SourceData"], dict):
+            errors.append(f"{bridge_path}._SourceData must be an object")
+
+        for section in ALL_NESTED_ARRAY_NAMES:
+            if section not in bridge:
+                continue
+            rows = bridge[section]
+            if not isinstance(rows, list):
+                errors.append(f"{bridge_path}.{section} must be an array")
+                continue
+            spec = NESTED_ARRAY_SPECS[section]
+            allowed_fields = set(spec["fields"])
+            for row_index, row in enumerate(rows):
+                row_path = f"{bridge_path}.{section}[{row_index}]"
+                if not isinstance(row, dict):
+                    errors.append(f"{row_path} must be an object")
+                    continue
+                for key in row:
+                    if key not in allowed_fields:
+                        _field_error(row_path, key, section)
+                for required in sorted(spec["required"]):
+                    if row.get(required) is None or row.get(required) == "":
+                        errors.append(f"{row_path}: missing required field {required}")
+
+                if section != "Features" or "Routes" not in row:
+                    continue
+                routes = row["Routes"]
+                if not isinstance(routes, list):
+                    errors.append(f"{row_path}.Routes must be an array")
+                    continue
+                route_spec = NESTED_ARRAY_SPECS["Routes"]
+                for route_index, route in enumerate(routes):
+                    route_path = f"{row_path}.Routes[{route_index}]"
+                    if not isinstance(route, dict):
+                        errors.append(f"{route_path} must be an object")
+                        continue
+                    for key in route:
+                        if key not in route_spec["fields"]:
+                            _field_error(route_path, key, "Routes")
+                    for required in sorted(route_spec["required"]):
+                        if route.get(required) is None or route.get(required) == "":
+                            errors.append(f"{route_path}: missing required field {required}")
+    return errors
+
+
+def _projection_schema_errors(cursor: sqlite3.Cursor) -> List[str]:
+    """Prove every canonical field has a column in its designated table."""
+    errors: List[str] = []
+    sections = {"Bridge": ("bridges", set(TOP_LEVEL_FIELDS))}
+    for section, table in _LOAD_SECTION_TABLES.items():
+        sections[section] = (table, set(NESTED_ARRAY_SPECS[section]["fields"]))
+
+    for section, (table, tags) in sections.items():
+        cursor.execute(f'PRAGMA table_info("{table}")')
+        columns = {str(row[1]) for row in cursor.fetchall()}
+        if not columns:
+            errors.append(f"Projection table {table} is missing")
+            continue
+        for tag in sorted(tags - {"Routes"}):
+            column = mapping.get(tag)
+            if not column:
+                errors.append(f"{section}.{tag}: no relational mapping is declared")
+            elif column not in columns:
+                errors.append(f"{section}.{tag}: projection column {table}.{column} is missing")
+        for identity_column in ("state_code", "bridge_number", "data_year"):
+            if identity_column not in columns:
+                errors.append(f"{section}: projection column {table}.{identity_column} is missing")
+    return errors
+
+
+def _insert_plain(cursor: sqlite3.Cursor, table: str, row: Dict[str, Any]) -> None:
+    if not row:
+        raise ValueError(f"Cannot insert an empty {table} row")
+    columns = tuple(row)
+    column_sql = ", ".join(f'"{column}"' for column in columns)
+    placeholders = ", ".join("?" for _ in columns)
+    cursor.execute(
+        f'INSERT INTO "{table}" ({column_sql}) VALUES ({placeholders})',
+        tuple(row[column] for column in columns),
+    )
+
+
+def _project_child_row(
+    section: str,
+    row: Dict[str, Any],
+    *,
+    state_code: Any,
+    bridge_number: Any,
+    data_year: int,
+    feature_type: Any = None,
+) -> Dict[str, Any]:
+    projected: Dict[str, Any] = {
+        "state_code": _encode_projection_value(state_code),
+        "bridge_number": _encode_projection_value(bridge_number),
+        "data_year": data_year,
+    }
+    if section == "Routes":
+        projected["feature_type"] = _encode_projection_value(feature_type)
+    for tag, value in row.items():
+        if tag != "Routes":
+            projected[mapping[tag]] = _encode_projection_value(value)
+    return projected
+
+
+def load_json_to_db(db_path: str, data: List[Dict], data_year_override: Optional[int] = None) -> tuple:
+    """Atomically replace complete SNBI snapshots in the relational projection.
+
+    The public result remains ``(inserted, existed, skipped, reasons)``. Any
+    structural, projection, or SQL error rejects the entire batch and reports
+    zero writes, so callers never observe a partially imported upload.
     """
-    # The DB file can be deleted while the app is running. A fresh sqlite
-    # connection would recreate an empty file, so ensure the schema exists here.
-    init_db(db_path)
+    preflight_errors = _preflight_snbi_batch(data)
+    if preflight_errors:
+        count = len(data) if isinstance(data, list) else 1
+        return 0, 0, count, preflight_errors[:50]
+    if not data:
+        return 0, 0, 0, []
+
+    ensure_schema(db_path)
     conn = get_connection(db_path)
-    conn.execute("PRAGMA synchronous = NORMAL;")
+    # Authoritative snapshot replacement must request durable fsync semantics
+    # before the writer lock is acquired.
+    conn.execute("PRAGMA synchronous = FULL;")
     conn.execute("PRAGMA temp_store = MEMORY;")
     cursor = conn.cursor()
-    table_columns_cache: Dict[str, set] = {}
-
-    def _filter_to_table_columns(table_name: str, row: Dict[str, Any]) -> Dict[str, Any]:
-        if table_name not in table_columns_cache:
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            table_columns_cache[table_name] = {col[1] for col in cursor.fetchall()}
-        allowed = table_columns_cache[table_name]
-        return {k: v for k, v in row.items() if k in allowed}
-
-    inserted_new = 0
-    already_existed = 0
-    skipped = 0
-    skipped_reasons = []
 
     try:
-        for idx, bridge_data in enumerate(data):
-            state_code = bridge_data.get('BL01')
-            bridge_number = bridge_data.get('BID01')
+        projection_errors = _projection_schema_errors(cursor)
+        if projection_errors:
+            return 0, 0, len(data), projection_errors[:50]
 
-            # Use explicit None checks instead of falsy checks (0 is a valid state code!)
-            if state_code is None or state_code == '' or bridge_number is None or bridge_number == '':
-                skipped += 1
-                if len(skipped_reasons) < 50:
-                    skipped_reasons.append(
-                        f"Record {idx}: missing required identifier — "
-                        f"BL01 (state) = {state_code!r}, BID01 (bridge number) = {bridge_number!r}"
-                    )
-                continue
+        inserted_new = 0
+        already_existed = 0
+        conn.execute("BEGIN IMMEDIATE")
 
-            # The inventory year selected in the Loader is authoritative. SNBI
-            # date fields often contain inspection dates from prior years, so
-            # using them as the database snapshot year would mis-file uploads.
-            snapshot_year = data_year_override or _extract_snbi_snapshot_year(bridge_data)
-            data_year = snapshot_year or datetime.now().year
+        for bridge_data in data:
+            state_code = bridge_data["BL01"]
+            bridge_number = bridge_data["BID01"]
+            snapshot_year = (
+                data_year_override
+                if data_year_override is not None
+                else _extract_snbi_snapshot_year(bridge_data)
+            )
+            data_year = snapshot_year if snapshot_year is not None else datetime.now().year
 
-            # ── 1. Main bridge table ─────────────────────────────────────
-            bridge_insert = {}
-            for key, value in bridge_data.items():
-                if key in mapping:
-                    col = mapping[key]
-                    # You may want to dynamically get columns, but for speed we insert what matches
-                    bridge_insert[col] = value
+            bridge_row: Dict[str, Any] = {}
+            for tag in sorted(TOP_LEVEL_FIELDS):
+                column = mapping[tag]
+                value = bridge_data[tag] if tag in bridge_data else None
+                bridge_row[column] = _encode_projection_value(value)
+            bridge_row["state_code"] = _encode_projection_value(state_code)
+            bridge_row["bridge_number"] = _encode_projection_value(bridge_number)
+            bridge_row["data_year"] = data_year
 
-            bridge_insert['state_code'] = state_code
-            bridge_insert['bridge_number'] = bridge_number
-            bridge_insert['data_year'] = data_year
+            source_data = bridge_data.get("_SourceData", {})
+            nbi_source = source_data.get("nbi") if isinstance(source_data, dict) else None
+            if isinstance(nbi_source, dict):
+                service_on = str(nbi_source.get("SERVICE_ON_042A") or "").strip()
+                bridge_row["fhwa_omit"] = 1 if service_on in {"", "0", "2", "3", "9"} else 0
+            else:
+                bridge_row["fhwa_omit"] = 0
 
-            # FHWA crosswalk: Item 42A in {2, 3, 9, 0, null} marks a
-            # non-highway bridge that FHWA says to omit from the transition.
-            # Keep the record but flag it for the UI.
-            _src = bridge_data.get('_SourceData')
-            _nbi_src = _src.get('nbi') if isinstance(_src, dict) else None
-            if isinstance(_nbi_src, dict):
-                _service_on = str(_nbi_src.get('SERVICE_ON_042A') or '').strip()
-                bridge_insert['fhwa_omit'] = 1 if _service_on in {'', '0', '2', '3', '9'} else 0
+            cursor.execute(
+                "SELECT 1 FROM bridges WHERE state_code=? AND bridge_number=? AND data_year=?",
+                (state_code, bridge_number, data_year),
+            )
+            existed = cursor.fetchone() is not None
+            if existed:
+                update_columns = [
+                    column for column in bridge_row
+                    if column not in {"state_code", "bridge_number", "data_year"}
+                ]
+                set_sql = ", ".join(f'"{column}"=?' for column in update_columns)
+                cursor.execute(
+                    f"UPDATE bridges SET {set_sql} WHERE state_code=? AND bridge_number=? AND data_year=?",
+                    tuple(bridge_row[column] for column in update_columns)
+                    + (state_code, bridge_number, data_year),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(f"Snapshot replacement affected {cursor.rowcount} bridge rows")
+                already_existed += 1
+            else:
+                _insert_plain(cursor, "bridges", bridge_row)
+                inserted_new += 1
 
-            bridge_insert = _filter_to_table_columns('bridges', bridge_insert)
-
-            try:
-                safe_insert(cursor, 'bridges', bridge_insert)
-                if cursor.rowcount == 1:
-                    inserted_new += 1
-                else:
-                    # Row already exists for this state/bridge/year. Refresh the
-                    # complete main bridge snapshot from the incoming JSON so
-                    # same-year reloads are deterministic.
-                    update_cols = {
-                        k: v for k, v in bridge_insert.items()
-                        if k not in {'id', 'state_code', 'bridge_number', 'data_year'}
-                    }
-                    if update_cols:
-                        set_clause = ', '.join(f"{k} = ?" for k in update_cols)
-                        cursor.execute(
-                            f"UPDATE bridges SET {set_clause} "
-                            f"WHERE state_code = ? AND bridge_number = ? AND data_year = ?",
-                            list(update_cols.values()) + [state_code, bridge_number, data_year],
-                        )
-                    already_existed += 1
-            except Exception as e:
-                print(f"Warning: Failed to insert bridge {state_code}/{bridge_number}: {e}")
-                skipped += 1
-                if len(skipped_reasons) < 50:
-                    skipped_reasons.append(
-                        f"Record {idx}: bridge {state_code}/{bridge_number} insert failed — {e}"
-                    )
-                continue
-
+            # Routes are deleted first because they identify their owning
+            # feature logically even on legacy databases without a route FK.
             for child_table in (
-                "features", "routes", "span_sets", "substructure_sets",
+                "routes", "features", "span_sets", "substructure_sets",
                 "elements", "inspections", "posting_evaluations",
                 "posting_statuses", "works",
             ):
                 cursor.execute(
-                    f"DELETE FROM {child_table} WHERE state_code = ? AND bridge_number = ? AND data_year = ?",
+                    f'DELETE FROM "{child_table}" WHERE state_code=? AND bridge_number=? AND data_year=?',
+                    (state_code, bridge_number, data_year),
+                )
+            for metadata_table in ("bridge_field_metadata", "bridge_source_records"):
+                cursor.execute(
+                    f'DELETE FROM "{metadata_table}" WHERE state_code=? AND bridge_number=? AND data_year=?',
                     (state_code, bridge_number, data_year),
                 )
 
-            cursor.execute(
-                "DELETE FROM bridge_field_metadata WHERE state_code = ? AND bridge_number = ? AND data_year = ?",
-                (state_code, bridge_number, data_year),
-            )
-            cursor.execute(
-                "DELETE FROM bridge_source_records WHERE state_code = ? AND bridge_number = ? AND data_year = ?",
-                (state_code, bridge_number, data_year),
-            )
-
-            source_data = bridge_data.get('_SourceData') if isinstance(bridge_data.get('_SourceData'), dict) else {}
-            nbi_source = source_data.get('nbi') if isinstance(source_data, dict) else None
             if isinstance(nbi_source, dict):
-                cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO bridge_source_records (
-                        state_code, bridge_number, data_year, source_name, source_payload_json
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        state_code,
-                        bridge_number,
-                        data_year,
-                        'NBI TXT',
-                        json.dumps(nbi_source, ensure_ascii=True, default=str),
-                    ),
+                _insert_plain(
+                    cursor,
+                    "bridge_source_records",
+                    {
+                        "state_code": state_code,
+                        "bridge_number": bridge_number,
+                        "data_year": data_year,
+                        "source_name": "NBI TXT",
+                        "source_payload_json": json.dumps(nbi_source, ensure_ascii=True, default=str),
+                    },
                 )
 
-            # ── 2. Features + Routes ─────────────────────────────────────
-            for feat in bridge_data.get('Features', []):
-                feat_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in feat.items():
-                    if k in mapping and k != 'Routes':
-                        feat_insert[mapping[k]] = v
-                feat_insert = _filter_to_table_columns('features', feat_insert)
-                safe_insert(cursor, 'features', feat_insert)
+            for feature in bridge_data.get("Features", []):
+                _insert_plain(
+                    cursor,
+                    "features",
+                    _project_child_row(
+                        "Features", feature, state_code=state_code,
+                        bridge_number=bridge_number, data_year=data_year,
+                    ),
+                )
+                for route in feature.get("Routes", []):
+                    _insert_plain(
+                        cursor,
+                        "routes",
+                        _project_child_row(
+                            "Routes", route, state_code=state_code,
+                            bridge_number=bridge_number, data_year=data_year,
+                            feature_type=feature["BF01"],
+                        ),
+                    )
 
-                # Routes
-                for route in feat.get('Routes', []):
-                    route_insert = {
-                        'state_code': state_code,
-                        'bridge_number': bridge_number,
-                        'feature_type': feat.get('BF01'),
-                        'data_year': data_year,
-                    }
-                    for rk, rv in route.items():
-                        if rk in mapping:
-                            route_insert[mapping[rk]] = rv
-                    route_insert = _filter_to_table_columns('routes', route_insert)
-                    safe_insert(cursor, 'routes', route_insert)
+            for section in ALL_NESTED_ARRAY_NAMES:
+                if section == "Features":
+                    continue
+                table = _LOAD_SECTION_TABLES[section]
+                for child in bridge_data.get(section, []):
+                    _insert_plain(
+                        cursor,
+                        table,
+                        _project_child_row(
+                            section, child, state_code=state_code,
+                            bridge_number=bridge_number, data_year=data_year,
+                        ),
+                    )
 
-            # ── 3. Span Sets ─────────────────────────────────────────────
-            for span in bridge_data.get('SpanSets', []):
-                span_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in span.items():
-                    if k in mapping:
-                        span_insert[mapping[k]] = v
-                span_insert = _filter_to_table_columns('span_sets', span_insert)
-                safe_insert(cursor, 'span_sets', span_insert)
-
-            # ── 3b. Substructure Sets ────────────────────────────────────
-            for sub in bridge_data.get('SubstructureSets', []):
-                sub_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in sub.items():
-                    if k in mapping:
-                        sub_insert[mapping[k]] = v
-                sub_insert = _filter_to_table_columns('substructure_sets', sub_insert)
-                safe_insert(cursor, 'substructure_sets', sub_insert)
-
-            # ── 4. Elements ──────────────────────────────────────────────
-            for elem in bridge_data.get('Elements', []):
-                elem_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in elem.items():
-                    if k in mapping:
-                        elem_insert[mapping[k]] = v
-                if 'element_parent_number' not in elem_insert:
-                    elem_insert['element_parent_number'] = '0'
-                elem_insert = _filter_to_table_columns('elements', elem_insert)
-                safe_insert(cursor, 'elements', elem_insert)
-
-            # ── 5. Works ─────────────────────────────────────────────────
-            for work in bridge_data.get('Works', []):
-                work_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in work.items():
-                    if k in mapping:
-                        work_insert[mapping[k]] = v
-                work_insert = _filter_to_table_columns('works', work_insert)
-                safe_insert(cursor, 'works', work_insert)
-
-            # ── 5b. Inspections / Posting ────────────────────────────────
-            for insp in bridge_data.get('Inspections', []):
-                insp_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in insp.items():
-                    if k in mapping:
-                        insp_insert[mapping[k]] = v
-                insp_insert = _filter_to_table_columns('inspections', insp_insert)
-                safe_insert(cursor, 'inspections', insp_insert)
-
-            for pe in bridge_data.get('PostingEvaluations', []):
-                pe_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in pe.items():
-                    if k in mapping:
-                        pe_insert[mapping[k]] = v
-                pe_insert = _filter_to_table_columns('posting_evaluations', pe_insert)
-                safe_insert(cursor, 'posting_evaluations', pe_insert)
-
-            for ps in bridge_data.get('PostingStatuses', []):
-                ps_insert = {'state_code': state_code, 'bridge_number': bridge_number, 'data_year': data_year}
-                for k, v in ps.items():
-                    if k in mapping:
-                        ps_insert[mapping[k]] = v
-                ps_insert = _filter_to_table_columns('posting_statuses', ps_insert)
-                safe_insert(cursor, 'posting_statuses', ps_insert)
-
-            # ── 6. Historical snapshot row (for year-over-year KPI evolution) ──
-            # snapshot_year and data_year were already extracted at the top of this loop
-            deck = _to_float_or_none(bridge_data.get('BC01'))
-            superstructure = _to_float_or_none(bridge_data.get('BC02'))
-            substructure = _to_float_or_none(bridge_data.get('BC03'))
-            culvert = _to_float_or_none(bridge_data.get('BC04'))
-            lowest = _to_float_or_none(bridge_data.get('BC13'))
-
+            deck = _to_float_or_none(bridge_data.get("BC01"))
+            superstructure = _to_float_or_none(bridge_data.get("BC02"))
+            substructure = _to_float_or_none(bridge_data.get("BC03"))
+            culvert = _to_float_or_none(bridge_data.get("BC04"))
+            lowest = _to_float_or_none(bridge_data.get("BC13"))
             if lowest is None:
-                vals = [v for v in (deck, superstructure, substructure, culvert) if v is not None]
-                lowest = min(vals) if vals else None
-
-            if data_year is not None and lowest is not None:
+                ratings = [value for value in (deck, superstructure, substructure, culvert) if value is not None]
+                lowest = min(ratings) if ratings else None
+            if lowest is not None:
                 cursor.execute(
                     """
-                    SELECT 1
-                    FROM inspection_report_history
+                    SELECT 1 FROM inspection_report_history
                     WHERE state_code=? AND bridge_number=? AND report_year=? AND report_file='JSON_LOAD'
                     LIMIT 1
                     """,
                     (state_code, bridge_number, data_year),
                 )
-                exists = cursor.fetchone() is not None
-
-                if not exists:
-                    cursor.execute(
-                        """
-                        INSERT INTO inspection_report_history (
-                            state_code, bridge_number, bridge_name, report_folder, report_file,
-                            report_year, inspection_date,
-                            deck_condition_rating, superstructure_condition_rating,
-                            substructure_condition_rating, culvert_condition_rating,
-                            lowest_condition_rating_code, confidence, extracted_payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            state_code,
-                            bridge_number,
-                            bridge_data.get('BID02') or bridge_insert.get('bridge_name'),
-                            'JSON_IMPORT',
-                            'JSON_LOAD',
-                            data_year,
-                            str(bridge_data.get('BLR03') or ''),
-                            deck,
-                            superstructure,
-                            substructure,
-                            culvert,
-                            lowest,
-                            1.0,
-                            json.dumps({'source': 'load_json_to_db', 'data_year': data_year}, ensure_ascii=True),
-                        ),
+                if cursor.fetchone() is None:
+                    _insert_plain(
+                        cursor,
+                        "inspection_report_history",
+                        {
+                            "state_code": state_code,
+                            "bridge_number": bridge_number,
+                            "bridge_name": bridge_data.get("BID02"),
+                            "report_folder": "JSON_IMPORT",
+                            "report_file": "JSON_LOAD",
+                            "report_year": data_year,
+                            "inspection_date": str(bridge_data.get("BLR03") or ""),
+                            "deck_condition_rating": deck,
+                            "superstructure_condition_rating": superstructure,
+                            "substructure_condition_rating": substructure,
+                            "culvert_condition_rating": culvert,
+                            "lowest_condition_rating_code": lowest,
+                            "confidence": 1.0,
+                            "extracted_payload_json": json.dumps(
+                                {"source": "load_json_to_db", "data_year": data_year},
+                                ensure_ascii=True,
+                            ),
+                        },
                     )
 
         conn.commit()
-        print(
-            f"DB load complete: {inserted_new} newly inserted, "
-            f"{already_existed} already existed, {skipped} skipped"
-        )
-        if skipped_reasons:
-            print(f"Skipped reasons: {skipped_reasons}")
-        return inserted_new, already_existed, skipped, skipped_reasons
-
-    except Exception as e:
+        return inserted_new, already_existed, 0, []
+    except Exception as exc:
         conn.rollback()
-        print(f"Error loading JSON to DB: {e}")
-        import traceback
-        traceback.print_exc()
-        return 0, 0, len(data), [f"Fatal load error: {e}"]
+        return 0, 0, len(data), [f"Atomic load failed; no records were written: {exc}"]
     finally:
+        cursor.close()
         conn.close()
 
 
@@ -2004,50 +2129,170 @@ def get_county_kpis(db_path: str = USER_DB, state_code: int = 34, year: Optional
     return kpi.to_dict(orient="records")
 
 
-def delete_bridges_by_year(db_path: str, state_code: int, data_year: int) -> int:
-    """Delete all rows for a state + data year across every table that carries both
-    state_code and data_year (bridges + child tables). Returns bridges deleted."""
-    conn = get_connection(db_path)
-    cur = conn.cursor()
-    n = cur.execute(
-        "SELECT COUNT(*) FROM bridges WHERE state_code = ? AND data_year = ?",
-        (int(state_code), int(data_year)),
-    ).fetchone()[0]
-    tables = [r[0] for r in cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    for tbl in tables:
-        if tbl.startswith('sqlite_'):
+SNBI_PROJECTION_CHILD_TABLES = (
+    "features",
+    "routes",
+    "span_sets",
+    "substructure_sets",
+    "elements",
+    "inspections",
+    "posting_evaluations",
+    "posting_statuses",
+    "works",
+)
+SNBI_PROVENANCE_TABLES = (
+    "bridge_field_metadata",
+    "bridge_source_records",
+)
+SNBI_OWNED_TABLES = SNBI_PROJECTION_CHILD_TABLES + SNBI_PROVENANCE_TABLES + (
+    "bridges",
+)
+_DELETE_TABLE_ALLOWLIST = frozenset(
+    SNBI_OWNED_TABLES + ("inspection_report_history", "sqlite_sequence")
+)
+_SNAPSHOT_KEY_COLUMNS = ("state_code", "bridge_number", "data_year")
+
+
+def _known_table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
+    """Check one compile-time-owned table without discovering deletion targets."""
+    if table not in _DELETE_TABLE_ALLOWLIST:
+        raise ValueError(f"Table {table!r} is not owned by the SNBI delete service")
+    return cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone() is not None
+
+
+def _existing_owned_tables(
+    cursor: sqlite3.Cursor,
+    candidates: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(table for table in candidates if _known_table_exists(cursor, table))
+
+
+def _has_snapshot_delete_cascade(cursor: sqlite3.Cursor, table: str) -> bool:
+    """Return whether a known child has the full snapshot FK with DELETE CASCADE."""
+    if table not in SNBI_PROJECTION_CHILD_TABLES:
+        raise ValueError(f"Table {table!r} is not an SNBI projection child")
+    rows = cursor.execute(f'PRAGMA foreign_key_list("{table}")').fetchall()
+    grouped: Dict[int, list] = {}
+    for row in rows:
+        grouped.setdefault(int(row[0]), []).append(row)
+    for group in grouped.values():
+        ordered = sorted(group, key=lambda row: int(row[1]))
+        if str(ordered[0][2]).lower() != "bridges":
             continue
-        cols = [r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()]
-        if 'state_code' in cols and 'data_year' in cols:
-            cur.execute(f"DELETE FROM {tbl} WHERE state_code = ? AND data_year = ?",
-                        (int(state_code), int(data_year)))
-    conn.commit()
-    conn.close()
-    return n
+        source_columns = tuple(str(row[3]) for row in ordered)
+        target_columns = tuple(str(row[4]) for row in ordered)
+        delete_actions = {str(row[6]).upper() for row in ordered}
+        if (
+            source_columns == _SNAPSHOT_KEY_COLUMNS
+            and target_columns == _SNAPSHOT_KEY_COLUMNS
+            and delete_actions == {"CASCADE"}
+        ):
+            return True
+    return False
+
+
+def _projection_is_fully_cascaded(
+    cursor: sqlite3.Cursor,
+    projection_tables: tuple[str, ...],
+) -> bool:
+    return all(
+        _has_snapshot_delete_cascade(cursor, table)
+        for table in projection_tables
+    )
+
+
+def _delete_snapshot_scope(
+    db_path: str,
+    *,
+    state_code: int,
+    data_year: int,
+    bridge_number: Optional[str] = None,
+) -> int:
+    """Atomically delete one explicit bridge scope from BridgeGuard-owned tables."""
+    state = int(state_code)
+    year = int(data_year)
+    bridge = str(bridge_number) if bridge_number is not None else None
+    if bridge is None:
+        predicate = "state_code=? AND data_year=?"
+        parameters: tuple[Any, ...] = (state, year)
+        history_predicate = "state_code=? AND report_year=? AND report_file='JSON_LOAD'"
+        history_parameters: tuple[Any, ...] = (state, year)
+    else:
+        predicate = "state_code=? AND bridge_number=? AND data_year=?"
+        parameters = (state, bridge, year)
+        history_predicate = (
+            "state_code=? AND bridge_number=? AND report_year=? "
+            "AND report_file='JSON_LOAD'"
+        )
+        history_parameters = (state, bridge, year)
+
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        deleted_bridges = int(
+            cursor.execute(
+                f"SELECT COUNT(*) FROM bridges WHERE {predicate}",
+                parameters,
+            ).fetchone()[0]
+        )
+        projection_tables = _existing_owned_tables(
+            cursor, SNBI_PROJECTION_CHILD_TABLES
+        )
+        provenance_tables = _existing_owned_tables(cursor, SNBI_PROVENANCE_TABLES)
+
+        # Old databases do not have cascades on every child.  They use one
+        # explicit, child-first compatibility path.  Once every projection FK
+        # is migrated, deleting the parent is the only projection mutation.
+        if not _projection_is_fully_cascaded(cursor, projection_tables):
+            for table in projection_tables:
+                cursor.execute(
+                    f'DELETE FROM "{table}" WHERE {predicate}',
+                    parameters,
+                )
+        for table in provenance_tables:
+            cursor.execute(
+                f'DELETE FROM "{table}" WHERE {predicate}',
+                parameters,
+            )
+        cursor.execute(f"DELETE FROM bridges WHERE {predicate}", parameters)
+
+        if _known_table_exists(cursor, "inspection_report_history"):
+            cursor.execute(
+                f"DELETE FROM inspection_report_history WHERE {history_predicate}",
+                history_parameters,
+            )
+        conn.commit()
+        return deleted_bridges
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def delete_bridges_by_year(db_path: str, state_code: int, data_year: int) -> int:
+    """Delete BridgeGuard-owned snapshots for exactly one state and year."""
+    return _delete_snapshot_scope(
+        db_path,
+        state_code=state_code,
+        data_year=data_year,
+    )
 
 
 def delete_single_bridge(db_path: str, state_code: int, bridge_number: str, data_year: int) -> int:
     """Delete ONE bridge's snapshot for a single year — from the SNBI tables only
     (those keyed by state_code + bridge_number + data_year). Leaves custom tables and
     non-year-scoped local tables (attachments, etc.) untouched. Returns bridges deleted."""
-    conn = get_connection(db_path)
-    cur = conn.cursor()
-    n = cur.execute(
-        "SELECT COUNT(*) FROM bridges WHERE state_code=? AND bridge_number=? AND data_year=?",
-        (int(state_code), str(bridge_number), int(data_year)),
-    ).fetchone()[0]
-    tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    for tbl in tables:
-        if tbl.startswith('sqlite_') or tbl in CUSTOM_TABLE_NAMES:
-            continue
-        cols = [r[1] for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()]
-        if {'state_code', 'bridge_number', 'data_year'} <= set(cols):
-            cur.execute(f"DELETE FROM {tbl} WHERE state_code=? AND bridge_number=? AND data_year=?",
-                        (int(state_code), str(bridge_number), int(data_year)))
-    conn.commit()
-    conn.close()
-    return n
+    return _delete_snapshot_scope(
+        db_path,
+        state_code=state_code,
+        bridge_number=bridge_number,
+        data_year=data_year,
+    )
 
 
 # ====================== USER CUSTOM TABLES (separate from SNBI) ======================
@@ -2178,22 +2423,39 @@ def delete_custom_table(db_path: str, custom_table_id: int) -> int:
         conn.close()
 
 
-def get_bridge_report_files(state_code, bridge_number, db_path: str = USER_DB) -> List[Dict]:
+def get_bridge_report_files(
+    state_code,
+    bridge_number,
+    db_path: str = USER_DB,
+    *,
+    workspace_id: str | None = None,
+) -> List[Dict]:
     """Return inspection-report files attached to a bridge (id, filename, filepath, …)."""
     conn = get_connection(db_path)
     try:
-        rows = conn.execute(
-            "SELECT id, filename, filepath, size_bytes, uploaded_at FROM bridge_attachments "
-            "WHERE state_code=? AND bridge_number=? AND attachment_type='inspection_report' "
-            "ORDER BY id DESC",
-            (str(state_code), str(bridge_number)),
-        ).fetchall()
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(bridge_attachments)")
+        }
+        if workspace_id is not None and "workspace_id" in columns:
+            rows = conn.execute(
+                "SELECT id,filename,filepath,size_bytes,uploaded_at,sha256 "
+                "FROM bridge_attachments WHERE workspace_id=? AND state_code=? "
+                "AND bridge_number=? AND attachment_type='inspection_report' ORDER BY id DESC",
+                (str(workspace_id), str(state_code), str(bridge_number)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,filename,filepath,size_bytes,uploaded_at,NULL "
+                "FROM bridge_attachments WHERE state_code=? AND bridge_number=? "
+                "AND attachment_type='inspection_report' ORDER BY id DESC",
+                (str(state_code), str(bridge_number)),
+            ).fetchall()
     except sqlite3.Error:
         rows = []
     finally:
         conn.close()
     return [
-        {"id": r[0], "filename": r[1], "filepath": r[2], "size_bytes": r[3], "uploaded_at": r[4]}
+        {"id": r[0], "filename": r[1], "filepath": r[2], "size_bytes": r[3], "uploaded_at": r[4], "sha256": r[5]}
         for r in rows
     ]
 
@@ -2531,18 +2793,29 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
     cur = conn.cursor()
 
     def _fetch(table: str) -> List[Dict]:
+        """Fetch one visible snapshot with an explicit, stable row order."""
         try:
-            cur.execute(f"PRAGMA table_info({table})")
-            col_names = {row[1] for row in cur.fetchall()}
+            cur.execute(f'PRAGMA table_info("{table}")')
+            column_rows = cur.fetchall()
+            if not column_rows:
+                raise sqlite3.DatabaseError(f"table {table} does not exist")
+            col_names = {str(row[1]) for row in column_rows}
+            order_columns = ["bridge_number"]
+            if "data_year" in col_names:
+                order_columns.append("data_year")
+            if "id" in col_names:
+                order_columns.append("id")
+            order_sql = ", ".join(f'"{column}" COLLATE BINARY' if column == "bridge_number" else f'"{column}"' for column in order_columns)
+
             if "data_year" in col_names:
                 if year is not None:
                     cur.execute(
-                        f"SELECT * FROM {table} WHERE state_code=? AND data_year=?",
+                        f'SELECT * FROM "{table}" WHERE state_code=? AND data_year=? ORDER BY {order_sql}',
                         (state_code, year),
-                    )  # noqa: S608
+                    )
                 elif table == "bridges":
                     cur.execute(
-                        """
+                        f"""
                         SELECT *
                         FROM bridges b
                         WHERE state_code=?
@@ -2552,14 +2825,19 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                               WHERE b2.state_code = b.state_code
                                 AND b2.bridge_number = b.bridge_number
                           ))
+                        ORDER BY {order_sql}
                         """,
                         (state_code,),
                     )
                 else:
+                    qualified_order = ", ".join(
+                        f't."{column}" COLLATE BINARY' if column == "bridge_number" else f't."{column}"'
+                        for column in order_columns
+                    )
                     cur.execute(
                         f"""
                         SELECT t.*
-                        FROM {table} t
+                        FROM "{table}" t
                         JOIN bridges b
                           ON b.state_code = t.state_code
                          AND b.bridge_number = t.bridge_number
@@ -2571,15 +2849,19 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                               WHERE b2.state_code = t.state_code
                                 AND b2.bridge_number = t.bridge_number
                           ))
+                        ORDER BY {qualified_order}
                         """,
                         (state_code,),
-                    )  # noqa: S608
+                    )
             else:
-                cur.execute(f"SELECT * FROM {table} WHERE state_code=?", (state_code,))  # noqa: S608
-            cols = [d[0] for d in cur.description]
+                cur.execute(
+                    f'SELECT * FROM "{table}" WHERE state_code=? ORDER BY {order_sql}',
+                    (state_code,),
+                )
+            cols = [description[0] for description in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
-        except Exception:
-            return []
+        except Exception as exc:
+            raise RuntimeError(f"Failed to export table {table}: {exc}") from exc
 
     def _remap(rows: List[Dict], allowed_tags: Optional[set] = None) -> List[Dict]:
         """Apply REVERSE_MAPPING, drop blanks, keep only tags valid for the schema."""
@@ -2592,8 +2874,8 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                 tag = REVERSE_MAPPING[col]
                 if allowed_tags is not None and tag not in allowed_tags:
                     continue
-                cleaned = val.strip().strip("'\"").strip() if isinstance(val, str) else val
-                if cleaned in ("", None):
+                cleaned = _decode_projection_value(val)
+                if cleaned is None or cleaned == "":
                     continue
                 mapped[tag] = cleaned
             if mapped:
@@ -2631,135 +2913,6 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
     posting_status_by_bridge = _group(posting_status_raw)
     works_by_bridge     = _group(works_raw)
 
-    def _apply_fhwa_export_defaults(snbi: Dict[str, Any]) -> None:
-        """Repair known legacy/default values before writing FHWA-facing JSON."""
-        def _to_float(value: Any) -> Optional[float]:
-            try:
-                if value in (None, ""):
-                    return None
-                return float(value)
-            except Exception:
-                return None
-
-        def _truncate_hundredth(value: float) -> float:
-            return int(value * 100) / 100
-
-        def _normalize_code_values(obj: Any) -> None:
-            if isinstance(obj, dict):
-                for key, value in list(obj.items()):
-                    if isinstance(value, (dict, list)):
-                        _normalize_code_values(value)
-                    elif key in CODE_LISTS and isinstance(value, (int, float)):
-                        obj[key] = str(int(value)) if float(value).is_integer() else str(value)
-            elif isinstance(obj, list):
-                for item in obj:
-                    _normalize_code_values(item)
-
-        _normalize_code_values(snbi)
-
-        posting_evals = snbi.get("PostingEvaluations") if isinstance(snbi.get("PostingEvaluations"), list) else []
-        legal_load_factors = [
-            factor for factor in (_to_float(row.get("BEP02")) for row in posting_evals if isinstance(row, dict))
-            if factor is not None
-        ]
-        if legal_load_factors:
-            snbi["BLR07"] = _truncate_hundredth(min(legal_load_factors))
-        elif snbi.get("BLR07") in (None, "") and snbi.get("BLR06") not in (None, ""):
-            # Transition fallback from the SNBI commentary: BLR06 may be reported
-            # when all legal loads are enveloped by the operating rating.
-            snbi["BLR07"] = snbi["BLR06"]
-
-        if snbi.get("BAP05") in (None, "", "U"):
-            snbi["BAP05"] = "0"
-        if snbi.get("BLR08") in (None, ""):
-            snbi["BLR08"] = "N"
-        if snbi.get("BG12") in (None, ""):
-            snbi["BG12"] = "N"
-        if snbi.get("BG13") in (None, "", 0, "0"):
-            snbi["BG13"] = 1
-        if snbi.get("BG14") in (None, ""):
-            snbi["BG14"] = "N"
-
-        features = snbi.get("Features") if isinstance(snbi.get("Features"), list) else []
-        # Preserve transitioned condition values exactly.  In particular, do
-        # not reinterpret legacy BC09=N as 0 for waterway bridges: FHWA's
-        # validator should surface that inconsistent combination for agency
-        # review instead of the exporter inventing a different rating.
-        for feature in features:
-            if not isinstance(feature, dict):
-                continue
-            feature_type = str(feature.get("BF01") or "")
-            if feature_type.startswith("W") and not feature.get("BN01"):
-                feature["BN01"] = "N"
-            if not feature_type.startswith("W"):
-                for tag in ("BN01", "BN02", "BN03", "BN04", "BN05", "BN06"):
-                    feature.pop(tag, None)
-            if feature.get("BN01") in {"N", "U"}:
-                for tag in ("BN02", "BN03", "BN04", "BN05", "BN06"):
-                    feature.pop(tag, None)
-            if feature_type.startswith("H"):
-                for route in feature.get("Routes", []) if isinstance(feature.get("Routes"), list) else []:
-                    if isinstance(route, dict) and not route.get("BRT03"):
-                        route["BRT03"] = "2-T"
-
-        substructures = snbi.get("SubstructureSets") if isinstance(snbi.get("SubstructureSets"), list) else []
-        for idx, sub in enumerate(substructures):
-            if not isinstance(sub, dict):
-                continue
-            if not sub.get("BSB01") or str(sub.get("BSB01")).startswith("SS"):
-                sub["BSB01"] = "P01" if idx == 0 else f"P{idx + 1:02d}"
-            if sub.get("BSB02") in (None, "", 0, "0"):
-                sub["BSB02"] = 1
-            if sub.get("BSB03") in (None, "", "X-T"):
-                sub["BSB03"] = "C01"
-            if sub.get("BSB04") in (None, ""):
-                sub["BSB04"] = "P01" if str(sub.get("BSB01") or "").startswith("P") else "A01"
-            if sub.get("BSB05") in (None, ""):
-                sub["BSB05"] = "0"
-            if sub.get("BSB06") in (None, ""):
-                sub["BSB06"] = "X"
-            if sub.get("BSB07") in (None, ""):
-                sub["BSB07"] = "0"
-
-        spans = snbi.get("SpanSets") if isinstance(snbi.get("SpanSets"), list) else []
-        for span in spans:
-            if not isinstance(span, dict):
-                continue
-            if span.get("BSP03") in (None, "", 0, "0"):
-                span["BSP03"] = 1
-            if span.get("BSP07") in (None, ""):
-                span["BSP07"] = "0"
-            if str(span.get("BSP09") or "") == "0":
-                span.pop("BSP08", None)
-                span.pop("BSP13", None)
-            else:
-                if span.get("BSP08") in (None, ""):
-                    span["BSP08"] = "0"
-                if span.get("BSP13") in (None, ""):
-                    span["BSP13"] = "0"
-        has_steel = any(isinstance(span, dict) and str(span.get("BSP04") or "").startswith("S") for span in spans)
-        has_steel = has_steel or any(isinstance(sub, dict) and str(sub.get("BSB03") or "").startswith("S") for sub in substructures)
-        if not has_steel:
-            snbi.pop("BIR02", None)
-        if str(snbi.get("BIR01") or "").upper() != "Y":
-            snbi.pop("BC14", None)
-        elif not snbi.get("BC14"):
-            snbi["BC14"] = "N"
-        if str(snbi.get("BIR03") or "").upper() == "Y" and not snbi.get("BC15"):
-            snbi["BC15"] = "N"
-        if str(snbi.get("BIR03") or "").upper() != "Y":
-            snbi.pop("BC15", None)
-
-        works = snbi.get("Works") if isinstance(snbi.get("Works"), list) else []
-        for work in works:
-            if isinstance(work, dict) and not work.get("BW03"):
-                work["BW03"] = "0"
-
-        if not snbi.get("BG05"):
-            fallback_width = snbi.get("BG06") or snbi.get("BG09")
-            if fallback_width:
-                snbi["BG05"] = fallback_width
-
     result = []
     for bridge_data in bridges_raw:
         bn = str(bridge_data.get('bridge_number', ''))
@@ -2769,10 +2922,13 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
         for col, val in bridge_data.items():
             if col not in REVERSE_MAPPING or val is None:
                 continue
-            cleaned = val.strip().strip("'\"").strip() if isinstance(val, str) else val
-            if cleaned in ("", None):
+            tag = REVERSE_MAPPING[col]
+            if tag not in TOP_LEVEL_FIELDS:
                 continue
-            snbi[REVERSE_MAPPING[col]] = cleaned
+            cleaned = _decode_projection_value(val)
+            if cleaned is None or cleaned == "":
+                continue
+            snbi[tag] = cleaned
 
         # Features — remap to SNBI then nest routes under their parent feature
         raw_feats = features_by_bridge.get(bn, [])
@@ -2783,18 +2939,25 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
             routes_by_feat: Dict[str, list] = {}
             for raw_route in raw_routes:
                 ft = str(raw_route.get('feature_type', ''))
-                if ft:
-                    mapped_route = _remap([raw_route], NESTED_ARRAY_SPECS["Routes"]["fields"])
-                    if mapped_route:
-                        routes_by_feat.setdefault(ft, []).append(mapped_route[0])
+                if not ft:
+                    raise RuntimeError(f"Orphan route for bridge {bn}: routes.feature_type is empty")
+                mapped_route = _remap([raw_route], NESTED_ARRAY_SPECS["Routes"]["fields"])
+                if mapped_route:
+                    routes_by_feat.setdefault(ft, []).append(mapped_route[0])
             for feat in mapped_feats:
                 ft = str(feat.get('BF01', ''))
                 if ft in routes_by_feat:
                     feat['Routes'] = routes_by_feat.pop(ft)
-            # Attach any orphan routes as minimal feature shells
+            # A route without its feature is projection corruption. Never hide
+            # it by fabricating a feature shell in the exported document.
             for ft, orphans in routes_by_feat.items():
-                mapped_feats.append({'BF01': ft, 'Routes': orphans})
+                if orphans:
+                    raise RuntimeError(
+                        f"Orphan routes for bridge {bn}: no feature row exists for feature_type {ft}"
+                    )
             snbi['Features'] = mapped_feats
+        elif routes_by_bridge.get(bn):
+            raise RuntimeError(f"Orphan routes for bridge {bn}: bridge has routes but no features")
 
         # SpanSets
         raw_spans = span_sets_by_bridge.get(bn, [])
@@ -2827,7 +2990,6 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
         if raw_works:
             snbi['Works'] = _remap(raw_works, NESTED_ARRAY_SPECS["Works"]["fields"])
 
-        _apply_fhwa_export_defaults(snbi)
         result.append(snbi)
 
     return result
@@ -2942,28 +3104,53 @@ def delete_table_row(db_path: str, table_name: str, row_id: int) -> int:
 
 
 def clear_all_data(db_path: str) -> Dict[str, int]:
-    """Delete all rows from all data tables and reset autoincrement sequences."""
-    tables = [
-        'works', 'elements', 'span_sets', 'routes', 'features',
-        'inspection_report_history', 'bridges',
-    ]
+    """Clear BridgeGuard-owned inventory while retaining external evidence."""
     deleted: Dict[str, int] = {}
     conn = get_connection(db_path)
-    cur = conn.cursor()
     try:
-        cur.execute("PRAGMA foreign_keys = OFF")
-        for table in tables:
-            cur.execute(f"DELETE FROM {table}")
-            deleted[table] = cur.rowcount
-            # Reset autoincrement counter
-            cur.execute(
-                "DELETE FROM sqlite_sequence WHERE name = ?", (table,)
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        projection_tables = _existing_owned_tables(
+            cursor, SNBI_PROJECTION_CHILD_TABLES
+        )
+        provenance_tables = _existing_owned_tables(cursor, SNBI_PROVENANCE_TABLES)
+
+        for table in projection_tables + provenance_tables:
+            deleted[table] = int(
+                cursor.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
             )
-        cur.execute("PRAGMA foreign_keys = ON")
+        deleted["bridges"] = int(
+            cursor.execute("SELECT COUNT(*) FROM bridges").fetchone()[0]
+        )
+
+        if not _projection_is_fully_cascaded(cursor, projection_tables):
+            for table in projection_tables:
+                cursor.execute(f'DELETE FROM "{table}"')
+        for table in provenance_tables:
+            cursor.execute(f'DELETE FROM "{table}"')
+        cursor.execute("DELETE FROM bridges")
+
+        if _known_table_exists(cursor, "inspection_report_history"):
+            cursor.execute(
+                "DELETE FROM inspection_report_history WHERE report_file='JSON_LOAD'"
+            )
+            deleted["inspection_report_history"] = cursor.rowcount
+
+        # Only fully-cleared, explicitly owned tables have their counters reset.
+        # The history sequence is retained because real inspection rows remain.
+        if _known_table_exists(cursor, "sqlite_sequence"):
+            for table in projection_tables + provenance_tables + ("bridges",):
+                cursor.execute(
+                    "DELETE FROM sqlite_sequence WHERE name=?",
+                    (table,),
+                )
         conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
-    return deleted
 
 
 def execute_readonly_sql(db_path: str, sql: str) -> Dict:

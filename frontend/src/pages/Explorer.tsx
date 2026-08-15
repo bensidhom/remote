@@ -1,9 +1,10 @@
 // frontend/src/pages/Explorer.tsx
 
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Database, Filter, Search, Play } from 'lucide-react';
 import { SectionHeader } from '../components/ui';
+import { useDataGenerationEpoch } from '../lib/dataGeneration';
 
 interface TableData {
   [key: string]: any;
@@ -25,37 +26,48 @@ const Explorer: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [rowsLimit, setRowsLimit] = useState<number>(100);
   const [totalRows, setTotalRows] = useState<number>(0);
+  const dataGenerationEpoch = useDataGenerationEpoch();
+  const previousGenerationEpochRef = useRef(dataGenerationEpoch);
+  const hasLoadedDataRef = useRef(false);
+  const tableRequestRef = useRef<AbortController | null>(null);
 
   // Fetch list of tables and available states on component mount
   useEffect(() => {
+    const controller = new AbortController();
     const fetchTables = async () => {
       try {
-        const response = await axios.get('/api/tables');
-        setTables(response.data);
-        if (response.data.length > 0) {
-          setSelectedTable(response.data[0]);
-        }
+        const response = await axios.get<string[]>('/api/tables', { signal: controller.signal });
+        const nextTables = Array.isArray(response.data) ? response.data : [];
+        setTables(nextTables);
+        setSelectedTable((current) => nextTables.includes(current) ? current : (nextTables[0] || ''));
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error(err);
         setError('Failed to load database tables');
       }
     };
     const fetchStates = async () => {
       try {
-        const response = await axios.get('/api/states');
+        const response = await axios.get('/api/states', { signal: controller.signal });
         setAvailableStates(response.data);
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error(err);
       }
     };
-    fetchTables();
-    fetchStates();
-  }, []);
+    void fetchTables();
+    void fetchStates();
+    return () => controller.abort();
+  }, [dataGenerationEpoch]);
 
   // Manual load function
-  const loadTableData = async () => {
+  const loadTableData = useCallback(async () => {
     if (!selectedTable) return;
 
+    tableRequestRef.current?.abort();
+    const controller = new AbortController();
+    tableRequestRef.current = controller;
+    hasLoadedDataRef.current = true;
     setLoading(true);
     setError(null);
 
@@ -64,18 +76,36 @@ const Explorer: React.FC = () => {
       if (selectedState !== 'All States') {
         url += `&state_code=${selectedState}`;
       }
-      const response = await axios.get(url);
+      const response = await axios.get(url, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setTableData(response.data);
       setTotalRows(response.data.length);
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error(err);
       setError('Failed to load table data');
       setTableData([]);
       setTotalRows(0);
     } finally {
-      setLoading(false);
+      if (tableRequestRef.current === controller) {
+        tableRequestRef.current = null;
+        setLoading(false);
+      }
     }
-  };
+  }, [rowsLimit, selectedState, selectedTable]);
+
+  useEffect(() => () => tableRequestRef.current?.abort(), []);
+
+  // If the user had loaded a table, refresh that same bounded view after a
+  // publish. Otherwise discard any derived local search results and stay idle.
+  useEffect(() => {
+    if (previousGenerationEpochRef.current === dataGenerationEpoch) return;
+    previousGenerationEpochRef.current = dataGenerationEpoch;
+    setSearchTerm('');
+    setTableData([]);
+    setTotalRows(0);
+    if (hasLoadedDataRef.current && selectedTable) void loadTableData();
+  }, [dataGenerationEpoch, loadTableData, selectedTable]);
 
   // Filter data based on search term
   const filteredData = tableData.filter(row => 

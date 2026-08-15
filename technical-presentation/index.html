@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="BridgeGuard technical product walkthrough and system architecture deck.">
-  <title>BridgeGuard — Technical Walkthrough</title>
+  <meta name="description" content="BridgeGuard technical product walkthrough: feature inputs, processing, outputs, examples, and edge cases.">
+  <title>BridgeGuard &mdash; Technical Walkthrough</title>
   <link rel="icon" href="assets/bridgeguard.png">
   <script>document.documentElement.classList.add("js");</script>
   <link rel="stylesheet" href="styles.css">
@@ -15,54 +15,61 @@
   <header class="deck-hud" aria-label="Presentation controls">
     <a class="brand" href="#slide-1" aria-label="BridgeGuard presentation home">
       <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 48 24" role="img">
-          <path d="M2 18h44M8 17V9m32 8V9M8 12h32M12 12c3-7 8-9 12-9s9 2 12 9" />
-        </svg>
+        <svg viewBox="0 0 48 24"><path d="M2 18h44M8 17V9m32 8V9M8 12h32M12 12c3-7 8-9 12-9s9 2 12 9"/></svg>
       </span>
       <span>BridgeGuard</span>
     </a>
     <div class="hud-meta">
       <span class="hud-label">Technical walkthrough</span>
-      <span class="slide-counter" aria-live="polite" aria-atomic="true"><strong id="current-slide">01</strong><span>/</span><span id="total-slides">12</span></span>
+      <span class="slide-counter" aria-live="polite" aria-atomic="true"><strong id="current-slide">01</strong><span>/</span><span id="total-slides">24</span></span>
     </div>
     <div class="hud-controls">
-      <button class="icon-button" id="previous-slide" type="button" aria-label="Previous slide">
-        <span aria-hidden="true">←</span>
-      </button>
-      <button class="icon-button" id="next-slide" type="button" aria-label="Next slide">
-        <span aria-hidden="true">→</span>
-      </button>
+      <button class="icon-button" id="previous-slide" type="button" aria-label="Previous slide"><span aria-hidden="true">&larr;</span></button>
+      <button class="icon-button" id="next-slide" type="button" aria-label="Next slide"><span aria-hidden="true">&rarr;</span></button>
     </div>
     <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
   </header>
 
   <nav class="slide-index" aria-label="Slide index">
-    <button type="button" data-slide="0" aria-label="Go to slide 1"><span>Overview</span></button>
-    <button type="button" data-slide="1" aria-label="Go to slide 2"><span>System</span></button>
-    <button type="button" data-slide="2" aria-label="Go to slide 3"><span>Map</span></button>
-    <button type="button" data-slide="3" aria-label="Go to slide 4"><span>Locate</span></button>
-    <button type="button" data-slide="4" aria-label="Go to slide 5"><span>Bridge</span></button>
-    <button type="button" data-slide="5" aria-label="Go to slide 6"><span>Files</span></button>
-    <button type="button" data-slide="6" aria-label="Go to slide 7"><span>3D scan</span></button>
-    <button type="button" data-slide="7" aria-label="Go to slide 8"><span>SNBI</span></button>
-    <button type="button" data-slide="8" aria-label="Go to slide 9"><span>Decision</span></button>
-    <button type="button" data-slide="9" aria-label="Go to slide 10"><span>Contracts</span></button>
-    <button type="button" data-slide="10" aria-label="Go to slide 11"><span>Architecture</span></button>
-    <button type="button" data-slide="11" aria-label="Go to slide 12"><span>Operate</span></button>
+    <button type="button" data-slide="0" aria-label="Go to overview"><span>Overview</span></button>
+    <button type="button" data-slide="1" aria-label="Go to system thesis"><span>System</span></button>
+    <button type="button" data-slide="2" aria-label="Go to ArcGIS map"><span>ArcGIS</span></button>
+    <button type="button" data-slide="3" aria-label="Go to show me bridge"><span>Locate</span></button>
+    <button type="button" data-slide="4" aria-label="Go to condition switching"><span>Switch</span></button>
+    <button type="button" data-slide="5" aria-label="Go to Bridgette"><span>Bridgette</span></button>
+    <button type="button" data-slide="6" aria-label="Go to KPIs"><span>KPIs</span></button>
+    <button type="button" data-slide="7" aria-label="Go to bridge workspace"><span>Workspace</span></button>
+    <button type="button" data-slide="8" aria-label="Go to history"><span>History</span></button>
+    <button type="button" data-slide="9" aria-label="Go to forecast"><span>Forecast</span></button>
+    <button type="button" data-slide="10" aria-label="Go to LCCA"><span>LCCA</span></button>
+    <button type="button" data-slide="11" aria-label="Go to loader"><span>Loader</span></button>
+    <button type="button" data-slide="12" aria-label="Go to converter"><span>Converter</span></button>
+    <button type="button" data-slide="13" aria-label="Go to editor"><span>Edit</span></button>
+    <button type="button" data-slide="14" aria-label="Go to custom tables"><span>Custom</span></button>
+    <button type="button" data-slide="15" aria-label="Go to Ask"><span>Ask</span></button>
+    <button type="button" data-slide="16" aria-label="Go to preprocessing"><span>Parse</span></button>
+    <button type="button" data-slide="17" aria-label="Go to retrieval"><span>Retrieve</span></button>
+    <button type="button" data-slide="18" aria-label="Go to vision inspection"><span>Vision</span></button>
+    <button type="button" data-slide="19" aria-label="Go to point-cloud cleaning"><span>3D clean</span></button>
+    <button type="button" data-slide="20" aria-label="Go to point-cloud outputs"><span>3D output</span></button>
+    <button type="button" data-slide="21" aria-label="Go to function contracts"><span>Contracts</span></button>
+    <button type="button" data-slide="22" aria-label="Go to architecture"><span>Architecture</span></button>
+    <button type="button" data-slide="23" aria-label="Go to operating envelope"><span>Operate</span></button>
   </nav>
 
   <main class="deck" id="deck" tabindex="-1">
     <section class="slide slide-cover is-dark" id="slide-1" data-title="Overview" aria-labelledby="slide-1-title" tabindex="-1">
       <div class="cover-grid">
         <div class="cover-copy reveal">
-          <p class="eyebrow">NJ bridge intelligence · technical product deck</p>
+          <p class="eyebrow">NJ bridge intelligence &middot; technical product deck</p>
           <h1 id="slide-1-title">From inventory<br>to <em>evidence.</em></h1>
-          <p class="lede">BridgeGuard connects SNBI records, inspection reports, imagery and 3D scans in one bridge-centered workspace.</p>
+          <p class="lede">A function-by-function walkthrough of how BridgeGuard turns inventory, reports, imagery, and 3D scans into bridge-centered decisions.</p>
           <div class="cover-badges" aria-label="Core platform facts">
-            <span>Map-first</span>
-            <span>CPU geometry</span>
+            <span>ArcGIS map</span>
+            <span>Markov forecasting</span>
             <span>Cerebras generation + judgment</span>
             <span>Nomic 768-D retrieval</span>
+            <span>CPU geometry</span>
           </div>
         </div>
 
@@ -70,14 +77,8 @@
           <div class="instrument-label">Evidence trace / live system</div>
           <svg class="bridge-drawing" viewBox="0 0 760 390" role="img" aria-label="A bridge cross-section connecting four evidence sources">
             <defs>
-              <linearGradient id="deck-fill" x1="0" x2="1">
-                <stop offset="0" stop-color="#f0c95d" stop-opacity=".35"/>
-                <stop offset="1" stop-color="#f0c95d" stop-opacity=".06"/>
-              </linearGradient>
-              <filter id="soft-glow">
-                <feGaussianBlur stdDeviation="4" result="blur"/>
-                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
+              <linearGradient id="deck-fill" x1="0" x2="1"><stop offset="0" stop-color="#f0c95d" stop-opacity=".35"/><stop offset="1" stop-color="#f0c95d" stop-opacity=".06"/></linearGradient>
+              <filter id="soft-glow"><feGaussianBlur stdDeviation="4" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
             </defs>
             <path class="gridline" d="M40 70H720M40 130H720M40 190H720M40 250H720M40 310H720"/>
             <path class="gridline" d="M80 30V350M200 30V350M320 30V350M440 30V350M560 30V350M680 30V350"/>
@@ -85,459 +86,759 @@
             <path class="bridge-line" d="M75 218h610M106 218c49-112 134-151 274-151s225 39 274 151"/>
             <path class="bridge-line thin" d="M136 218c43-80 115-108 244-108s201 28 244 108"/>
             <path class="bridge-line" d="M119 247v73m522-73v73M82 320h596"/>
-            <path class="bridge-line thin" d="M155 247l-18 73m468-73 18 73"/>
-            <g class="source-node" transform="translate(64 173)">
-              <circle r="24"/><text text-anchor="middle" y="5">DB</text>
-            </g>
-            <g class="source-node" transform="translate(270 58)">
-              <circle r="24"/><text text-anchor="middle" y="5">PDF</text>
-            </g>
-            <g class="source-node" transform="translate(490 83)">
-              <circle r="24"/><text text-anchor="middle" y="5">IMG</text>
-            </g>
-            <g class="source-node" transform="translate(696 173)">
-              <circle r="24"/><text text-anchor="middle" y="5">3D</text>
-            </g>
-            <g class="decision-node" transform="translate(380 229)" filter="url(#soft-glow)">
-              <circle r="39"/><text text-anchor="middle" y="-3">ONE</text><text text-anchor="middle" y="13">BRIDGE</text>
-            </g>
+            <g class="source-node" transform="translate(64 173)"><circle r="24"/><text text-anchor="middle" y="5">DB</text></g>
+            <g class="source-node" transform="translate(270 58)"><circle r="24"/><text text-anchor="middle" y="5">PDF</text></g>
+            <g class="source-node" transform="translate(490 83)"><circle r="24"/><text text-anchor="middle" y="5">IMG</text></g>
+            <g class="source-node" transform="translate(696 173)"><circle r="24"/><text text-anchor="middle" y="5">3D</text></g>
+            <g class="decision-node" transform="translate(380 229)" filter="url(#soft-glow)"><circle r="39"/><text text-anchor="middle" y="-3">ONE</text><text text-anchor="middle" y="13">BRIDGE</text></g>
             <path class="trace" d="M88 173C170 173 192 80 246 62M294 62C334 62 339 195 365 211M466 89C426 97 419 185 397 208M672 173C584 173 502 219 419 225"/>
             <circle class="scanner-dot" r="6"><animateMotion dur="5s" repeatCount="indefinite" path="M88 173C170 173 192 80 246 62C334 62 339 195 365 211C419 185 426 97 466 89C502 219 584 173 672 173"/></circle>
           </svg>
-          <div class="instrument-output">
-            <span>Input</span>
-            <i></i>
-            <strong>grounded bridge decision</strong>
-          </div>
+          <div class="instrument-output"><span>Input</span><i></i><strong>grounded bridge decision</strong></div>
         </div>
       </div>
-      <p class="slide-foot">Use ← → or scroll · built from the current local and hosted repositories</p>
+      <p class="slide-foot">Use &larr; &rarr; or scroll &middot; implementation-audited against the current repository</p>
     </section>
 
     <section class="slide" id="slide-2" data-title="System" aria-labelledby="slide-2-title" tabindex="-1">
       <div class="slide-heading reveal">
-        <p class="eyebrow">01 · system thesis</p>
-        <h2 id="slide-2-title">One bridge becomes the unit of work.</h2>
-        <p>Every feature returns to a selected structure, instead of leaving inspectors to reconcile disconnected tools.</p>
+        <div>
+          <p class="eyebrow">01 &middot; system thesis</p>
+          <h2 id="slide-2-title">One bridge is the unit of work.</h2>
+        </div>
+        <p>Each function returns to a state code, structure number, and snapshot year so inventory, files, forecasts, costs, and geometry do not drift apart.</p>
       </div>
-
       <div class="system-thesis">
         <figure class="screen-frame reveal">
           <div class="screen-bar"><span></span><span></span><span></span><small>BridgeGuard / workspace</small></div>
           <img src="assets/workspace-map.png" alt="BridgeGuard map workspace with sidebar tools and New Jersey bridge inventory">
-          <figcaption>Live local capture · current map-first shell</figcaption>
+          <figcaption>Application capture &middot; map-first shell with county and snapshot-year controls</figcaption>
         </figure>
-
         <div class="orbit-card reveal" aria-label="Evidence sources connected to one bridge">
-          <div class="orbit-center"><small>Selected</small><strong>Bridge</strong><span>state + structure ID</span></div>
+          <div class="orbit-center"><small>Selected</small><strong>Bridge</strong><span>state + structure ID + year</span></div>
           <div class="orbit-item orbit-a"><b>01</b><span>SNBI record</span></div>
-          <div class="orbit-item orbit-b"><b>02</b><span>Report files</span></div>
+          <div class="orbit-item orbit-b"><b>02</b><span>Reports</span></div>
           <div class="orbit-item orbit-c"><b>03</b><span>Images</span></div>
           <div class="orbit-item orbit-d"><b>04</b><span>Point cloud</span></div>
           <div class="orbit-item orbit-e"><b>05</b><span>History</span></div>
-          <svg viewBox="0 0 560 430" aria-hidden="true">
-            <ellipse cx="280" cy="215" rx="205" ry="150"/>
-            <ellipse cx="280" cy="215" rx="145" ry="105"/>
-          </svg>
+          <svg viewBox="0 0 560 430" aria-hidden="true"><ellipse cx="280" cy="215" rx="205" ry="150"/><ellipse cx="280" cy="215" rx="145" ry="105"/></svg>
         </div>
       </div>
       <div class="three-beats reveal">
-        <article><span>Find</span><p>Locate by county, condition, map marker or natural language.</p></article>
-        <article><span>Understand</span><p>Blend database fields with report text, tables, photos and history.</p></article>
-        <article><span>Measure</span><p>Turn a 3D scan into structural components and clearance evidence.</p></article>
+        <article><span>Find</span><p>Map, county, year, condition, structure number.</p></article>
+        <article><span>Understand</span><p>SNBI fields, reports, images, history, SQL evidence.</p></article>
+        <article><span>Decide</span><p>Forecast, lifecycle cost, inspection, and 3D measurements.</p></article>
       </div>
     </section>
 
-    <section class="slide is-dark" id="slide-3" data-title="Map" aria-labelledby="slide-3-title" tabindex="-1">
+    <section class="slide is-dark" id="slide-3" data-title="ArcGIS" aria-labelledby="slide-3-title" tabindex="-1">
       <div class="split-heading reveal">
-        <div>
-          <p class="eyebrow">02 · operator walkthrough</p>
-          <h2 id="slide-3-title">Start with geography.<br>Filter with condition.</h2>
-        </div>
-        <p>The main screen is already the working map: county, inspection year, base layer and condition dimension stay visible while tools open above it.</p>
+        <div><p class="eyebrow">02 &middot; ArcGIS map</p><h2 id="slide-3-title">Geography is a query,<br>not a background image.</h2></div>
+        <p>The UI is New Jersey-fixed. County, global snapshot year, basemap, and one of nine condition fields define the client FeatureLayer.</p>
       </div>
-
       <div class="map-walkthrough">
         <figure class="screen-frame screen-frame--dark reveal">
-          <div class="screen-bar"><span></span><span></span><span></span><small>Map workspace</small></div>
-          <img src="assets/workspace-map.png" alt="BridgeGuard New Jersey map with county and year filters">
-          <div class="callout callout-1"><b>1</b><span>Choose county + year</span></div>
-          <div class="callout callout-2"><b>2</b><span>Color by condition</span></div>
-          <div class="callout callout-3"><b>3</b><span>Open a bridge</span></div>
+          <div class="screen-bar"><span></span><span></span><span></span><small>New Jersey / Atlantic / 2025 / Deck</small></div>
+          <img src="assets/workspace-map.png" alt="BridgeGuard ArcGIS map filtered to Atlantic County and 2025 deck condition">
+          <div class="callout callout-1"><b>1</b><span>County + year</span></div>
+          <div class="callout callout-2"><b>2</b><span>Condition field</span></div>
+          <div class="callout callout-3"><b>3</b><span>Marker + popup</span></div>
         </figure>
-        <div class="walkthrough-steps reveal">
-          <article>
-            <span class="step-no">01</span>
-            <div><h3>Scope</h3><p>State, county and data year constrain the records sent to the map.</p></div>
-            <code>GET /api/map-counties</code>
-          </article>
-          <article>
-            <span class="step-no">02</span>
-            <div><h3>Render</h3><p>Coordinates, identity and component ratings become map features.</p></div>
-            <code>GET /api/map-data</code>
-          </article>
-          <article>
-            <span class="step-no">03</span>
-            <div><h3>Act</h3><p>The selected marker exposes details, history, point cloud and LCCA.</p></div>
-            <code>state_code + bridge_number</code>
-          </article>
+        <div class="runtime-trace reveal">
+          <article><b>01</b><div><small>Scope</small><strong>GET /api/map-counties</strong><span>state_code=34 &middot; year=2025</span></div></article>
+          <article><b>02</b><div><small>Fetch</small><strong>GET /api/map-data</strong><span>state + county + year</span></div></article>
+          <article><b>03</b><div><small>Normalize</small><strong>coordinates + dedupe</strong><span>invalid locations are removed</span></div></article>
+          <article><b>04</b><div><small>Render</small><strong>WKID 4326 FeatureLayer</strong><span>green 7&ndash;9 &middot; amber 5&ndash;6 &middot; red 0&ndash;4 &middot; gray unknown</span></div></article>
+          <p class="tripwire"><b>Tripwire</b> The visible Critical legend is not a separate renderer class; 0&ndash;4 is one Poor/red bucket.</p>
         </div>
+      </div>
+      <div class="feature-contract reveal">
+        <span><b>Input</b> county &middot; year &middot; basemap &middot; rating field</span>
+        <i>&rarr;</i>
+        <span><b>Behavior</b> query &middot; validate &middot; client layer</span>
+        <i>&rarr;</i>
+        <span><b>Output</b> markers &middot; condition legend &middot; bridge popup</span>
       </div>
     </section>
 
     <section class="slide" id="slide-4" data-title="Locate" aria-labelledby="slide-4-title" tabindex="-1">
       <div class="slide-heading reveal">
-        <p class="eyebrow">03 · natural-language navigation</p>
-        <h2 id="slide-4-title">“Show bridge 0313151 on the map.”</h2>
-        <p>The sidebar recognizes a map intent before general chat, resolves the bridge record, switches county, zooms, and opens the bridge card.</p>
+        <div><p class="eyebrow">03 &middot; sidebar navigation</p><h2 id="slide-4-title">&ldquo;Show bridge 0313151 on the map.&rdquo;</h2></div>
+        <p>This is a deterministic sidebar action. It does not call the full-page database analyst.</p>
       </div>
-
       <div class="locate-layout">
         <figure class="screen-frame reveal">
-          <div class="screen-bar"><span></span><span></span><span></span><small>Bridgette → map</small></div>
+          <div class="screen-bar"><span></span><span></span><span></span><small>Sidebar Bridgette &rarr; map focus</small></div>
           <img src="assets/bridge-map-card.png" alt="BridgeGuard map focused on bridge 0313151 with its bridge card open">
-          <figcaption>Real result · NJ 73 over NJ 70 · Burlington County</figcaption>
+          <figcaption>Worked result &middot; NJ 73 over NJ 70 &middot; Burlington County &middot; zoom 16</figcaption>
         </figure>
-        <div class="io-flow reveal" aria-label="Natural language map navigation input output diagram">
-          <div class="io-node input">
-            <small>Input</small>
-            <strong>bridge name or number</strong>
-            <span>free-text sidebar question</span>
-          </div>
-          <div class="io-arrow"><span>intent + identity</span></div>
-          <div class="io-node process">
-            <small>Process</small>
-            <strong>resolve + focus</strong>
-            <span>fetch statewide map index, match record, set county</span>
-          </div>
-          <div class="io-arrow"><span>focus event</span></div>
-          <div class="io-node output">
-            <small>Output</small>
-            <strong>map + bridge card</strong>
-            <span>zoomed location, ratings and action buttons</span>
-          </div>
-          <p class="edge-case"><b>Failure path:</b> a missing or ambiguous bridge returns a plain-language result without moving the map.</p>
+        <div class="sequence-board reveal" aria-label="Show me bridge sequence">
+          <div><small>1 &middot; intent</small><strong>action + bridge/map phrase</strong><span>extract 4&ndash;20 character identifier</span></div>
+          <i>&rarr;</i>
+          <div><small>2 &middot; index</small><strong>statewide latest map data</strong><span>lazy cache for component lifetime</span></div>
+          <i>&rarr;</i>
+          <div><small>3 &middot; rank</small><strong>number &gt; name &gt; location</strong><span>exact structure number scores 100</span></div>
+          <i>&rarr;</i>
+          <div><small>4 &middot; synchronize</small><strong>set year + county</strong><span>wait for target FeatureLayer</span></div>
+          <i>&rarr;</i>
+          <div><small>5 &middot; focus</small><strong>goTo + openPopup</strong><span>850 ms &middot; zoom 16</span></div>
         </div>
+      </div>
+      <div class="outcome-strip reveal">
+        <article class="ok"><b>Shown</b><span>one ranked bridge &rarr; move map and open card</span></article>
+        <article class="warn"><b>Ambiguous</b><span>up to four tied names &rarr; ask for structure number</span></article>
+        <article class="fail"><b>Not found</b><span>plain-language result &rarr; map does not move</span></article>
+        <article><b>Edge</b><span>desktop sidebar only; invalid coordinates cannot be focused</span></article>
       </div>
     </section>
 
-    <section class="slide is-dark" id="slide-5" data-title="Bridge" aria-labelledby="slide-5-title" tabindex="-1">
+    <section class="slide is-dark" id="slide-5" data-title="Condition switching" aria-labelledby="slide-5-title" tabindex="-1">
       <div class="split-heading reveal">
-        <div>
-          <p class="eyebrow">04 · bridge workspace</p>
-          <h2 id="slide-5-title">A single card opens the full evidence stack.</h2>
-        </div>
-        <p>The bridge details modal preserves context while the user moves between condition history, attached files, 3D analysis, LCCA, grounded Q&amp;A, custom data and SNBI editing.</p>
+        <div><p class="eyebrow">04 &middot; county / year / condition</p><h2 id="slide-5-title">Every switch rebuilds<br>one comparable snapshot.</h2></div>
+        <p>Year first constrains available counties; county and year then constrain bridge features. The selected field changes marker color without changing identity.</p>
       </div>
+      <div class="switch-layout">
+        <div class="switch-controls reveal">
+          <article><small>County</small><strong>Burlington / 005</strong><span>GET counties, then GET map data</span></article>
+          <article><small>Year</small><strong>2021 &rarr; 2025</strong><span>global snapshot; blank means latest per bridge</span></article>
+          <article><small>Condition</small><strong>Deck &rarr; Channel</strong><span>same bridge set, different marker field</span></article>
+          <div class="legend-truth">
+            <span class="good">7&ndash;9 Good</span><span class="fair">5&ndash;6 Fair</span><span class="poor">0&ndash;4 Poor</span><span class="unknown">N / null No data</span>
+          </div>
+        </div>
+        <div class="condition-plot reveal" aria-label="Burlington County deck condition distribution by year">
+          <header><div><small>Actual inventory trace</small><strong>Burlington &middot; Deck condition</strong></div><code>2021&ndash;2025</code></header>
+          <div class="stack-row"><b>2021</b><span class="good" style="--v:46.1%"></span><span class="fair" style="--v:42.7%"></span><span class="poor" style="--v:3.1%"></span><span class="unknown" style="--v:8.1%"></span><em>356</em></div>
+          <div class="stack-row"><b>2022</b><span class="good" style="--v:45.8%"></span><span class="fair" style="--v:41.9%"></span><span class="poor" style="--v:4.2%"></span><span class="unknown" style="--v:8.1%"></span><em>356</em></div>
+          <div class="stack-row"><b>2023</b><span class="good" style="--v:44.4%"></span><span class="fair" style="--v:43.3%"></span><span class="poor" style="--v:3.9%"></span><span class="unknown" style="--v:8.4%"></span><em>356</em></div>
+          <div class="stack-row"><b>2024</b><span class="good" style="--v:43.8%"></span><span class="fair" style="--v:44.1%"></span><span class="poor" style="--v:3.7%"></span><span class="unknown" style="--v:8.4%"></span><em>356</em></div>
+          <div class="stack-row"><b>2025</b><span class="good" style="--v:44.8%"></span><span class="fair" style="--v:43.1%"></span><span class="poor" style="--v:3.7%"></span><span class="unknown" style="--v:8.4%"></span><em>355</em></div>
+          <footer><span><i class="good"></i>Good</span><span><i class="fair"></i>Fair</span><span><i class="poor"></i>Poor</span><span><i class="unknown"></i>No data</span></footer>
+        </div>
+      </div>
+      <div class="edge-rail reveal">
+        <span><b>Categorical edge</b> Scour values such as MI-T/MO-T are not numeric, so they render gray.</span>
+        <span><b>Sparse edge</b> Railings, bearings, and joints are frequently N/null and therefore gray.</span>
+        <span><b>County edge</b> Premium county polygons are optional; the dropdown still works in keyless mode.</span>
+      </div>
+    </section>
 
-      <div class="bridge-workspace">
+    <section class="slide" id="slide-6" data-title="Bridgette" aria-labelledby="slide-6-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">05 &middot; statewide database analyst</p><h2 id="slide-6-title">Bridgette turns language into audited rows.</h2></div>
+        <p>The full-page tool generates a guarded read-only SELECT, executes it, exposes the result table, and then streams a plain-language summary.</p>
+      </div>
+      <div class="bridgette-layout">
+        <div class="query-console reveal">
+          <div class="console-head"><span></span><span></span><span></span><small>Question &rarr; SQL &rarr; rows</small></div>
+          <p class="console-question">How many bridges are in each county?</p>
+          <pre><code>SELECT c.county_name,
+       COUNT(DISTINCT b.bridge_number) AS bridge_count
+FROM bridges b
+JOIN counties c ON c.state_code=b.state_code
+                AND c.county_code=b.county_code
+WHERE b.data_year=(SELECT MAX(data_year) FROM bridges)
+GROUP BY c.county_name
+ORDER BY bridge_count DESC
+LIMIT 500;</code></pre>
+          <div class="console-table"><span>county_name</span><span>bridge_count</span><b>Bergen</b><b>...</b><b>Burlington</b><b>355</b></div>
+        </div>
+        <div class="bridgette-flow reveal">
+          <article><b>1</b><div><small>Input</small><strong>plain-language statewide question</strong></div></article>
+          <article><b>2</b><div><small>Generate</small><strong>Cerebras &rarr; one SELECT</strong><span>schema + snapshot rules in prompt</span></div></article>
+          <article><b>3</b><div><small>Guard + execute</small><strong>read-only SQLite &middot; LIMIT 500</strong></div></article>
+          <article><b>4</b><div><small>Output</small><strong>meta, SQL, columns, rows, token stream</strong><span>UI previews up to 100 rows</span></div></article>
+          <p class="tripwire"><b>Multi-user edge</b> Stop/cancel is currently process-global, while conversation history exists only in the page component and resets on reload.</p>
+        </div>
+      </div>
+      <div class="distinction-band reveal">
+        <strong>Do not conflate the two Bridgettes</strong>
+        <span><b>Sidebar</b> deterministic map intent &rarr; zoom + bridge card</span>
+        <span><b>Full page</b> question &rarr; SQL &rarr; rows &rarr; streamed summary</span>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-7" data-title="KPIs" aria-labelledby="slide-7-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">06 &middot; inventory KPIs</p><h2 id="slide-7-title">A snapshot becomes<br>a statewide condition profile.</h2></div>
+        <p>The selected year changes the inventory slice. The formula remains the same and county bars use the same Good/Fair/Poor thresholds.</p>
+      </div>
+      <div class="kpi-layout">
         <figure class="screen-frame screen-frame--dark reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>KPI surface / interface capture</small></div>
+          <img src="assets/kpi-dashboard.png" alt="New Jersey bridge KPI dashboard with condition cards and county chart">
+          <figcaption>UI capture &middot; live values follow the currently loaded snapshot</figcaption>
+        </figure>
+        <div class="kpi-audit reveal">
+          <div class="formula-rail"><span>min(deck, super, sub)</span><i>&rarr;</i><span>culvert only if all three absent</span><i>&rarr;</i><strong>7&ndash;9 / 5&ndash;6 / 0&ndash;4</strong></div>
+          <div class="kpi-mini-grid">
+            <article><small>2025 bridges</small><strong>6,825</strong></article>
+            <article class="good"><small>Good</small><strong>2,125</strong><span>31.1%</span></article>
+            <article class="fair"><small>Fair</small><strong>4,316</strong><span>63.2%</span></article>
+            <article class="poor"><small>Poor</small><strong>384</strong><span>5.6%</span></article>
+          </div>
+          <div class="kpi-bars" aria-label="2025 condition distribution">
+            <span class="good" style="--v:31.1%"><b>Good 31.1%</b></span>
+            <span class="fair" style="--v:63.2%"><b>Fair 63.2%</b></span>
+            <span class="poor" style="--v:5.6%"><b>Poor 5.6%</b></span>
+          </div>
+          <p class="tripwire"><b>Age edge</b> Average age is calculated against the current calendar year, not the selected inventory year. &ldquo;Unknown&rdquo; is derived as total minus classified.</p>
+        </div>
+      </div>
+      <div class="feature-contract reveal">
+        <span><b>Input</b> year=YYYY</span><i>&rarr;</i>
+        <span><b>Behavior</b> controlling rating + aggregation</span><i>&rarr;</i>
+        <span><b>Output</b> cards + donut + county stack + PDF snapshot</span>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-8" data-title="Workspace" aria-labelledby="slide-8-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">07 &middot; bridge workspace</p><h2 id="slide-8-title">The bridge card opens the evidence stack.</h2></div>
+        <p>The modal preserves bridge identity while users move between time, files, geometry, economics, questions, custom rows, and SNBI fields.</p>
+      </div>
+      <div class="bridge-workspace">
+        <figure class="screen-frame reveal">
           <div class="screen-bar"><span></span><span></span><span></span><small>Bridge 0313151 / details</small></div>
-          <img src="assets/bridge-details.png" alt="Bridge detail view with condition trend and maintenance timeline">
+          <img src="assets/bridge-details.png" alt="Bridge detail view with history chart and feature tabs">
         </figure>
         <div class="tab-ledger reveal">
-          <article><b>History</b><span>observed ratings → forecast curve + maintenance timeline</span></article>
-          <article><b>Files</b><span>reports → extracted content + searchable evidence</span></article>
-          <article><b>Point Cloud</b><span>scan → components + geometry + clearance</span></article>
-          <article><b>LCCA</b><span>condition + policy → lifecycle cost comparison</span></article>
-          <article><b>Ask</b><span>question → bridge-scoped grounded answer</span></article>
-          <article><b>Edit</b><span>validated SNBI fields → saved bridge record</span></article>
+          <article><b>History</b><span>observations &rarr; forecast + maintenance what-if</span></article>
+          <article><b>Files</b><span>attachments &rarr; parse cache + searchable evidence</span></article>
+          <article><b>Point Cloud</b><span>scan &rarr; components + clearance + artifacts</span></article>
+          <article><b>LCCA</b><span>Markov condition &rarr; condition-triggered policy cost</span></article>
+          <article><b>Ask</b><span>database/report text or explicit visual investigation</span></article>
+          <article><b>Custom</b><span>non-SNBI tables scoped by bridge or state</span></article>
+          <article><b>Edit</b><span>year-scoped main SNBI row + validation</span></article>
         </div>
       </div>
+      <div class="identity-lock reveal"><b>Identity lock</b><span>state_code=34</span><span>bridge_number=0313151</span><span>data_year=2025</span><i></i><strong>all child requests inherit the selected bridge</strong></div>
     </section>
 
-    <section class="slide" id="slide-6" data-title="Files" aria-labelledby="slide-6-title" tabindex="-1">
-      <div class="slide-heading reveal">
-        <p class="eyebrow">05 · report intelligence</p>
-        <h2 id="slide-6-title">Attach to a bridge. Reuse the index.</h2>
-        <p>Files are stored against the bridge, parsed in the background and indexed with the pinned Nomic embedding profile.</p>
-      </div>
-
-      <div class="file-layout">
-        <div class="stacked-screens reveal">
-          <figure class="screen-frame">
-            <div class="screen-bar"><span></span><span></span><span></span><small>Bridge files</small></div>
-            <img src="assets/report-upload.png" alt="Bridge report upload surface">
-          </figure>
-          <figure class="screen-frame">
-            <div class="screen-bar"><span></span><span></span><span></span><small>Bridge Q&amp;A</small></div>
-            <img src="assets/bridge-qa.png" alt="Bridge-scoped question and answer interface">
-          </figure>
-        </div>
-
-        <div class="pipeline reveal" aria-label="Report ingestion and retrieval pipeline">
-          <div class="pipeline-row">
-            <div class="pipeline-node"><small>Input</small><strong>PDF · DOCX/XLSX · TXT/CSV · image</strong><span>≤ 50 MB per file</span></div>
-            <span class="pipeline-link">store</span>
-            <div class="pipeline-node"><small>Extract</small><strong>PDF text · pages · embedded media</strong><span>best-effort text; hosted build does not OCR</span></div>
-          </div>
-          <div class="pipeline-row reverse">
-            <div class="pipeline-node accent"><small>Index</small><strong>Nomic v1.5 · 768-D</strong><span>search_document prefix + normalized vectors</span></div>
-            <span class="pipeline-link">chunk</span>
-            <div class="pipeline-node"><small>Persist</small><strong>cache + embedding profile</strong><span>reused across restarts</span></div>
-          </div>
-          <div class="pipeline-row">
-            <div class="pipeline-node"><small>Query</small><strong>bridge question</strong><span>database + chosen report sources</span></div>
-            <span class="pipeline-link">retrieve</span>
-            <div class="pipeline-node output"><small>Output</small><strong>grounded answer + source</strong><span>pages and extracted images remain addressable</span></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="slide is-dark" id="slide-7" data-title="3D scan" aria-labelledby="slide-7-title" tabindex="-1">
+    <section class="slide is-dark" id="slide-9" data-title="History" aria-labelledby="slide-9-title" tabindex="-1">
       <div class="split-heading reveal">
-        <div>
-          <p class="eyebrow">06 · point-cloud processing</p>
-          <h2 id="slide-7-title">A scan becomes measurable structure.</h2>
-        </div>
-        <p>Hosted processing keeps the numerical work on CPU and uses Cerebras for bounded scene judgment and component naming—without invoking the laptop GPU.</p>
+        <div><p class="eyebrow">08 &middot; condition history</p><h2 id="slide-9-title">Observed, report-derived,<br>and inferred are not the same.</h2></div>
+        <p>History resolves provenance per year before it draws a line. Loaded snapshots win; report ratings fill gaps; a backcast is only a visualization fallback.</p>
       </div>
-
-      <div class="point-layout">
+      <div class="history-layout">
         <figure class="screen-frame screen-frame--dark reveal">
-          <div class="screen-bar"><span></span><span></span><span></span><small>0313151 / saved analysis</small></div>
-          <img src="assets/point-cloud-analysis.png" alt="Point-cloud analysis with fitted components and clearance measurement">
-          <figcaption>345,795 cleaned points · 11 components · 19.66 ft clearance</figcaption>
+          <div class="screen-bar"><span></span><span></span><span></span><small>0313151 / condition trend + 10-year forecast</small></div>
+          <img src="assets/bridge-details.png" alt="BridgeGuard condition history and forecast chart">
         </figure>
-        <div class="vertical-pipeline reveal" aria-label="Point cloud analysis stages">
-          <article><b>1</b><div><small>Upload</small><strong>raw LAS · PLY · E57 · XYZ · PCD · CSV · TXT · NPZ</strong></div></article>
-          <article><b>2</b><div><small>Parse + preview</small><strong>registered file → world coordinates + bounded render sample</strong></div></article>
-          <article><b>3</b><div><small>Analyze</small><strong>point payload → CPU cleaning, orientation, isolation and fitting</strong></div></article>
-          <article><b>4</b><div><small>AI judgment</small><strong>candidate image → component label + confidence</strong></div></article>
-          <article><b>5</b><div><small>Persist + download</small><strong>best-effort analysis JSON, cleaned NPZ and separate PLY route</strong></div></article>
+        <div class="provenance-board reveal">
+          <div class="provenance-step observed"><b>1</b><div><small>Preferred</small><strong>loaded bridge snapshot</strong><span>solid line &middot; measured inventory field</span></div></div>
+          <div class="provenance-step report"><b>2</b><div><small>Fallback</small><strong>parsed inspection rating</strong><span>used only when snapshot is absent for that year</span></div></div>
+          <div class="provenance-step derived"><b>3</b><div><small>Display fallback</small><strong>derived backcast</strong><span>min(9, current + 0.08 &times; year gap)</span></div></div>
+          <div class="chart-key"><span class="solid">solid &middot; observed</span><span class="dash">dashed &middot; Markov</span><span class="dot">dotted &middot; maintenance what-if</span><span class="band">band &middot; deck &plusmn;1&sigma;</span></div>
+          <p class="tripwire"><b>Tripwire</b> Smooth backcast points are inferred, not inspections. Culvert can be forecast but is not drawn in the History UI; only Deck shows the uncertainty band.</p>
         </div>
+      </div>
+      <div class="feature-contract reveal">
+        <span><b>Input</b> state + bridge + 1&ndash;50 year horizon</span><i>&rarr;</i>
+        <span><b>Behavior</b> resolve provenance + retrieve forecast + simulate work</span><i>&rarr;</i>
+        <span><b>Output</b> condition lines + event timeline + confidence</span>
       </div>
     </section>
 
-    <section class="slide" id="slide-8" data-title="SNBI" aria-labelledby="slide-8-title" tabindex="-1">
+    <section class="slide" id="slide-10" data-title="Forecast" aria-labelledby="slide-10-title" tabindex="-1">
       <div class="slide-heading reveal">
-        <p class="eyebrow">07 · inventory ingestion</p>
-        <h2 id="slide-8-title">Normalize before the data reaches decisions.</h2>
-        <p>The converter handles legacy exchange formats; the loader validates New Jersey SNBI records and persists them by data year.</p>
+        <div><p class="eyebrow">09 &middot; deterioration model</p><h2 id="slide-10-title">The production forecast is fleet-trained Markov.</h2></div>
+        <p>Each component walks through rating states 0&ndash;9 using the most specific transition cohort supported by the inventory.</p>
       </div>
+      <div class="forecast-layout">
+        <div class="cohort-funnel reveal">
+          <header><small>Model variables</small><strong>metric + state + age + county + traffic + work</strong></header>
+          <div><span>Bridge cohort</span><b>county + age band + truck-traffic band</b><em>&ge;25 transition-years</em></div>
+          <div><span>Relax traffic</span><b>county + age band</b><em>fallback</em></div>
+          <div><span>Relax age</span><b>county</b><em>fallback</em></div>
+          <div><span>Fleet</span><b>statewide metric matrix</b><em>fallback</em></div>
+          <div><span>Cold start</span><b>10% annual one-state drop</b><em>no state data</em></div>
+        </div>
+        <div class="forecast-chart reveal">
+          <header><div><small>Worked bridge</small><strong>0107152 &middot; 34 observed years</strong></div><span>High confidence</span></header>
+          <svg viewBox="0 0 620 280" role="img" aria-label="Observed and Markov forecast condition curves for bridge 0107152">
+            <path class="chart-grid" d="M54 35H594M54 85H594M54 135H594M54 185H594M54 235H594M54 35V235M189 35V235M324 35V235M459 35V235M594 35V235"/>
+            <path class="uncertainty-fill" d="M324 210L391 212L459 214L526 215L594 215L594 268L526 264L459 260L391 256L324 252Z"/>
+            <path class="actual-line" d="M54 135L121 145L189 185L256 210L324 235"/>
+            <path class="forecast-line deck" d="M324 236L391 237L459 239L526 240L594 242"/>
+            <path class="forecast-line super" d="M324 236L391 237L459 238L526 239L594 240"/>
+            <path class="forecast-line sub" d="M324 139L391 142L459 145L526 148L594 152"/>
+            <line class="forecast-start" x1="324" y1="30" x2="324" y2="270"/>
+            <g class="axis-copy"><text x="35" y="40">7.0</text><text x="35" y="90">6.5</text><text x="35" y="140">6.0</text><text x="35" y="190">5.5</text><text x="35" y="240">5.0</text><text x="48" y="265">2022</text><text x="304" y="265">2026</text><text x="572" y="265">2030</text></g>
+          </svg>
+          <div class="forecast-values"><span><i class="deck"></i>Deck 2030 <b>4.936</b></span><span><i class="super"></i>Super <b>4.950</b></span><span><i class="sub"></i>Sub <b>5.831</b></span></div>
+        </div>
+      </div>
+      <div class="model-equations reveal">
+        <code>p(t+1) = p(t) &times; T(metric, county, age_band(t), traffic_band)</code>
+        <code>y&#770;(t) = &Sigma; state &times; p_state(t)</code>
+        <div><small>Internal rolling-origin backtest / hold out 2025</small><strong>18,841 predictions</strong><b>MAE 0.09</b><b>98.5% within &plusmn;1</b><span>not external validation</span></div>
+      </div>
+    </section>
 
-      <div class="ingestion-layout">
+    <section class="slide is-dark" id="slide-11" data-title="LCCA" aria-labelledby="slide-11-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">10 &middot; life-cycle cost analysis</p><h2 id="slide-11-title">Condition drives the policy.<br>Discounting drives the comparison.</h2></div>
+        <p>LCCA compares do-nothing with a fixed condition-triggered rehab policy. It does not optimize every possible intervention year.</p>
+      </div>
+      <div class="lcca-layout">
+        <div class="parameter-ledger reveal">
+          <header><small>Editable inputs</small><strong>bridge + horizon + cost assumptions</strong></header>
+          <p><span>Horizon</span><b>5&ndash;100 yr</b><em>UI: 20 / 30 / 40 / 50 / 75 / 100</em></p>
+          <p><span>Replacement</span><b>$800/ft&sup2;</b><em>NHS 840 &middot; non-NHS 775</em></p>
+          <p><span>Major rehab</span><b>$300/ft&sup2;</b><em>default</em></p>
+          <p><span>Maintenance</span><b>$1.50/ft&sup2;/yr</b><em>condition-scaled</em></p>
+          <p><span>Poor penalty</span><b>$1.00/ft&sup2;/yr</b><em>+25% per consecutive poor year</em></p>
+          <p><span>Discount rate</span><b>3%</b><em>present value</em></p>
+        </div>
+        <div class="lcca-charts reveal">
+          <svg viewBox="0 0 620 250" role="img" aria-label="Condition-triggered rehab and cumulative cost comparison">
+            <path class="chart-grid" d="M50 30H595M50 80H595M50 130H595M50 180H595M50 230H595M50 30V230M186 30V230M322 30V230M458 30V230M595 30V230"/>
+            <line class="threshold poor" x1="50" y1="133" x2="595" y2="133"/><text class="threshold-copy" x="55" y="126">POOR 4.9</text>
+            <line class="threshold replace" x1="50" y1="185" x2="595" y2="185"/><text class="threshold-copy" x="55" y="178">REPLACE 3.0</text>
+            <path class="do-nothing-line" d="M50 105C170 118 260 142 350 165S495 200 595 214"/>
+            <path class="intervention-line" d="M50 105C150 115 210 133 245 135L252 65C360 78 448 115 505 134L512 68C550 74 575 80 595 88"/>
+            <circle class="rehab-dot" cx="252" cy="65" r="6"/><circle class="rehab-dot" cx="512" cy="68" r="6"/>
+            <g class="axis-copy"><text x="47" y="245">2025</text><text x="562" y="245">2125</text></g>
+          </svg>
+          <div class="npv-card"><code>NPV = &Sigma;[(routine + poor penalty + capital) / (1+r)^t] - salvage</code><span>Rehab when 3.0 &lt; rating &le; 4.9 &middot; replacement at &le;3.0 &middot; reset to 9</span></div>
+        </div>
+      </div>
+      <div class="scenario-pair reveal">
+        <article><small>40-year example &middot; 0101150</small><strong>No recommendation</strong><span>rating 5.0 &middot; decline 0.026/yr &middot; do-nothing NPV $260,008</span><em>No triggered rehab beats do-nothing inside this horizon.</em></article>
+        <article class="accent"><small>100-year sensitivity &middot; 0220154</small><strong>Rehab in 2026 + 2096</strong><span>$5.463M &rarr; $4.616M</span><em>$847,017 modeled savings; horizon is a planning assumption.</em></article>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-12" data-title="Loader" aria-labelledby="slide-12-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">11 &middot; inventory loader</p><h2 id="slide-12-title">One SNBI object fans into a year-scoped database.</h2></div>
+        <p>The chosen data year is authoritative. The loader validates identity and New Jersey scope before rebuilding the main and child rows for that snapshot.</p>
+      </div>
+      <div class="loader-layout">
         <figure class="screen-frame reveal">
           <div class="screen-bar"><span></span><span></span><span></span><small>Load / Delete Bridges</small></div>
-          <img src="assets/data-loader.png" alt="SNBI JSON loading and data-year management screen">
+          <img src="assets/data-loader.png" alt="BridgeGuard SNBI JSON loading and data-year management screen">
         </figure>
+        <div class="fanout-board reveal">
+          <div class="fan-source"><small>Input</small><strong>SNBI JSON[]</strong><span>BL01=34 &middot; BID01 &middot; year 1990&ndash;2100</span></div>
+          <i></i>
+          <div class="fan-targets">
+            <span>bridges</span><span>features</span><span>routes</span><span>span_sets</span><span>substructure</span><span>elements</span><span>inspections</span><span>posting</span><span>works</span>
+          </div>
+          <div class="fan-result"><b>loaded</b><b>refreshed</b><b>skipped</b><b>validation</b></div>
+          <code>POST /api/load-json &middot; max 50 MB &middot; editor role</code>
+        </div>
+      </div>
+      <div class="worked-edge reveal">
+        <article><small>Worked example</small><strong>[BL01=34, BID01=0313151, ...] + 2025</strong><span>Creates one 2025 main snapshot plus its same-year child and provenance rows. It then appears in Map, KPI, History, and Editor.</span></article>
+        <article class="tripwire"><small>Known backend/UI mismatch</small><strong>Same-year reload mutates before &ldquo;conflict&rdquo;</strong><span>The database refreshes existing rows, but an all-existing batch can still tell the UI to delete first. Treat that message cautiously.</span></article>
+      </div>
+    </section>
 
-        <div class="dual-flow reveal">
+    <section class="slide is-dark" id="slide-13" data-title="Converter" aria-labelledby="slide-13-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">12 &middot; NBI &harr; SNBI converter</p><h2 id="slide-13-title">Forward conversion is mapped.<br>Reverse conversion is lossy.</h2></div>
+        <p>Legacy NBI text and optional element XML are normalized into NJ SNBI JSON. Reverse export reconstructs an exchange package but cannot perfectly recover every legacy code.</p>
+      </div>
+      <div class="converter-layout">
+        <div class="dual-pipeline reveal">
           <article>
-            <header><span>A</span><h3>Forward conversion</h3></header>
-            <div class="mini-flow">
-              <div><small>Input</small><strong>NBI TXT</strong><span>+ optional elements XML</span></div>
-              <i>→</i>
-              <div><small>Transform</small><strong>map + normalize</strong><span>NJ filter + validation</span></div>
-              <i>→</i>
-              <div><small>Output</small><strong>SNBI JSON</strong><span>coverage + warnings</span></div>
-            </div>
-            <code>POST /api/convert</code>
+            <header><span>A</span><div><small>Forward</small><strong>NBI &rarr; SNBI</strong></div></header>
+            <p><b>Input</b> header CSV, positional CSV, or 445-char fixed-width TXT + optional FHWAED XML</p>
+            <i>&rarr;</i><p><b>Behavior</b> parse over/under records, map, attach elements, normalize, NJ-filter, validate</p>
+            <i>&rarr;</i><p><b>Output</b> SNBI JSON[] + coverage + parity + warnings</p>
           </article>
-          <article>
-            <header><span>B</span><h3>Database load</h3></header>
-            <div class="mini-flow">
-              <div><small>Input</small><strong>SNBI JSON[]</strong><span>BL01 + BID01 required</span></div>
-              <i>→</i>
-              <div><small>Validate</small><strong>schema + parity</strong><span>state code 34 only</span></div>
-              <i>→</i>
-              <div><small>Output</small><strong>year snapshot</strong><span>normalized relational rows</span></div>
-            </div>
-            <code>POST /api/load-json</code>
+          <article class="lossy">
+            <header><span>B</span><div><small>Reverse / best effort</small><strong>SNBI &rarr; NBI exchange</strong></div></header>
+            <p><b>Input</b> object, array, or {bridges:[...]}</p>
+            <i>&rarr;</i><p><b>Behavior</b> flatten + representative recodes + unit conversion</p>
+            <i>&rarr;</i><p><b>UI downloads</b> NBI CSV content as .txt + Elements XML</p>
           </article>
-          <article>
-            <header><span>C</span><h3>Reverse exchange</h3></header>
-            <div class="mini-flow">
-              <div><small>Input</small><strong>SNBI JSON</strong><span>single or array</span></div>
-              <i>→</i>
-              <div><small>Transform</small><strong>reverse map</strong><span>flatten nested fields</span></div>
-              <i>→</i>
-              <div><small>Output</small><strong>TXT · CSV · XML</strong><span>portable legacy package</span></div>
-            </div>
-            <code>POST /api/reverse-convert</code>
-          </article>
+        </div>
+        <div class="mapping-ledger reveal">
+          <header><small>Worked field transitions</small><strong>Direct is not always identical</strong></header>
+          <div><b class="direct">Direct</b><code>YEAR_BUILT_027=1977</code><i>&rarr;</i><code>BW01=1977</code></div>
+          <div><b class="direct">Direct</b><code>CHANNEL_COND_061=6</code><i>&rarr;</i><code>BC09="6"</code></div>
+          <div><b class="recode">Recode</b><code>Item 36A railing adequacy</code><i>&rarr;</i><code>BRH01</code></div>
+          <div><b class="noinverse">No inverse</b><code>B.AP.01 Good/Fair/Poor</code><i>&rarr;</i><code>Item 72 8/5/2</code></div>
+          <p class="tripwire"><b>Edge</b> Missing over-records are skipped; invalid optional XML can yield zero elements; an all-non-NJ file can surface as a generic server error.</p>
         </div>
       </div>
     </section>
 
-    <section class="slide is-dark" id="slide-9" data-title="Decision" aria-labelledby="slide-9-title" tabindex="-1">
-      <div class="split-heading reveal">
-        <div>
-          <p class="eyebrow">08 · decision surfaces</p>
-          <h2 id="slide-9-title">From statewide pattern to bridge action.</h2>
-        </div>
-        <p>KPIs summarize current inventory; history and forecasts expose deterioration; LCCA compares intervention timing and cost.</p>
+    <section class="slide" id="slide-14" data-title="Edit" aria-labelledby="slide-14-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">13 &middot; year-scoped editor</p><h2 id="slide-14-title">Main fields persist. Nested edits export.</h2></div>
+        <p>Every read, validation, metadata call, save, and export is pinned to one bridge snapshot year. Identity and year are immutable.</p>
       </div>
-
-      <div class="decision-layout">
-        <figure class="screen-frame screen-frame--dark reveal">
-          <div class="screen-bar"><span></span><span></span><span></span><small>2025 / New Jersey KPIs</small></div>
-          <img src="assets/kpi-dashboard.png" alt="New Jersey bridge KPI dashboard">
-        </figure>
-        <div class="decision-graph reveal" aria-label="Decision pipeline from inventory to lifecycle planning">
-          <div class="decision-stat"><strong>6,825</strong><span>bridges · 2025</span></div>
-          <svg viewBox="0 0 560 200" role="img" aria-label="Condition distribution and forecast curve">
-            <g class="bars">
-              <rect x="28" y="91" width="76" height="79"/><rect x="120" y="31" width="76" height="139"/><rect x="212" y="146" width="76" height="24"/>
-              <text x="66" y="188">GOOD</text><text x="158" y="188">FAIR</text><text x="250" y="188">POOR</text>
-            </g>
-            <path class="forecast-area" d="M340 48C378 57 393 73 420 82s42 34 61 42 29 24 52 35V170H340Z"/>
-            <path class="forecast-line" d="M340 48C378 57 393 73 420 82s42 34 61 42 29 24 52 35"/>
-            <circle cx="340" cy="48" r="5"/><circle cx="420" cy="82" r="5"/><circle cx="481" cy="124" r="5"/><circle cx="533" cy="159" r="5"/>
-            <text x="340" y="28">OBSERVED</text><text x="474" y="103">FORECAST</text>
-          </svg>
-          <div class="decision-chain">
-            <span>ratings by year</span><i>→</i><span>Markov condition path</span><i>→</i><span>maintenance scenario</span><i>→</i><strong>lifecycle cost</strong>
+      <div class="editor-layout">
+        <div class="snapshot-board reveal">
+          <header><span>Bridge 0313151</span><b>Selected snapshot / 2025</b></header>
+          <div class="snapshot-years"><span>2024 <b>BC01 = 8</b></span><i></i><span class="active">2025 <b>BC01 8 &rarr; 7</b></span></div>
+          <div class="persistence-split">
+            <article class="persist"><small>Primary bridge row</small><strong>PUT /api/bridge/34/0313151?year=2025</strong><span>saved to SQLite &rarr; validation and metadata refetched</span></article>
+            <article class="export"><small>Features / routes / spans / elements / inspections / posting / works</small><strong>edit in client state</strong><span>included in JSON/CSV export; not saved by Editor</span></article>
           </div>
         </div>
+        <div class="editor-ledger reveal">
+          <p><span>Input</span><b>state + bridge + actual snapshot year + scalar field edits</b></p>
+          <p><span>Context</span><b>original NBI value + transition/rule + filled/review chips</b></p>
+          <p><span>Output</span><b>updated main row + separate validation response</b></p>
+          <p><span>Export</span><b>single bridge JSON, child CSV, or state/year ZIP</b></p>
+          <p class="tripwire"><span>Role edge</span><b>Editor save is allowed, but the UI currently depends on admin-only /api/table/* reads to load selectors and children.</b></p>
+        </div>
+      </div>
+      <div class="feature-contract reveal">
+        <span><b>Validation</b> reports errors; it does not block save</span><i>&middot;</i>
+        <span><b>Isolation</b> 2024 remains unchanged when 2025 is saved</span><i>&middot;</i>
+        <span><b>Guard</b> payload/query year mismatch returns 400</span>
       </div>
     </section>
 
-    <section class="slide" id="slide-10" data-title="Contracts" aria-labelledby="slide-10-title" tabindex="-1">
-      <div class="slide-heading reveal">
-        <p class="eyebrow">09 · primary function contracts</p>
-        <h2 id="slide-10-title">Every major function has an explicit input and output.</h2>
-        <p>Select a function to inspect its runtime contract. These are product-level functions; lower-level helpers compose beneath them.</p>
+    <section class="slide is-dark" id="slide-15" data-title="Custom" aria-labelledby="slide-15-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">14 &middot; custom operational data</p><h2 id="slide-15-title">Shared structure.<br>Bridge-local rows.</h2></div>
+        <p>Custom tables deliberately sit outside SNBI. A definition can belong to one bridge or an entire state, while each row remains partitioned by bridge.</p>
       </div>
+      <div class="custom-layout">
+        <div class="scope-diagram reveal">
+          <div class="scope-root"><small>State-wide definition</small><strong>Maintenance Notes</strong><span>Date &middot; Agency &middot; Action</span></div>
+          <i></i>
+          <div class="scope-branches">
+            <article><small>Bridge 0313151</small><strong>1 row</strong><span>2026-07-27 &middot; NJDOT &middot; Seal joints</span></article>
+            <article><small>Bridge 0107152</small><strong>0 rows</strong><span>definition visible; rows remain separate</span></article>
+            <article><small>Bridge 0220154</small><strong>2 rows</strong><span>its own maintenance log</span></article>
+          </div>
+        </div>
+        <div class="custom-table-card reveal">
+          <header><div><small>Worked example</small><strong>Maintenance Notes</strong></div><span>state scope</span></header>
+          <div class="custom-row head"><b>Date</b><b>Agency</b><b>Action</b></div>
+          <div class="custom-row"><span>2026-07-27</span><span>NJDOT</span><span>Seal joints</span></div>
+          <div class="boundary-stamp">OUTSIDE SNBI IMPORT / EXPORT</div>
+          <p class="tripwire"><b>Edges</b> Cells save on blur and are last-write-wins. Duplicate column names can collide. Deleting a state definition removes its rows across every bridge.</p>
+        </div>
+      </div>
+      <div class="feature-contract reveal">
+        <span><b>Input</b> name + columns + color + bridge/state scope</span><i>&rarr;</i>
+        <span><b>Behavior</b> definition + JSON-cell rows</span><i>&rarr;</i>
+        <span><b>Output</b> editable per-bridge operational table</span>
+      </div>
+    </section>
 
+    <section class="slide" id="slide-16" data-title="Ask" aria-labelledby="slide-16-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">15 &middot; bridge-scoped Ask</p><h2 id="slide-16-title">Choose evidence, then ask one bridge.</h2></div>
+        <p>Normal Ask combines the selected bridge database record with selected report text/table chunks. Visual inspection is a separate explicit route.</p>
+      </div>
+      <div class="ask-layout">
+        <figure class="screen-frame reveal qa-screen">
+          <div class="screen-bar"><span></span><span></span><span></span><small>Bridge 0313151 / Ask</small></div>
+          <img src="assets/bridge-qa.png" alt="Bridge Ask panel with database source and visual investigation checkbox">
+          <figcaption>Control placement capture &middot; the current implementation requires the checkbox for defect inspection</figcaption>
+        </figure>
+        <div class="ask-flow reveal">
+          <article><small>Input</small><strong>question + source set</strong><span>bridge database and/or selected attachments</span></article>
+          <i>&rarr;</i>
+          <div class="parallel-ask"><span>bridge-scoped text-to-SQL</span><span>report text/table retrieval</span></div>
+          <i>&rarr;</i>
+          <article class="output"><small>Output</small><strong>NDJSON answer stream + source labels</strong><span>image-description chunks are excluded</span></article>
+          <code>POST /api/db-rag/stream</code>
+          <p class="tripwire"><b>Edge</b> No selected sources means no usable context. Database-only skips report indexing. Stop/cancel is not yet isolated per user.</p>
+        </div>
+      </div>
+      <div class="example-pair reveal">
+        <article><small>Unchecked example</small><strong>&ldquo;What is the deck rating and recommended work?&rdquo;</strong><span>Database + inspection.pdf &rarr; grounded text answer &middot; no VLM inspection</span></article>
+        <article><small>Display command</small><strong>&ldquo;Show page 3&rdquo; / &ldquo;show all images&rdquo;</strong><span>returns stored evidence without enabling defect detection</span></article>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-17" data-title="Preprocess" aria-labelledby="slide-17-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">16 &middot; file preprocessing</p><h2 id="slide-17-title">Upload once.<br>Persist the parsed evidence.</h2></div>
+        <p>Bridge attachments are stored first, then parsed and indexed in the background. A file-set signature determines whether the cache can be reused.</p>
+      </div>
+      <div class="preprocess-layout">
+        <div class="format-matrix reveal">
+          <header><small>Accepted / max 50 MB</small><strong>What the hosted parser actually extracts</strong></header>
+          <div class="format-row head"><b>Input</b><b>Text</b><b>Embedded media</b><b>Page renders</b></div>
+          <div class="format-row"><span>PDF</span><b class="yes">PyMuPDF</b><b class="yes">regions + captions</b><b class="yes">every page</b></div>
+          <div class="format-row"><span>PNG / JPG</span><b class="no">&mdash;</b><b class="yes">source image</b><b class="no">&mdash;</b></div>
+          <div class="format-row"><span>DOCX / XLSX</span><b class="partial">best effort</b><b class="yes">ZIP /media</b><b class="no">&mdash;</b></div>
+          <div class="format-row"><span>DOC / XLS / TXT / CSV</span><b class="partial">accepted; limited</b><b class="no">&mdash;</b><b class="no">&mdash;</b></div>
+        </div>
+        <div class="ingest-funnel reveal">
+          <article style="--w:100%"><span>Source files</span><b>bridge attachment set</b></article>
+          <article style="--w:88%"><span>Extract</span><b>page text + images + rendered pages</b></article>
+          <article style="--w:74%"><span>Chunk</span><b>500 words &middot; 100 overlap</b></article>
+          <article style="--w:60%"><span>Describe</span><b>Cerebras technical image descriptions</b></article>
+          <article style="--w:46%"><span>Persist</span><b>chunks + vectors + assets + profile</b></article>
+          <p class="tripwire"><b>No OCR</b> A scanned/flattened PDF can have page images but no extracted text or embedded-image chunks.</p>
+        </div>
+      </div>
+      <div class="feature-contract reveal">
+        <span><b>Input</b> attachment + bridge identity</span><i>&rarr;</i>
+        <span><b>Behavior</b> save + background parse + describe + chunk</span><i>&rarr;</i>
+        <span><b>Output</b> reusable cache + report status</span>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-18" data-title="Retrieval" aria-labelledby="slide-18-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">17 &middot; embedding + retrieval</p><h2 id="slide-18-title">Old and new files share one pinned vector space.</h2></div>
+        <p>The server reuses a cache only when model, revision, dimensions, vector count, and finite-value checks all match.</p>
+      </div>
+      <div class="retrieval-layout">
+        <div class="embedding-spec reveal">
+          <header><small>Exact hosted profile</small><strong>nomic-ai/nomic-embed-text-v1.5</strong></header>
+          <div class="vector-ruler" aria-label="768 dimensional normalized vector"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><b>768-D</b></div>
+          <dl>
+            <div><dt>Revision</dt><dd>20d1e6057a2e1fa08b45123e41ce9381fc338f0e</dd></div>
+            <div><dt>Runtime</dt><dd>TEI 1.9.3 &middot; mean pooling</dd></div>
+            <div><dt>Vector</dt><dd>float32 &middot; normalized &middot; right truncation</dd></div>
+            <div><dt>Content</dt><dd><code>search_document:</code></dd></div>
+            <div><dt>Question</dt><dd><code>search_query:</code></dd></div>
+          </dl>
+        </div>
+        <div class="cache-decision reveal">
+          <div class="cache-start"><small>Parsed cache found</small><strong>Compare full embedding profile</strong></div>
+          <i></i>
+          <div class="cache-branch">
+            <article class="ok"><b>Match</b><span>profile + row count + width 768 + finite vectors</span><strong>reuse matrix</strong></article>
+            <article class="fail"><b>Mismatch</b><span>model/revision/dimension/content changed</span><strong>re-embed parsed content</strong></article>
+          </div>
+          <div class="retrieval-fusion"><span>DB SQL evidence</span><b>+</b><span>top report chunks</span><b>&rarr;</b><strong>Cerebras answer</strong></div>
+          <p class="tripwire"><b>Invariant</b> Vectors from different dimensions or profiles are never mixed. Old parsed files remain reusable because only their vectors are regenerated.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-19" data-title="Vision gate" aria-labelledby="slide-19-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">18 &middot; visual inspection gate</p><h2 id="slide-19-title">The checkbox is a hard branch.</h2></div>
+        <p>It is frontend-local, defaults false, is disabled during a request, and resets when the bridge modal is destroyed and reopened. It is never saved or shared between users.</p>
+      </div>
+      <div class="vision-gate reveal">
+        <div class="gate-input"><small>Question + selected sources</small><strong>Use visual investigation?</strong></div>
+        <div class="gate-lines"><i></i><i></i></div>
+        <article class="gate-branch text">
+          <header><span>Unchecked</span><b>TEXT / DATA</b></header>
+          <p>bridge SQL + report text/table chunks</p><i>&rarr;</i>
+          <p>streamed answer + source chips</p>
+          <strong>Image descriptions excluded</strong>
+        </article>
+        <article class="gate-branch visual">
+          <header><span>Checked</span><b>VISUAL INSPECTION</b></header>
+          <p>image-description candidates &middot; up to 8 &middot; cosine floor 0.32</p><i>&rarr;</i>
+          <p>VLM bounding boxes + anomaly refinement</p>
+          <strong>Annotated detections only</strong>
+        </article>
+      </div>
+      <div class="vision-example reveal">
+        <article><small>Unchecked</small><strong>&ldquo;Find deck cracks&rdquo;</strong><span>normal textual evidence path; no defect-image claim</span></article>
+        <article class="accent"><small>Checked</small><strong>&ldquo;Find deck cracks&rdquo;</strong><span>&ldquo;Checked 6 images; found 3 detections&rdquo; + overlays</span></article>
+        <p class="tripwire"><b>Scanned-PDF edge</b> Bridge visual investigation scans extracted report images, not page renders. A flattened PDF can therefore return &ldquo;No extracted report images.&rdquo;</p>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-20" data-title="Point-cloud cleaning" aria-labelledby="slide-20-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">19 &middot; point-cloud cleaning</p><h2 id="slide-20-title">CPU geometry finds structure; Cerebras reviews candidates.</h2></div>
+        <p>Hosted operation does not invoke a laptop GPU. Metric scale and model mode determine how aggressively the cloud can be cleaned and sampled.</p>
+      </div>
+      <div class="point-layout">
+        <figure class="screen-frame reveal">
+          <div class="screen-bar"><span></span><span></span><span></span><small>0313151 / saved structural analysis</small></div>
+          <img src="assets/point-cloud-analysis.png" alt="Point-cloud analysis with fitted bridge components and clearance measurement">
+          <figcaption>Saved example &middot; 345,795 output points &middot; 11 components &middot; 5.993 m clearance</figcaption>
+        </figure>
+        <div class="cleaning-waterfall reveal">
+          <header><small>Inputs</small><strong>LAS &middot; PLY &middot; E57 &middot; XYZ &middot; PCD &middot; CSV &middot; TXT &middot; NPZ</strong></header>
+          <article style="--w:100%"><span>1</span><b>Validate + sample</b><em>&ge;200 points &middot; 300k clearance / 600k structural cap</em></article>
+          <article style="--w:88%"><span>2</span><b>CPU cleaning</b><em>octree candidates &middot; recall-first structural mode</em></article>
+          <article style="--w:74%"><span>3</span><b>PCA frame</b><em>along-span + transverse axes</em></article>
+          <article style="--w:62%"><span>4</span><b>Footprint + under-bridge isolation</b><em>deck, road/water, supports</em></article>
+          <article style="--w:50%"><span>5</span><b>Cerebras review</b><em>rendered views + statistics + bridge/report context</em></article>
+          <p class="tripwire"><b>Scale edge</b> Unknown metric scale skips octree cleaning because cube thresholds are meter-based. Structural mode avoids aggressive early removal.</p>
+        </div>
+      </div>
+      <div class="mode-strip reveal">
+        <span><b>scale_known</b> metric / relative</span><span><b>model_mode</b> clearance / structural</span><span><b>use_vlm</b> hosted review</span><span><b>use_local_sam</b> false by default</span>
+      </div>
+    </section>
+
+    <section class="slide is-dark" id="slide-21" data-title="Point-cloud outputs" aria-labelledby="slide-21-title" tabindex="-1">
+      <div class="split-heading reveal">
+        <div><p class="eyebrow">20 &middot; segmentation + measurement</p><h2 id="slide-21-title">Labels, fitted solids,<br>clearance, and reusable artifacts.</h2></div>
+        <p>Analysis expands sample labels back to the full point order, fits component-specific geometry, and measures clearance from the cleaned roadway and soffit evidence.</p>
+      </div>
+      <div class="point-output-layout">
+        <div class="segmentation-board reveal">
+          <header><small>Geometric classes</small><strong>full-cloud label output</strong></header>
+          <div class="class-stack"><span class="ground">ground / road</span><span class="substructure">substructure</span><span class="soffit">soffit</span><span class="deck">deck / superstructure</span><span class="unknown">unclassified</span><span class="noise">noise / vegetation</span></div>
+          <div class="component-table">
+            <div><b>Component</b><b>Fit</b><b>Review output</b></div>
+            <div><span>deck</span><span>loft</span><span>material + confidence</span></div>
+            <div><span>pier</span><span>cylinder / prism</span><span>AASHTO/NJDOT label</span></div>
+            <div><span>girder</span><span>I / box</span><span>fit RMS + verdict</span></div>
+            <div><span>parapet</span><span>wall</span><span>point count + bounds</span></div>
+          </div>
+        </div>
+        <div class="clearance-board reveal">
+          <header><small>64 &times; 64 clearance grid</small><strong>robust vertical gap by valid column</strong></header>
+          <div class="heatmap" aria-label="Conceptual clearance heatmap">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i class="center"></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i class="control"></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <p><span><i class="control"></i>controlling robust minimum</span><span><i class="center"></i>center-lane value</span></p>
+          <div class="artifact-strip"><b>processed_cloud.npz</b><b>processed_cloud.ply</b><b>analysis.json</b></div>
+        </div>
+      </div>
+      <div class="edge-rail reveal">
+        <span><b>Insufficient</b> &lt;200 points for analysis; &lt;20 for segmentation.</span>
+        <span><b>Deck-only</b> vertical span &lt;3 m lowers clearance confidence.</span>
+        <span><b>AI unavailable</b> geometry can return with unreviewed-fit warnings.</span>
+        <span><b>Replacement</b> new raw upload deletes the prior processed result.</span>
+      </div>
+    </section>
+
+    <section class="slide" id="slide-22" data-title="Contracts" aria-labelledby="slide-22-title" tabindex="-1">
+      <div class="slide-heading reveal">
+        <div><p class="eyebrow">21 &middot; runtime contracts</p><h2 id="slide-22-title">Inspect each function as input, behavior, output, and guardrail.</h2></div>
+        <p>Select a function to see its product-level contract. Each feature slide provides the deeper algorithm and worked trace.</p>
+      </div>
       <div class="contract-workbench reveal">
         <div class="contract-tabs" role="tablist" aria-label="BridgeGuard function contracts" aria-orientation="vertical">
-          <button id="contract-tab-map" type="button" role="tab" aria-controls="contract-panel" aria-selected="true" data-contract="map">Map</button>
+          <button id="contract-tab-map" type="button" role="tab" aria-controls="contract-panel" aria-selected="true" data-contract="map">ArcGIS map</button>
+          <button id="contract-tab-locate" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="locate">Show bridge</button>
           <button id="contract-tab-bridgette" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="bridgette">Bridgette</button>
-          <button id="contract-tab-converter" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="converter">Converter</button>
+          <button id="contract-tab-kpis" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="kpis">KPIs</button>
+          <button id="contract-tab-history" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="history">History / forecast</button>
+          <button id="contract-tab-lcca" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="lcca">LCCA</button>
           <button id="contract-tab-loader" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="loader">Loader</button>
-          <button id="contract-tab-reports" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="reports">Report RAG</button>
-          <button id="contract-tab-vision" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="vision">Vision</button>
+          <button id="contract-tab-converter" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="converter">Converter</button>
+          <button id="contract-tab-preprocess" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="preprocess">File prep</button>
+          <button id="contract-tab-retrieval" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="retrieval">Retrieval</button>
+          <button id="contract-tab-ask" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="ask">Ask / vision</button>
           <button id="contract-tab-pointcloud" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="pointcloud">Point cloud</button>
           <button id="contract-tab-editor" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="editor">Editor</button>
-          <button id="contract-tab-decision" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="decision">Forecast / LCCA</button>
-          <button id="contract-tab-admin" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="admin">DB admin</button>
+          <button id="contract-tab-custom" type="button" role="tab" aria-controls="contract-panel" aria-selected="false" data-contract="custom">Custom</button>
         </div>
         <div class="contract-panel" id="contract-panel" role="tabpanel" aria-labelledby="contract-tab-map" tabindex="0">
-          <header>
-            <div><small>Function</small><h3 id="contract-title">Map explorer</h3></div>
-            <code id="contract-route">GET /api/map-data</code>
-          </header>
+          <header><div><small>Function</small><h3 id="contract-title">ArcGIS map</h3></div><code id="contract-route">GET /api/map-data</code></header>
+          <section class="contract-graphviz" aria-labelledby="contract-graph-label">
+            <header class="graphviz-toolbar">
+              <div>
+                <small id="contract-graph-label">Execution graph</small>
+                <strong id="contract-graph-runtime">Graphviz runtime &middot; DOT</strong>
+              </div>
+              <div class="graphviz-legend" aria-label="Graph node legend">
+                <span class="input">Input</span>
+                <span class="behavior">Behavior</span>
+                <span class="output">Output</span>
+                <span class="boundary">Boundary</span>
+              </div>
+            </header>
+            <div id="contract-graph" class="graphviz-canvas" role="img" aria-busy="true">
+              <span class="graphviz-loading">Laying out execution graph&hellip;</span>
+            </div>
+            <p id="contract-graph-caption" class="graphviz-caption">Map controls become one normalized ArcGIS layer; invalid coordinates exit before rendering.</p>
+          </section>
           <div class="contract-flow">
-            <article class="contract-node">
-              <small>Input</small>
-              <strong id="contract-input-title">state · county · year · condition key</strong>
-              <p id="contract-input-copy">Filter selections or a Bridgette focus request.</p>
-            </article>
-            <span class="contract-arrow" aria-hidden="true">→</span>
-            <article class="contract-node process">
-              <small>Behavior</small>
-              <strong id="contract-process-title">query + normalize + render</strong>
-              <p id="contract-process-copy">Returns map-safe identity, location and rating fields.</p>
-            </article>
-            <span class="contract-arrow" aria-hidden="true">→</span>
-            <article class="contract-node output">
-              <small>Output</small>
-              <strong id="contract-output-title">markers + selected bridge card</strong>
-              <p id="contract-output-copy">Actionable map context keyed by state and structure ID.</p>
-            </article>
+            <article class="contract-node"><small>Input</small><strong id="contract-input-title">county + year + condition key</strong><p id="contract-input-copy">New Jersey map controls or a synchronized focus request.</p></article>
+            <span class="contract-arrow" aria-hidden="true">&rarr;</span>
+            <article class="contract-node process"><small>Behavior</small><strong id="contract-process-title">query + normalize + render</strong><p id="contract-process-copy">Returns valid coordinates and builds a client FeatureLayer.</p></article>
+            <span class="contract-arrow" aria-hidden="true">&rarr;</span>
+            <article class="contract-node output"><small>Output</small><strong id="contract-output-title">markers + popup</strong><p id="contract-output-copy">Condition-colored bridges keyed by state, structure, and snapshot.</p></article>
           </div>
-          <div class="contract-meta">
-            <p><span>Persists</span><strong id="contract-persists">No — read-only view state</strong></p>
-            <p><span>Guardrail</span><strong id="contract-guardrail">Invalid coordinates are excluded from rendering.</strong></p>
-          </div>
+          <div class="contract-meta"><p><span>Persists</span><strong id="contract-persists">No &mdash; read-only view state</strong></p><p><span>Guardrail</span><strong id="contract-guardrail">Invalid coordinates and duplicate bridge identities are removed.</strong></p></div>
         </div>
       </div>
       <div class="contract-print-grid" aria-label="All function contracts">
-        <div><b>Map</b><span>filters / focus request</span><strong>markers + bridge card</strong></div>
-        <div><b>Bridgette</b><span>plain-language question</span><strong>streamed answer / map focus</strong></div>
-        <div><b>Converter</b><span>NBI TXT + XML</span><strong>SNBI JSON + validation</strong></div>
-        <div><b>Loader</b><span>SNBI JSON + year</span><strong>year-versioned records</strong></div>
-        <div><b>Report RAG</b><span>bridge file + question</span><strong>index + grounded answer</strong></div>
-        <div><b>Vision</b><span>file/image + question</span><strong>answer + cited regions</strong></div>
-        <div><b>Point cloud</b><span>raw scan + analysis params</span><strong>components + clearance + files</strong></div>
-        <div><b>Editor</b><span>main-record field edits</span><strong>updated row + separate validation</strong></div>
-        <div><b>Forecast / LCCA</b><span>history + scenario</span><strong>condition path + lifecycle cost</strong></div>
-        <div><b>DB admin</b><span>table/query/row operation</span><strong>rows or mutation result</strong></div>
+        <div><b>ArcGIS</b><span>county/year/field</span><strong>markers + popup</strong></div>
+        <div><b>Show bridge</b><span>sidebar phrase</span><strong>zoom + bridge card</strong></div>
+        <div><b>Bridgette</b><span>statewide question</span><strong>SQL + rows + stream</strong></div>
+        <div><b>KPIs</b><span>snapshot year</span><strong>cards + county chart</strong></div>
+        <div><b>History</b><span>observations + horizon</span><strong>provenance + Markov path</strong></div>
+        <div><b>LCCA</b><span>bridge + cost assumptions</span><strong>policy NPV comparison</strong></div>
+        <div><b>Loader</b><span>SNBI JSON + year</span><strong>relational snapshot</strong></div>
+        <div><b>Converter</b><span>NBI TXT/XML</span><strong>SNBI JSON + diagnostics</strong></div>
+        <div><b>File prep</b><span>bridge attachment set</span><strong>chunks + media + 768-D cache</strong></div>
+        <div><b>Retrieval</b><span>question + source set</span><strong>SQL + ranked text + stream</strong></div>
+        <div><b>Ask/Vision</b><span>question + sources + gate</span><strong>text stream or detections</strong></div>
+        <div><b>Point cloud</b><span>scan + mode + scale</span><strong>labels + fits + clearance</strong></div>
+        <div><b>Editor</b><span>main-row fields + year</span><strong>saved row + validation</strong></div>
+        <div><b>Custom</b><span>definition + rows</span><strong>non-SNBI operational data</strong></div>
       </div>
     </section>
 
-    <section class="slide is-dark" id="slide-11" data-title="Architecture" aria-labelledby="slide-11-title" tabindex="-1">
+    <section class="slide is-dark" id="slide-23" data-title="Architecture" aria-labelledby="slide-23-title" tabindex="-1">
       <div class="split-heading reveal">
-        <div>
-          <p class="eyebrow">10 · hosted architecture</p>
-          <h2 id="slide-11-title">One application boundary.<br>Two specialized AI roles.</h2>
-        </div>
-        <p>FastAPI serves the React application and JSON APIs. Generation stays separate from retrieval embeddings, while persistent bridge data remains on the OCI volume.</p>
+        <div><p class="eyebrow">22 &middot; hosted architecture</p><h2 id="slide-23-title">One application boundary.<br>Specialized model roles.</h2></div>
+        <p>FastAPI serves React and JSON APIs. Generation/judgment remains separate from retrieval embeddings, while bridge data and derived artifacts remain on the OCI volume.</p>
       </div>
-
       <div class="architecture reveal" aria-label="BridgeGuard hosted system architecture">
         <div class="arch-zone edge-zone">
           <small>Public edge</small>
-          <article><span>01</span><strong>Public landing</strong><p>logo + workspace entry</p></article>
-          <article><span>02</span><strong>Cloudflare Access</strong><p>one-time PIN · approved emails</p></article>
+          <article><span>01</span><strong>Public landing</strong><p>brand + workspace entry</p></article>
+          <article><span>02</span><strong>Cloudflare Access</strong><p>one-time PIN &middot; approved identities</p></article>
         </div>
         <div class="arch-connector"><span>identity headers</span></div>
         <div class="arch-zone app-zone">
-          <small>OCI · x86_64 · CPU</small>
-          <article class="wide"><span>03</span><strong>FastAPI + React</strong><p>/app + /api/* · role enforcement · streaming</p></article>
-          <article><span>04</span><strong>SQLite / SNBI</strong><p>bridge records · history · custom tables</p></article>
-          <article><span>05</span><strong>Persistent files</strong><p>reports · caches · point clouds · analysis</p></article>
+          <small>OCI &middot; x86_64 &middot; CPU</small>
+          <article class="wide"><span>03</span><strong>FastAPI + React</strong><p>/app + /api/* &middot; streaming &middot; role gates</p></article>
+          <article><span>04</span><strong>SQLite</strong><p>SNBI snapshots &middot; history &middot; custom tables</p></article>
+          <article><span>05</span><strong>Persistent files</strong><p>reports &middot; caches &middot; point clouds &middot; analysis</p></article>
         </div>
-        <div class="arch-fan">
-          <span></span><span></span>
-        </div>
+        <div class="arch-fan"><span></span><span></span></div>
         <div class="arch-services">
-          <article>
-            <small>Generation + judgment</small>
-            <strong>Cerebras</strong>
-            <p>Bridgette · report-image understanding · point-cloud scene review</p>
-          </article>
-          <article>
-            <small>Retrieval embeddings</small>
-            <strong>Nomic v1.5 / TEI</strong>
-            <p>pinned revision · normalized · 768 dimensions · CPU sidecar</p>
-          </article>
+          <article><small>Generation + VLM judgment</small><strong>Cerebras</strong><p>Bridgette &middot; image descriptions &middot; detection &middot; 3D candidate review</p></article>
+          <article><small>Retrieval embeddings</small><strong>Nomic v1.5 / TEI</strong><p>pinned revision &middot; normalized &middot; 768 dimensions &middot; CPU sidecar</p></article>
         </div>
       </div>
+      <div class="architecture-note reveal"><b>Boundary rule</b><span>Cerebras does not generate embeddings. Nomic does not answer questions. CPU geometry remains authoritative for numeric 3D measurements.</span></div>
     </section>
 
-    <section class="slide slide-close" id="slide-12" data-title="Operate" aria-labelledby="slide-12-title" tabindex="-1">
+    <section class="slide slide-close" id="slide-24" data-title="Operate" aria-labelledby="slide-24-title" tabindex="-1">
       <div class="close-layout">
         <div class="close-copy reveal">
-          <p class="eyebrow">11 · operating envelope</p>
-          <h2 id="slide-12-title">Ready for controlled, bridge-by-bridge operation.</h2>
-          <p>Operate one large point-cloud job at a time on the current budget instance. Concurrency is not server-enforced; completed evidence is persisted for reuse.</p>
+          <p class="eyebrow">23 &middot; operating envelope</p>
+          <h2 id="slide-24-title">Technically ready.<br>Concurrency still needs hardening.</h2>
+          <p>The current deployment is suitable for controlled bridge-by-bridge work. Multi-user isolation remains a separate engineering milestone.</p>
           <div class="limits-grid">
-            <article><strong>50 MB</strong><span>report upload limit</span></article>
-            <article><strong>250 MB</strong><span>production point-cloud override · repo default 500 MB</span></article>
+            <article><strong>50 MB</strong><span>report and converter file limit</span></article>
+            <article><strong>250 MB</strong><span>production point-cloud override</span></article>
             <article><strong>2 vCPU / 12 GB</strong><span>current OCI processing baseline</span></article>
             <article><strong>CPU only</strong><span>no laptop GPU required</span></article>
           </div>
         </div>
         <div class="readiness-board reveal">
-          <header><span>Hosted production inventory</span><b>READY</b></header>
-          <div class="readiness-row"><span>Inspection-report bridges</span><strong>10</strong></div>
-          <div class="readiness-row"><span>Registered point clouds</span><strong>15</strong></div>
-          <div class="readiness-row"><span>Processed point-cloud results</span><strong>16</strong></div>
-          <div class="readiness-row"><span>Report chunks embedded</span><strong>1,232</strong></div>
-          <p class="inventory-note">One legacy processed result is retained without a registered raw-source attachment.</p>
+          <header><span>Deployment truth / current design</span><b>CONTROLLED</b></header>
+          <div class="readiness-row"><span>Map / KPI / Editor snapshot year</span><strong>SCOPED</strong></div>
+          <div class="readiness-row"><span>Ask checkbox state</span><strong>LOCAL</strong></div>
+          <div class="readiness-row"><span>Report + point-cloud artifacts</span><strong>PERSISTED</strong></div>
+          <div class="readiness-row"><span>Bridgette / Ask cancellation</span><strong>GLOBAL</strong></div>
+          <div class="readiness-row"><span>Standalone Vision active document</span><strong>PROCESS</strong></div>
+          <p class="inventory-note">Next multi-user step: bind chat, cancellation, active documents, uploads, and history to authenticated user or tenant IDs.</p>
           <div class="role-strip">
-            <div><small>Viewer</small><span>read · map · chat · run analysis</span></div>
-            <div><small>Editor</small><span>upload · edit · delete</span></div>
-            <div><small>Admin</small><span>database · runtime settings</span></div>
+            <div><small>Viewer</small><span>read &middot; map &middot; chat &middot; analysis</span></div>
+            <div><small>Editor</small><span>upload &middot; main-row edit &middot; delete</span></div>
+            <div><small>Admin</small><span>raw database &middot; runtime settings</span></div>
           </div>
         </div>
       </div>
       <footer class="closing-mark reveal">
-        <div class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 48 24"><path d="M2 18h44M8 17V9m32 8V9M8 12h32M12 12c3-7 8-9 12-9s9 2 12 9"/></svg>
-        </div>
-        <span>BridgeGuard</span>
-        <i></i>
-        <strong>inventory → evidence → action</strong>
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 24"><path d="M2 18h44M8 17V9m32 8V9M8 12h32M12 12c3-7 8-9 12-9s9 2 12 9"/></svg></div>
+        <span>BridgeGuard</span><i></i><strong>inventory &rarr; evidence &rarr; action</strong>
       </footer>
     </section>
   </main>
 
-  <div class="keyboard-hint" aria-hidden="true"><kbd>←</kbd><kbd>→</kbd> navigate</div>
-
+  <div class="keyboard-hint" aria-hidden="true"><kbd>&larr;</kbd><kbd>&rarr;</kbd> navigate</div>
+  <script src="vendor/viz-js/viz-global.js"></script>
+  <script src="feature-graphs.js"></script>
   <script src="deck.js"></script>
 </body>
 </html>

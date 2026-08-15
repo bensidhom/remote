@@ -184,6 +184,15 @@ async function readCloudResponse(res: Response): Promise<{ result: ParseResult; 
   return { result: previewToResult(d), meta: d };
 }
 
+async function responseError(response: Response, fallback: string): Promise<Error> {
+  const payload = await response.json().catch(() => ({}));
+  const detail = payload?.detail;
+  const message = typeof detail === 'string'
+    ? detail
+    : detail?.message || detail?.code || payload?.message || payload?.code || `${fallback} (${response.status})`;
+  return new Error(message);
+}
+
 function parseXYZ(buffer: ArrayBuffer): ParseResult {
   const text = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
   const lines = text.split(/\r?\n/);
@@ -633,9 +642,92 @@ interface PointCloudProps {
   bridgeStateCode?: string | number;
   bridgeNumber?: string;
   bridgeName?: string;
+  dataYear?: string | number;
 }
 
-const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridgeNumber, bridgeName }) => {
+interface PointCloudSourceReview {
+  horizontalUnit: 'unknown' | 'metre' | 'international_foot' | 'us_survey_foot';
+  verticalUnit: 'unknown' | 'metre' | 'international_foot' | 'us_survey_foot';
+  frameKind: 'unknown' | 'projected_crs' | 'engineering_local' | 'scanner_local' | 'reconstruction_relative';
+  crs: string;
+  upAxis: '+x' | '-x' | '+y' | '-y' | '+z' | '-z';
+  evidence: string;
+  reviewed: boolean;
+  scanCount: number | null;
+  selectedScans: string;
+  registrationReference: string;
+  registrationRms: string;
+  registrationMaximumResidual: string;
+  registrationMethod: string;
+  registrationReviewed: boolean;
+}
+
+interface DurablePointCloudRun {
+  job_id: string;
+  run_id: string;
+  data_year?: number;
+  status: 'queued' | 'running' | 'cancellation_requested' | 'succeeded' | 'failed' | 'cancelled' | 'published';
+  phase: string;
+  progress: Record<string, any>;
+  error_code?: string | null;
+  source_sha256: string;
+  analysis_profile_sha256: string;
+  knowledge_pack_sha256: string;
+  snapshot_revision_id: string;
+  canonical_sha256: string;
+  counts: { sources: number; vlm_calls: number; components: number; measurements: number; reviews: number };
+  review_required: boolean;
+  published: boolean;
+  etag: string;
+}
+
+interface DurablePointCloudEvidence {
+  context: Record<string, any>;
+  sources: any[];
+  vlm_calls: any[];
+  components: any[];
+  measurements: any[];
+  reviews: any[];
+  knowledge_context?: {
+    trusted_snbi?: { field_values?: any[]; element_rows?: any[] };
+    cited_report_evidence?: { chunks?: any[]; sources?: any[] };
+    omissions?: Record<string, number>;
+  } | null;
+  truncated: boolean;
+}
+
+const POINT_CLOUD_COMPONENT_CLASSES = [
+  'deck_slab',
+  'girder_beam',
+  'diaphragm_bracing',
+  'bearing',
+  'pier_column',
+  'abutment_wingwall',
+  'parapet_railing',
+  'under_surface',
+  'attached_restriction_appurtenance',
+  'clutter',
+  'unknown_structure',
+] as const;
+
+const EMPTY_SOURCE_REVIEW: PointCloudSourceReview = {
+  horizontalUnit: 'unknown',
+  verticalUnit: 'unknown',
+  frameKind: 'unknown',
+  crs: '',
+  upAxis: '+z',
+  evidence: '',
+  reviewed: false,
+  scanCount: null,
+  selectedScans: '',
+  registrationReference: '0',
+  registrationRms: '',
+  registrationMaximumResidual: '',
+  registrationMethod: '',
+  registrationReviewed: false,
+};
+
+const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridgeNumber, bridgeName, dataYear }) => {
   const mountRef      = useRef<HTMLDivElement>(null);
   const rendererRef   = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef      = useRef<THREE.Scene | null>(null);
@@ -656,7 +748,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const originalFileRef  = useRef<File | null>(null); // kept for bridge save
 
   const [stats,       setStats]       = useState<PointStats | null>(null);
-  const [status,      setStatus]      = useState('Drop a point cloud file here or use Open File â€” .xyz  .ply  .e57  .las  .npz  .csv');
+  const [status,      setStatus]      = useState('Open an E57 source, or locally visualize .xyz, .ply, .las, .npz, or .csv.');
   const [loading,     setLoading]     = useState(false);
   const [dragging,    setDragging]    = useState(false);
   const [measurement, setMeasurement] = useState<Measurement>({ groundZ: null, soffitZ: null });
@@ -677,11 +769,17 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const [clearanceBusy, setClearanceBusy] = useState(false);
   const [analysisInfo, setAnalysisInfo] = useState<any | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [durableRun, setDurableRun] = useState<DurablePointCloudRun | null>(null);
+  const [durableEvidence, setDurableEvidence] = useState<DurablePointCloudEvidence | null>(null);
+  const [componentCorrections, setComponentCorrections] = useState<Record<string, string>>({});
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const durablePollAbortRef = useRef<AbortController | null>(null);
   // Ref mirror for the render loop (its closure is created once at mount):
   // while the server analyze runs, the viewer throttles its redraws so the
   // WebGL pass doesn't compete with SAM/qwen for the same laptop GPU.
   const analyzingRef = useRef(false);
   useEffect(() => { analyzingRef.current = analyzing; }, [analyzing]);
+  useEffect(() => () => durablePollAbortRef.current?.abort(), []);
   // Layer toggles for the one-pass result: fitted component volumes + Poisson mesh
   const analysisMeshRef = useRef<THREE.Mesh | null>(null);
   const [showVolumes, setShowVolumes] = useState(true);
@@ -697,8 +795,27 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const [viewMode,    setViewMode]    = useState<'points' | 'surface'>('points');
   // Bridge-linked cloud save/load
   const hasBridge = !!(bridgeStateCode && bridgeNumber);
-  const [cloudInfo,   setCloudInfo]   = useState<{ exists: boolean; filename?: string; size_bytes?: number; uploaded_at?: string; processed_exists?: boolean; processed_point_count?: number } | null>(null);
+  const [cloudInfo,   setCloudInfo]   = useState<{ exists: boolean; filename?: string; size_bytes?: number; uploaded_at?: string; accepted_result_exists?: boolean; accepted_result_data_year?: number; legacy_processed_exists?: boolean; processed_point_count?: number; source_profile?: any } | null>(null);
+  const [sourceReview, setSourceReview] = useState<PointCloudSourceReview>(EMPTY_SOURCE_REVIEW);
   const [saving,      setSaving]      = useState(false);
+  const [deleting,    setDeleting]    = useState(false);
+
+  useEffect(() => {
+    durablePollAbortRef.current?.abort();
+    setDurableRun(null);
+    setDurableEvidence(null);
+    setComponentCorrections({});
+  }, [bridgeStateCode, bridgeNumber, dataYear]);
+
+  useEffect(() => {
+    const originalIsE57 = !!originalFileRef.current?.name.toLowerCase().endsWith('.e57');
+    cloudScaleKnownRef.current = originalIsE57
+      && sourceReview.reviewed
+      && sourceReview.horizontalUnit === 'metre'
+      && sourceReview.verticalUnit === 'metre'
+      && !['unknown', 'reconstruction_relative'].includes(sourceReview.frameKind)
+      && sourceReview.evidence.trim().length >= 3;
+  }, [sourceReview]);
 
   useEffect(() => {
     if (!mountRef.current) return;
@@ -804,6 +921,36 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       .then(r => r.json())
       .then(d => {
         setCloudInfo(d);
+        const declaration = d.source_profile?.coordinate_declaration;
+        const frame = declaration?.frame;
+        if (frame) {
+          setSourceReview({
+            horizontalUnit: frame.horizontal_unit ?? 'unknown',
+            verticalUnit: frame.vertical_unit ?? 'unknown',
+            frameKind: frame.kind ?? 'unknown',
+            crs: frame.crs ?? '',
+            upAxis: (() => {
+              const up = Array.isArray(frame.up_vector) ? frame.up_vector.join(',') : '';
+              const axes: Record<string, PointCloudSourceReview['upAxis']> = {
+                '1,0,0': '+x', '-1,0,0': '-x', '0,1,0': '+y',
+                '0,-1,0': '-y', '0,0,1': '+z', '0,0,-1': '-z',
+              };
+              return axes[up] ?? '+z';
+            })(),
+            evidence: declaration.evidence_summary ?? '',
+            reviewed: declaration.reviewed === true,
+            scanCount: d.source_profile?.source_inspection?.total_scan_count ?? null,
+            selectedScans: Array.isArray(d.source_profile?.selected_scan_indices)
+              ? d.source_profile.selected_scan_indices.join(',') : '',
+            registrationReference: String(d.source_profile?.registration?.reference_scan_index ?? 0),
+            registrationRms: d.source_profile?.registration?.rms_metres != null
+              ? String(d.source_profile.registration.rms_metres) : '',
+            registrationMaximumResidual: d.source_profile?.registration?.maximum_residual_metres != null
+              ? String(d.source_profile.registration.maximum_residual_metres) : '',
+            registrationMethod: d.source_profile?.registration?.method ?? '',
+            registrationReviewed: d.source_profile?.registration?.reviewed === true,
+          });
+        }
         if (!d.exists) {
           setStatus(`No saved point cloud or processed result is mapped to bridge ${bn}. Open a file to attach and process one.`);
         }
@@ -885,14 +1032,13 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   const saveToBridge = useCallback(async () => {
     if (!hasBridge) return;
-    let blob: Blob, fname: string;
-    if (originalFileRef.current) {                 // opened file â€” preserve it exactly
-      blob = originalFileRef.current; fname = originalFileRef.current.name;
-    } else {                                       // reconstructed/derived â€” serialise what's shown
-      const ply = buildPLYBlob();
-      if (!ply) { setStatus('Nothing to save â€” load or reconstruct a cloud first.'); return; }
-      blob = ply; fname = `${cloudBaseName()}.ply`;
+    const original = originalFileRef.current;
+    if (!original || !original.name.toLowerCase().endsWith('.e57')) {
+      setStatus('Only an original E57 file can be attached as source evidence. Other formats remain local visualization only.');
+      return;
     }
+    const blob: Blob = original;
+    const fname = original.name;
     const sc = String(bridgeStateCode);
     const bn = String(bridgeNumber);
     setSaving(true);
@@ -900,20 +1046,72 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     try {
       const fd = new FormData();
       fd.append('file', blob, fname);
+      fd.append('horizontal_unit', sourceReview.horizontalUnit);
+      fd.append('vertical_unit', sourceReview.verticalUnit);
+      fd.append('frame_kind', sourceReview.frameKind);
+      fd.append('crs', sourceReview.crs.trim());
+      fd.append('up_axis', sourceReview.upAxis);
+      fd.append('declaration_evidence', sourceReview.evidence.trim());
+      fd.append('declaration_reviewed', String(sourceReview.reviewed));
+      fd.append('selected_scan_indices', sourceReview.selectedScans.trim());
+      if (sourceReview.registrationReference.trim()) fd.append('registration_reference_scan', sourceReview.registrationReference.trim());
+      if (sourceReview.registrationRms.trim()) fd.append('registration_rms_metres', sourceReview.registrationRms.trim());
+      if (sourceReview.registrationMaximumResidual.trim()) fd.append('registration_maximum_residual_metres', sourceReview.registrationMaximumResidual.trim());
+      fd.append('registration_method', sourceReview.registrationMethod.trim());
+      fd.append('registration_reviewed', String(sourceReview.registrationReviewed));
       const res = await fetch(`/api/bridges/${sc}/${bn}/point-cloud`, { method: 'POST', body: fd });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error((err as any).detail ?? `Upload failed (${res.status})`);
+        const detail = (err as any).detail;
+        throw new Error(
+          typeof detail === 'string'
+            ? detail
+            : detail?.message || detail?.code || `Upload failed (${res.status})`,
+        );
       }
       const d = await res.json();
-      setCloudInfo({ exists: true, filename: d.filename, size_bytes: d.size_bytes });
-      setStatus(`Saved "${d.filename}" to bridge ${bn}.`);
+      setCloudInfo({ exists: true, filename: d.filename, size_bytes: d.size_bytes, source_profile: d.source_profile });
+      setStatus(d.source_profile?.metric_processing_authorized
+        ? `Saved and reviewed "${d.filename}" for metric processing.`
+        : `Saved "${d.filename}" for visualization; units/gravity or the reviewed server parser remain unverified.`);
     } catch (err) {
       setStatus(`Save error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
-  }, [hasBridge, bridgeStateCode, bridgeNumber, buildPLYBlob, cloudBaseName]);
+  }, [hasBridge, bridgeStateCode, bridgeNumber, sourceReview]);
+
+  const deleteFromBridge = useCallback(async () => {
+    if (!hasBridge || !cloudInfo?.exists || deleting) return;
+    const reason = window.prompt('Why should this saved, unprocessed point-cloud source be deleted?')?.trim();
+    if (!reason) {
+      setStatus('Deletion cancelled. An audit reason is required.');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete the saved point cloud for bridge ${bridgeNumber}? Sources referenced by durable run evidence cannot be deleted here.`,
+    );
+    if (!confirmed) return;
+    setDeleting(true);
+    setStatus('Requesting audited point-cloud deletion…');
+    try {
+      const url = `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud?reason=${encodeURIComponent(reason)}`;
+      const response = await fetch(url, { method: 'DELETE' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = payload?.detail;
+        throw new Error(typeof detail === 'string' ? detail : detail?.message || detail?.code || `Delete failed (${response.status})`);
+      }
+      setCloudInfo({ exists: false, accepted_result_exists: false });
+      setStatus(payload?.status === 'deleted'
+        ? 'The unprocessed saved point cloud was deleted with an audit receipt.'
+        : 'Deletion was accepted and will be retried by the durable cleanup worker.');
+    } catch (error) {
+      setStatus(`Delete error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [hasBridge, cloudInfo?.exists, deleting, bridgeStateCode, bridgeNumber]);
 
   // loadFromBridge is defined after processFile (below) because it depends on it.
   const loadFromBridgeRef = useRef<(() => Promise<void>) | null>(null);
@@ -1023,7 +1221,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         if (rw.center_point) vline(rw.center_point, 0x10b981, 2);            // centre = green
       });
     } else if (info.clearance_line) {
-      // Single line (waterway navigation clearance, or fallback).
+      // Single line (unvalidated water-surface gap proxy, or fallback).
       const l = info.clearance_line;
       vline([l.ground[0], l.ground[1], l.ground[2], l.soffit[2]], info.waterway?.is_waterway ? 0x3b82f6 : 0xfacc15, 2);
     }
@@ -1210,7 +1408,6 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   const processFile = useCallback(async (file: File) => {
     originalFileRef.current = file;
-    cloudScaleKnownRef.current = true;   // real scans carry real units
     setLoading(true); setFileName(file.name);
     setStatus(`Parsing ${file.name}â€¦`);
     setMeasurement({ groundZ: null, soffitZ: null });
@@ -1227,6 +1424,12 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     origPosRef.current = null;
     try {
       const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+      // Only E57 has a reviewed server source parser in this release. Other
+      // formats can be viewed locally, but their units must not be guessed.
+      cloudScaleKnownRef.current = false;
+      setSourceReview(ext === 'e57'
+        ? { ...EMPTY_SOURCE_REVIEW, horizontalUnit: 'metre', verticalUnit: 'metre', frameKind: 'scanner_local' }
+        : EMPTY_SOURCE_REVIEW);
       // E57: parse on the backend (pye57) â€” reads all scans reliably, up to ~2M points.
       if (ext === 'e57') {
         setStatus('Parsing E57 on the serverâ€¦');
@@ -1237,6 +1440,13 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `E57 parse failed (${res.status})`);
         const { result: pr, meta } = await readCloudResponse(res);
         loadIntoScene(pr);
+        const scanCount = Number(meta.source_profile?.total_scan_count ?? meta.scan_count ?? 1);
+        setSourceReview(v => ({
+          ...v,
+          scanCount,
+          selectedScans: scanCount === 1 ? '0' : '',
+          registrationReviewed: false,
+        }));
         setStatus(`Loaded ${(meta.rendered_point_count ?? 0).toLocaleString()} of ${(meta.original_point_count ?? 0).toLocaleString()} points${meta.downsampled ? ' (downsampled)' : ''} from "${file.name}"`);
         return;
       }
@@ -1288,6 +1498,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Reconstruction failed (${res.status})`);
       const d = await res.json();
       originalFileRef.current = null;
+      setSourceReview(EMPTY_SOURCE_REVIEW);
       setSegLabels(null); setSegDone(false); setSegClasses(DEFAULT_SEG_CLASSES);
       setSegVisible(Array(DEFAULT_SEG_CLASSES.length).fill(true));
       setClearanceInfo(null); setMeasurement({ groundZ: null, soffitZ: null });
@@ -1311,39 +1522,52 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       setLoading(true);
       setStatus('Loading saved point cloudâ€¦');
       try {
-        // Prefer the completed saved analysis. It contains the already-cleaned
-        // cloud plus classes, fitted geometry, dimensions, and clearance.
-        const savedAnalysis = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/processed`);
-        if (savedAnalysis.ok) {
-          const analysis = await savedAnalysis.json();
-          const processedPreview = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/processed/preview?binary=1`);
-          if (processedPreview.ok) {
-            const { result: pr, meta } = await readCloudResponse(processedPreview);
-            originalFileRef.current = null;
-            origColorsRef.current = null;
-            origPosRef.current = null;
-            cloudScaleKnownRef.current = analysis.scale_known !== false;
-            loadIntoScene(pr);
-            setAnalysisInfo(analysis);
-            setClearanceInfo(analysis.clearance ?? null);
-            if (analysis.clearance) setMeasurement({
-              groundZ: analysis.clearance.ground_z ?? null,
-              soffitZ: analysis.clearance.soffit_z ?? null,
-            });
-            const classes: SegClass[] = (analysis.classes || []).map((c: any) => ({
-              id: c.id, key: c.key, name: c.name, color_rgb: c.color_rgb,
-              color_hex: c.color_hex, count: c.count ?? 0, material: c.material,
-              is_clearance: c.is_clearance,
-            }));
-            const labels = analysis.labels_b64u8 ? b64ToU8(analysis.labels_b64u8) : null;
-            setSegClasses(classes);
-            setSegLabels(labels);
-            setSegDone(!!labels);
-            setSegVisible(Array(classes.length).fill(true));
-            setStatus(`Loaded saved processed result: ${(meta.rendered_point_count ?? 0).toLocaleString()} cleaned points Â· ${analysis.component_count ?? 0} fitted components`);
-            setLoading(false);
-            return;
-          }
+        // Accepted durable results are the only processed default. Legacy
+        // current.json pointers are intentionally ignored by the active UI.
+        const yearQuery = dataYear == null || dataYear === '' ? '' : `?data_year=${Number(dataYear)}`;
+        const published = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published${yearQuery}`);
+        if (published.ok) {
+          const run = await published.json() as DurablePointCloudRun;
+          const separator = yearQuery ? '&' : '?';
+          const [resultResponse, previewResponse, evidenceResponse] = await Promise.all([
+            fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published/result${yearQuery}`),
+            fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published/preview${yearQuery}${separator}binary=1`),
+            fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published/evidence${yearQuery}`),
+          ]);
+          if (!resultResponse.ok) throw await responseError(resultResponse, 'Accepted result failed');
+          if (!previewResponse.ok) throw await responseError(previewResponse, 'Accepted preview failed');
+          if (!evidenceResponse.ok) throw await responseError(evidenceResponse, 'Accepted evidence failed');
+          const analysis = await resultResponse.json();
+          const { result: preview, meta } = await readCloudResponse(previewResponse);
+          const evidence = await evidenceResponse.json() as DurablePointCloudEvidence;
+          originalFileRef.current = null;
+          cloudScaleKnownRef.current = analysis.scale_known !== false;
+          loadIntoScene(preview);
+          origPosRef.current = new Float32Array(preview.positions);
+          origColorsRef.current = new Float32Array(preview.colors);
+          setAnalysisInfo(analysis);
+          applyAnalysisResult(analysis);
+          setClearanceInfo(analysis.clearance ?? null);
+          if (analysis.clearance) setMeasurement({
+            groundZ: analysis.clearance.ground_z ?? null,
+            soffitZ: analysis.clearance.soffit_z ?? null,
+          });
+          setDurableRun(run);
+          setDurableEvidence(evidence);
+          setComponentCorrections({});
+          setCloudInfo(previous => ({
+            ...(previous ?? { exists: true }),
+            exists: true,
+            accepted_result_exists: true,
+            accepted_result_data_year: run.data_year,
+            processed_point_count: meta.rendered_point_count,
+          }));
+          setStatus(`Loaded accepted result: ${(meta.rendered_point_count ?? 0).toLocaleString()} points - ${analysis.component_count ?? 0} component candidates`);
+          setLoading(false);
+          return;
+        }
+        if (published.status !== 404) {
+          throw await responseError(published, 'Accepted result lookup failed');
         }
         // E57 is parsed server-side (pye57) â€” no download/re-upload of the large file.
         const pv = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/preview?max_points=${E57_MAX_POINTS}&binary=1`);
@@ -1374,7 +1598,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         setLoading(false);
       }
     };
-  }, [hasBridge, bridgeStateCode, bridgeNumber, processFile]);
+  }, [hasBridge, bridgeStateCode, bridgeNumber, dataYear, processFile, loadIntoScene, applyAnalysisResult]);
 
   // Auto-load the saved cloud once we know one exists (so the tab isn't blank).
   const autoLoadedRef = useRef('');
@@ -1572,9 +1796,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     setSegRunning(true);
     setStatus('Hosted AI segmentation + naming on the server...');
     try {
-      const url = (hasBridge
-        ? `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/segment`
-        : '/api/point-cloud/segment') + binQS({ use_qwen: useHostedVlm, use_local_sam: false });
+      const url = '/api/point-cloud/segment' + binQS({ use_qwen: useHostedVlm, use_local_sam: false });
       const res = await fetch(url, { method: 'POST', headers: BIN_HDRS, body: gatherPointsBinary().buf });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Segmentation failed (${res.status})`);
       const d = await res.json();
@@ -1609,17 +1831,15 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     } finally {
       setSegRunning(false);
     }
-  }, [stats, hasBridge, bridgeStateCode, bridgeNumber, useHostedVlm, applySegColors, applyInstanceColors, gatherPointsBinary]);
+  }, [stats, useHostedVlm, applySegColors, applyInstanceColors, gatherPointsBinary]);
 
   // â”€â”€ Backend clearance â€” RANSAC ground/soffit + DB cross-check â”€â”€
   const runBackendClearance = useCallback(async () => {
     if (!pointsRef.current || !stats) return;
     setClearanceBusy(true);
-    setStatus('Computing vertical clearance on the serverâ€¦');
+    setStatus('Computing a screening vertical gap on the server…');
     try {
-      const url = (hasBridge
-        ? `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/clearance`
-        : '/api/point-cloud/clearance') + binQS({
+      const url = '/api/point-cloud/clearance' + binQS({
           origin: `${stats.originX},${stats.originY},${stats.originZ}`,
           scale_known: cloudScaleKnownRef.current });
       const res = await fetch(url, { method: 'POST', headers: BIN_HDRS, body: gatherPointsBinary().buf });
@@ -1636,42 +1856,192 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     } finally {
       setClearanceBusy(false);
     }
-  }, [stats, hasBridge, bridgeStateCode, bridgeNumber, gatherPointsBinary]);
+  }, [stats, gatherPointsBinary]);
 
-  // One-step processing: clean â†’ isolate bridge â†’ segment â†’ fit structural volumes â†’ measure.
+  const loadDurableResult = useCallback(async (run: DurablePointCloudRun, signal: AbortSignal) => {
+    const [resultResponse, previewResponse, evidenceResponse] = await Promise.all([
+      fetch(`/api/point-cloud/runs/${run.run_id}/result`, { signal }),
+      fetch(`/api/point-cloud/runs/${run.run_id}/preview?binary=1`, { signal }),
+      fetch(`/api/point-cloud/runs/${run.run_id}/evidence`, { signal }),
+    ]);
+    if (!resultResponse.ok) throw await responseError(resultResponse, 'Candidate result failed');
+    if (!previewResponse.ok) throw await responseError(previewResponse, 'Candidate preview failed');
+    if (!evidenceResponse.ok) throw await responseError(evidenceResponse, 'Candidate evidence failed');
+    const analysis = await resultResponse.json();
+    const { result: preview, meta } = await readCloudResponse(previewResponse);
+    const evidence = await evidenceResponse.json() as DurablePointCloudEvidence;
+    loadIntoScene(preview);
+    origPosRef.current = new Float32Array(preview.positions);
+    origColorsRef.current = new Float32Array(preview.colors);
+    setAnalysisInfo(analysis);
+    applyAnalysisResult(analysis);
+    setClearanceInfo(analysis.clearance ?? null);
+    if (analysis.clearance) {
+      setMeasurement({
+        groundZ: analysis.clearance.ground_z ?? null,
+        soffitZ: analysis.clearance.soffit_z ?? null,
+      });
+    }
+    setDurableEvidence(evidence);
+    setComponentCorrections({});
+    setCloudInfo(prev => ({
+      ...(prev ?? { exists: true }),
+      exists: true,
+      accepted_result_exists: run.published,
+      processed_point_count: meta.rendered_point_count,
+    }));
+    setStatus(`Review candidate ready: ${analysis.component_count ?? 0} components · ${(evidence.measurements || []).length} feature-bound measurement candidate(s). No value is published until accepted.`);
+  }, [applyAnalysisResult, loadIntoScene]);
+
+  const pollDurableRun = useCallback(async (initial: DurablePointCloudRun, signal: AbortSignal) => {
+    let run = initial;
+    for (let attempt = 0; attempt < 1200; attempt++) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (attempt > 0) {
+        const response = await fetch(`/api/point-cloud/runs/${run.run_id}`, { signal });
+        if (!response.ok) throw await responseError(response, 'Run status failed');
+        run = await response.json() as DurablePointCloudRun;
+        setDurableRun(run);
+      }
+      const completed = Number(run.progress?.completed ?? 0);
+      const total = Number(run.progress?.total ?? 8);
+      setStatus(`Point-cloud run ${run.phase.replace(/_/g, ' ')} · ${completed}/${total}`);
+      if (run.status === 'succeeded') {
+        await loadDurableResult(run, signal);
+        return run;
+      }
+      if (run.status === 'failed' || run.status === 'cancelled') {
+        throw new Error(run.error_code || `Point-cloud run ${run.status}`);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(resolve, 1500);
+        signal.addEventListener('abort', () => {
+          window.clearTimeout(timer);
+          reject(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      });
+    }
+    throw new Error('Point-cloud run exceeded the bounded polling window. It remains durable and can be resumed.');
+  }, [loadDurableResult]);
+
+  // Saved bridge sources use the durable two-phase worker. Ad-hoc local clouds
+  // remain an explicitly non-persisting research preview.
   const runAnalyze = useCallback(async () => {
     if (!pointsRef.current || !stats) return;
     setAnalyzing(true);
-    setStatus('Processing bridge (clean, isolate, segment, fit, measure)...');
+    setDurableEvidence(null);
+    setStatus(hasBridge ? 'Enqueuing an exact-revision point-cloud run…' : 'Processing an ad-hoc research preview…');
     try {
-      const url = (hasBridge
-        ? `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/analyze`
-        : '/api/point-cloud/analyze') + binQS({
-          origin: `${stats.originX},${stats.originY},${stats.originZ}`,
-          scale_known: cloudScaleKnownRef.current,
-          use_vlm: useHostedVlm,
-          use_ai_cleaning: useAiCleaning,
-          use_local_sam: false,
-          model_mode: 'clearance' });
-      const res = await fetch(url, { method: 'POST', headers: BIN_HDRS, body: gatherPointsBinary().buf });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Analysis failed (${res.status})`);
-      const d = await res.json();
-      if (d.status !== 'success') { setStatus(`Analysis: ${d.status}`); setAnalyzing(false); return; }
-      setAnalysisInfo(d);
-      applyAnalysisResult(d);                   // colour kept points + hide removed (one pass)
-      setClearanceInfo(d.clearance);            // reuse the clearance drawing + panel
-      if (d.clearance) setMeasurement({ groundZ: d.clearance.ground_z ?? null, soffitZ: d.clearance.soffit_z ?? null });
-      if (hasBridge && d.persistence?.saved) {
-        setCloudInfo(prev => ({ ...(prev ?? { exists: true }), exists: true, processed_exists: true, processed_point_count: d.persistence.processed_point_count }));
+      if (hasBridge) {
+        if (!cloudInfo?.exists || cloudInfo.source_profile?.metric_processing_authorized !== true) {
+          throw new Error('A saved E57 source with a reviewed metric-ready source receipt is required.');
+        }
+        durablePollAbortRef.current?.abort();
+        const controller = new AbortController();
+        durablePollAbortRef.current = controller;
+        const idempotencyKey = crypto.randomUUID();
+        const response = await fetch(
+          `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/runs`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+            body: JSON.stringify({
+              data_year: dataYear == null || dataYear === '' ? null : Number(dataYear),
+              model_mode: 'clearance',
+              use_vlm: useHostedVlm,
+            }),
+            signal: controller.signal,
+          },
+        );
+        if (!response.ok) throw await responseError(response, 'Analysis enqueue failed');
+        const run = await response.json() as DurablePointCloudRun;
+        setDurableRun(run);
+        await pollDurableRun(run, controller.signal);
+        return;
       }
-      const cl = d.clearance || {};
-      setStatus(`Modeled: ${d.component_count} components Â· clearance ${cl.scale_known === false ? `${cl.min_clearance_m} (relative)` : `${cl.min_clearance_ft}â€² min`} Â· kept ${d.cleaning?.kept_points?.toLocaleString()} pts`);
-    } catch (err) {
-      setStatus(`Analysis error: ${err instanceof Error ? err.message : String(err)}`);
+      const url = '/api/point-cloud/analyze' + binQS({
+        origin: `${stats.originX},${stats.originY},${stats.originZ}`,
+        scale_known: cloudScaleKnownRef.current,
+        use_vlm: useHostedVlm,
+        use_ai_cleaning: useAiCleaning,
+        use_local_sam: false,
+        model_mode: 'clearance',
+      });
+      const response = await fetch(url, { method: 'POST', headers: BIN_HDRS, body: gatherPointsBinary().buf });
+      if (!response.ok) throw await responseError(response, 'Ad-hoc analysis failed');
+      const analysis = await response.json();
+      if (analysis.status !== 'success') throw new Error(`Analysis: ${analysis.status}`);
+      setAnalysisInfo(analysis);
+      applyAnalysisResult(analysis);
+      setClearanceInfo(analysis.clearance);
+      if (analysis.clearance) setMeasurement({ groundZ: analysis.clearance.ground_z ?? null, soffitZ: analysis.clearance.soffit_z ?? null });
+      setStatus('Ad-hoc research preview complete. It is not persisted or publishable.');
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setStatus('Point-cloud status polling stopped. The durable job state remains on the server.');
+      } else {
+        setStatus(`Analysis error: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
       setAnalyzing(false);
     }
-  }, [stats, hasBridge, bridgeStateCode, bridgeNumber, useHostedVlm, useAiCleaning, gatherPointsBinary, applyAnalysisResult]);
+  }, [stats, hasBridge, cloudInfo, bridgeStateCode, bridgeNumber, dataYear, useHostedVlm, useAiCleaning, gatherPointsBinary, applyAnalysisResult, pollDurableRun]);
+
+  const cancelDurableRun = useCallback(async () => {
+    if (!durableRun || !['queued', 'running', 'cancellation_requested'].includes(durableRun.status)) return;
+    try {
+      const response = await fetch(`/api/point-cloud/runs/${durableRun.run_id}/cancel`, { method: 'POST' });
+      if (!response.ok) throw await responseError(response, 'Cancel failed');
+      const cancelled = await response.json() as DurablePointCloudRun;
+      setDurableRun(cancelled);
+      durablePollAbortRef.current?.abort();
+      setStatus('Cancellation was recorded durably. A blocking provider call may stop at its next application boundary.');
+    } catch (error) {
+      setStatus(`Cancel error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [durableRun]);
+
+  const reviewDurableRun = useCallback(async (decision: 'accept' | 'reject') => {
+    if (!durableRun || durableRun.status !== 'succeeded' || reviewBusy) return;
+    const reason = window.prompt(
+      decision === 'accept'
+        ? 'Describe the evidence reviewed before accepting this point-cloud candidate.'
+        : 'Explain why this point-cloud candidate is rejected.',
+    )?.trim();
+    if (!reason || reason.length < 3) return;
+    setReviewBusy(true);
+    try {
+      const corrections = Object.fromEntries(
+        Object.entries(componentCorrections)
+          .filter(([, value]) => value)
+          .map(([candidateId, finalClass]) => [`/components/${candidateId}/final_class`, finalClass]),
+      );
+      const response = await fetch(`/api/point-cloud/runs/${durableRun.run_id}/review`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'If-Match': durableRun.etag,
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        body: JSON.stringify({ decision, reason, corrections }),
+      });
+      if (!response.ok) throw await responseError(response, 'Review failed');
+      const reviewed = await response.json();
+      const statusResponse = await fetch(`/api/point-cloud/runs/${durableRun.run_id}`);
+      if (!statusResponse.ok) throw await responseError(statusResponse, 'Reviewed status failed');
+      const current = await statusResponse.json() as DurablePointCloudRun;
+      setDurableRun(current);
+      const evidenceResponse = await fetch(`/api/point-cloud/runs/${durableRun.run_id}/evidence`);
+      if (evidenceResponse.ok) setDurableEvidence(await evidenceResponse.json());
+      setStatus(reviewed.published
+        ? 'Candidate accepted and published with an immutable review receipt.'
+        : 'Candidate rejected. The run evidence remains immutable and unpublished.');
+    } catch (error) {
+      setStatus(`Review error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [durableRun, reviewBusy, componentCorrections]);
 
   const toggleSegVisibility = useCallback((i: number) => {
     if (!pointsRef.current || !segLabels) return;
@@ -1713,6 +2083,17 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   const clearance = measurement.groundZ !== null && measurement.soffitZ !== null
     ? parseFloat(Math.abs(measurement.soffitZ - measurement.groundZ).toFixed(3)) : null;
+  const sourceUploadEligible = !!originalFileRef.current?.name.toLowerCase().endsWith('.e57');
+  const unitLabel = (unit: PointCloudSourceReview['horizontalUnit']) => ({
+    metre: 'm',
+    international_foot: 'ft',
+    us_survey_foot: 'US-ft',
+    unknown: 'source units',
+  }[unit]);
+  const sourceInputStyle: React.CSSProperties = {
+    width: '100%', border: '1px solid #cbd5e1', borderRadius: 6, padding: '5px 6px',
+    fontSize: 11, color: SX.text, background: '#fff',
+  };
 
   return (
     <div className="bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100"
@@ -1741,34 +2122,41 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
               onClick={loadFromBridge}
               disabled={loading}
               className="pcbtn pcbtn-outline"
-              title={cloudInfo.processed_exists ? 'Load the complete saved processed result' : `Load saved: ${cloudInfo.filename}`}
+              title={cloudInfo.accepted_result_exists ? 'Load the accepted, evidence-bound result' : `Load saved source: ${cloudInfo.filename}`}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4M17 9l-5 5-5-5M12 12.8V2.5"/>
               </svg>
-              {cloudInfo.processed_exists ? 'Load Saved Result' : 'Load Saved Cloud'}
+              {cloudInfo.accepted_result_exists ? 'Load Accepted Result' : 'Load Saved Cloud'}
             </button>
           )}
-          {hasBridge && cloudInfo?.processed_exists && (
-            <a
-              href={`/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/processed/download?format=ply`}
+          {hasBridge && cloudInfo?.exists && (
+            <button
+              onClick={deleteFromBridge}
+              disabled={deleting}
               className="pcbtn pcbtn-outline"
-              title="Download the bridge's saved cleaned and classified point cloud"
+              title="Delete an unprocessed saved source with an audit reason; durable evidence is protected"
             >
-              Download Result .ply
-            </a>
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6m3 0V4h8v2M10 11v5M14 11v5"/>
+              </svg>
+              {deleting ? 'Deleting…' : 'Delete Saved Cloud'}
+            </button>
           )}
-          {hasBridge && stats && (
+          {hasBridge && stats && !cloudInfo?.exists && (
             <button
               onClick={saveToBridge}
-              disabled={saving}
+              disabled={saving || !sourceUploadEligible}
               className="pcbtn pcbtn-success"
+              title={sourceUploadEligible
+                ? 'Attach the exact E57 bytes and source-coordinate review receipt'
+                : 'This format is available for local visualization only; only original E57 source files can be attached.'}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                 <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
               </svg>
-              {saving ? 'Savingâ€¦' : (cloudInfo?.exists ? 'Re-save' : 'Save to Bridge')}
+              {saving ? 'Savingâ€¦' : sourceUploadEligible ? 'Save E57 Source' : 'View-only Format'}
             </button>
           )}
           {stats && (
@@ -1791,6 +2179,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
             </svg>
             Open File
             <input type="file" accept=".xyz,.ply,.e57,.las,.npz,.csv,.txt,.pcd"
+              title="E57 can be attached as source evidence. Other listed formats are local visualization only."
               onChange={(e) => { const f = e.target.files?.[0]; if (f) processFile(f); e.target.value = ''; }}
               style={{ display: 'none' }} />
           </label>
@@ -1802,6 +2191,11 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
             </button>
           )}
         </div>
+      </div>
+
+      <div role="note" aria-label="Point-cloud result limitation"
+        style={{ padding: '7px 20px', color: '#92400e', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 12, fontWeight: 600 }}>
+        Research screening only — point-cloud dimensions and clearances are not survey measurements, accepted SNBI values, or engineering determinations.
       </div>
 
       {/* Body */}
@@ -1839,7 +2233,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
                 <div style={{ fontWeight: 600, fontSize: 15, color: '#64748b' }}>No point cloud loaded</div>
                 <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 4 }}>Drag &amp; drop or click "Open File"</div>
-                <div style={{ fontSize: 12, color: '#cbd5e1', marginTop: 6 }}>.xyz Â· .ply Â· .e57 Â· .las Â· .npz Â· .csv</div>
+                <div style={{ fontSize: 12, color: '#cbd5e1', marginTop: 6 }}>.e57 source Â· other formats view-only</div>
               </div>
             </div>
           )}
@@ -1852,9 +2246,13 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
           {clearance !== null && (
             <div style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(255,255,255,0.94)', border: '1px solid #a7f3d0', borderRadius: 10, padding: '10px 16px', zIndex: 5, backdropFilter: 'blur(6px)', boxShadow: '0 2px 10px rgba(15,23,42,0.08)' }}>
-              <div style={{ fontSize: 11, color: '#059669', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>Clearance</div>
-              <div style={{ fontSize: 26, fontWeight: 800, color: '#047857', lineHeight: 1.1 }}>{clearance.toFixed(3)} m</div>
-              <div style={{ fontSize: 11, color: '#64748b' }}>{(clearance * 3.28084).toFixed(2)} ft</div>
+              <div style={{ fontSize: 11, color: '#059669', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>Screening gap</div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: '#047857', lineHeight: 1.1 }}>
+                {clearance.toFixed(3)} {cloudScaleKnownRef.current ? unitLabel(sourceReview.verticalUnit) : 'relative'}
+              </div>
+              {cloudScaleKnownRef.current && sourceReview.verticalUnit === 'metre' && (
+                <div style={{ fontSize: 11, color: '#64748b' }}>{(clearance * 3.28084).toFixed(2)} ft</div>
+              )}
             </div>
           )}
 
@@ -1874,14 +2272,108 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
                 <StatRow label="File"   value={fileName} mono />
                 <div style={{ marginTop: 5, paddingTop: 6, borderTop: '1px solid ' + SX.border }}>
                   <div style={{ fontWeight: 600, fontSize: 10, marginBottom: 5, color: SX.label, letterSpacing: 0.4 }}>BOUNDING BOX</div>
-                  <StatRow label="X span" value={`${stats.spanX.toFixed(2)} m`} />
-                  <StatRow label="Y span" value={`${stats.spanY.toFixed(2)} m`} />
-                  <StatRow label="Z span" value={`${stats.spanZ.toFixed(2)} m`} />
-                  <StatRow label="Z min"  value={`${stats.minZ.toFixed(3)} m`} />
-                  <StatRow label="Z max"  value={`${stats.maxZ.toFixed(3)} m`} />
+                  <StatRow label="X span" value={`${stats.spanX.toFixed(2)} ${unitLabel(sourceReview.horizontalUnit)}`} />
+                  <StatRow label="Y span" value={`${stats.spanY.toFixed(2)} ${unitLabel(sourceReview.horizontalUnit)}`} />
+                  <StatRow label="Z span" value={`${stats.spanZ.toFixed(2)} ${unitLabel(sourceReview.verticalUnit)}`} />
+                  <StatRow label="Z min"  value={`${stats.minZ.toFixed(3)} ${unitLabel(sourceReview.verticalUnit)}`} />
+                  <StatRow label="Z max"  value={`${stats.maxZ.toFixed(3)} ${unitLabel(sourceReview.verticalUnit)}`} />
                 </div>
               </div>
             ) : <div style={{ fontSize: 12, color: SX.label }}>No data loaded</div>}
+          </PanelSection>
+
+          <PanelSection title="Source Coordinates">
+            {!sourceUploadEligible ? (
+              <div style={{ fontSize: 11, color: '#92400e', lineHeight: 1.35 }}>
+                Local visualization only. This format has no reviewed server source parser and cannot authorize metric processing.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 10.5 }}>
+                <label>Horizontal units
+                  <select value={sourceReview.horizontalUnit} style={sourceInputStyle}
+                    onChange={e => setSourceReview(v => ({ ...v, horizontalUnit: e.target.value as PointCloudSourceReview['horizontalUnit'], reviewed: false }))}>
+                    <option value="unknown">Unknown</option><option value="metre">Metres</option>
+                    <option value="international_foot">International feet</option><option value="us_survey_foot">US survey feet</option>
+                  </select>
+                </label>
+                <label>Vertical units
+                  <select value={sourceReview.verticalUnit} style={sourceInputStyle}
+                    onChange={e => setSourceReview(v => ({ ...v, verticalUnit: e.target.value as PointCloudSourceReview['verticalUnit'], reviewed: false }))}>
+                    <option value="unknown">Unknown</option><option value="metre">Metres</option>
+                    <option value="international_foot">International feet</option><option value="us_survey_foot">US survey feet</option>
+                  </select>
+                </label>
+                <label>Coordinate frame
+                  <select value={sourceReview.frameKind} style={sourceInputStyle}
+                    onChange={e => setSourceReview(v => ({ ...v, frameKind: e.target.value as PointCloudSourceReview['frameKind'], reviewed: false }))}>
+                    <option value="unknown">Unknown</option><option value="scanner_local">Scanner local</option>
+                    <option value="engineering_local">Engineering local</option><option value="projected_crs">Projected CRS</option>
+                    <option value="reconstruction_relative">Relative reconstruction</option>
+                  </select>
+                </label>
+                {sourceReview.frameKind === 'projected_crs' && (
+                  <label>CRS identifier
+                    <input value={sourceReview.crs} placeholder="e.g. EPSG:3424" style={sourceInputStyle}
+                      onChange={e => setSourceReview(v => ({ ...v, crs: e.target.value, reviewed: false }))} />
+                  </label>
+                )}
+                <label>Verified up axis
+                  <select value={sourceReview.upAxis} style={sourceInputStyle}
+                    onChange={e => setSourceReview(v => ({ ...v, upAxis: e.target.value as PointCloudSourceReview['upAxis'], reviewed: false }))}>
+                    {['+z', '-z', '+y', '-y', '+x', '-x'].map(axis => <option key={axis} value={axis}>{axis.toUpperCase()}</option>)}
+                  </select>
+                </label>
+                <label>Evidence reference
+                  <input value={sourceReview.evidence} placeholder="scanner export / control note" style={sourceInputStyle}
+                    onChange={e => setSourceReview(v => ({ ...v, evidence: e.target.value, reviewed: false }))} />
+                </label>
+                {(sourceReview.scanCount ?? 0) > 1 && (
+                  <div style={{ padding: 6, border: '1px solid #fde68a', borderRadius: 6, background: '#fffbeb', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ color: '#92400e', fontWeight: 700 }}>
+                      {sourceReview.scanCount} scans detected — choose the reviewed merge set.
+                    </div>
+                    <label>Selected scan indices
+                      <input value={sourceReview.selectedScans} placeholder="0,1,2" style={sourceInputStyle}
+                        onChange={e => setSourceReview(v => ({ ...v, selectedScans: e.target.value, registrationReviewed: false }))} />
+                    </label>
+                    <label>Reference scan
+                      <input type="number" min="0" value={sourceReview.registrationReference} style={sourceInputStyle}
+                        onChange={e => setSourceReview(v => ({ ...v, registrationReference: e.target.value, registrationReviewed: false }))} />
+                    </label>
+                    <label>Registration RMS (metres)
+                      <input type="number" min="0" step="0.001" value={sourceReview.registrationRms} style={sourceInputStyle}
+                        onChange={e => setSourceReview(v => ({ ...v, registrationRms: e.target.value, registrationReviewed: false }))} />
+                    </label>
+                    <label>Maximum residual (metres)
+                      <input type="number" min="0" step="0.001" value={sourceReview.registrationMaximumResidual} style={sourceInputStyle}
+                        onChange={e => setSourceReview(v => ({ ...v, registrationMaximumResidual: e.target.value, registrationReviewed: false }))} />
+                    </label>
+                    <label>Registration method/evidence
+                      <input value={sourceReview.registrationMethod} placeholder="survey targets / registered scan receipt" style={sourceInputStyle}
+                        onChange={e => setSourceReview(v => ({ ...v, registrationMethod: e.target.value, registrationReviewed: false }))} />
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                      <input type="checkbox" checked={sourceReview.registrationReviewed}
+                        onChange={e => setSourceReview(v => ({ ...v, registrationReviewed: e.target.checked }))} />
+                      I reviewed the selected merge set and registration residuals.
+                    </label>
+                  </div>
+                )}
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, color: SX.text }}>
+                  <input type="checkbox" checked={sourceReview.reviewed}
+                    onChange={e => setSourceReview(v => ({ ...v, reviewed: e.target.checked }))} />
+                  I reviewed the units, frame, up direction, and cited evidence.
+                </label>
+                <div style={{ padding: '5px 6px', borderRadius: 6, background: sourceReview.reviewed ? '#ecfdf5' : '#fffbeb', color: sourceReview.reviewed ? '#047857' : '#92400e' }}>
+                  {sourceReview.reviewed ? 'Review will be stored as a hashed source receipt.' : 'Visualization only until reviewed; no metric output is authorized.'}
+                </div>
+              </div>
+            )}
+            {cloudInfo?.source_profile && (
+              <div style={{ marginTop: 7, paddingTop: 6, borderTop: '1px solid ' + SX.border, fontSize: 10.5, color: cloudInfo.source_profile.metric_processing_authorized ? '#047857' : '#92400e' }}>
+                Saved source: {cloudInfo.source_profile.metric_processing_authorized ? 'metric-ready receipt' : 'visualization-only receipt'}
+              </div>
+            )}
           </PanelSection>
 
           <PanelSection title="Render">
@@ -1897,12 +2389,138 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
           <PanelSection title="Bridge Analysis">
             {!stats ? <div style={{ fontSize: 12, color: SX.label }}>Load a point cloud first</div> : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {/* One-step pipeline: clean â†’ isolate â†’ segment â†’ fit volumes â†’ measure. */}
+                {/* Saved bridge sources use the durable candidate-review workflow. */}
                 <button onClick={runAnalyze} disabled={analyzing}
                   className="pcbtn pcbtn-primary pcbtn-block"
-                  title="Cleans the scan, isolates the bridge and what's under it, segments it into component volumes, fits their surfaces and measures clearance â€” one step.">
-                  {analyzing ? <>{sxSpinner('#fff')}Processingâ€¦</> : 'Process Bridge'}
+                  title={hasBridge
+                    ? 'Creates an exact-revision candidate with immutable source, context, model-call, component and measurement receipts.'
+                    : 'Runs a non-persisting ad-hoc research preview.'}>
+                  {analyzing
+                    ? <>{sxSpinner('#fff')}{hasBridge ? 'Running durable analysis...' : 'Processing preview...'}</>
+                    : (hasBridge ? 'Start Durable Analysis' : 'Run Ad-hoc Preview')}
                 </button>
+                {durableRun && (
+                  <div style={{ padding: '8px 10px', borderRadius: 8, background: durableRun.published ? '#ecfdf5' : '#f8fafc', border: `1px solid ${durableRun.published ? '#a7f3d0' : SX.border}`, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                      <strong style={{ color: durableRun.published ? '#047857' : SX.text }}>
+                        {durableRun.published ? 'Accepted published result' : 'Durable review candidate'}
+                      </strong>
+                      <span style={{ color: SX.label, textTransform: 'capitalize' }}>{durableRun.status.replace(/_/g, ' ')}</span>
+                    </div>
+                    <div style={{ height: 5, borderRadius: 5, background: '#e2e8f0', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${Math.min(100, 100 * Number(durableRun.progress?.completed ?? 0) / Math.max(1, Number(durableRun.progress?.total ?? 8)))}%`, background: durableRun.published ? '#10b981' : SX.indigo }} />
+                    </div>
+                    <ClrRow label="Phase" value={durableRun.phase.replace(/_/g, ' ')} />
+                    <ClrRow label="Revision" value={durableRun.snapshot_revision_id.slice(0, 12)} muted />
+                    <ClrRow label="Source receipt" value={durableRun.source_sha256.slice(0, 12)} muted />
+                    <ClrRow label="Knowledge receipt" value={durableRun.knowledge_pack_sha256.slice(0, 12)} muted />
+                    {['queued', 'running', 'cancellation_requested'].includes(durableRun.status) && (
+                      <button onClick={cancelDurableRun} className="pcbtn pcbtn-danger pcbtn-block">
+                        Cancel This Run
+                      </button>
+                    )}
+                    {(durableRun.status === 'succeeded' || durableRun.status === 'published') && (
+                      <a
+                        href={durableRun.published && hasBridge
+                          ? `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/runs/published/download?format=ply${dataYear == null || dataYear === '' ? '' : `&data_year=${Number(dataYear)}`}`
+                          : `/api/point-cloud/runs/${durableRun.run_id}/download?format=ply`}
+                        className="pcbtn pcbtn-ghost pcbtn-block"
+                        style={{ textAlign: 'center', textDecoration: 'none' }}
+                      >
+                        Download Candidate PLY
+                      </a>
+                    )}
+                  </div>
+                )}
+                {durableEvidence?.knowledge_context && (
+                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
+                    <strong>Context Used</strong>
+                    <div style={{ color: SX.label }}>
+                      Only the bounded, receipt-verified bridge context shown here was supplied. The full prompt and unrelated database records are never exposed.
+                    </div>
+                    <details>
+                      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                        Trusted SNBI fields ({durableEvidence.knowledge_context.trusted_snbi?.field_values?.length ?? 0})
+                      </summary>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 5, maxHeight: 180, overflow: 'auto' }}>
+                        {(durableEvidence.knowledge_context.trusted_snbi?.field_values ?? []).map((field: any, index: number) => (
+                          <div key={`${field.tag ?? field.field ?? 'field'}-${index}`} style={{ borderTop: index ? '1px solid ' + SX.border : undefined, paddingTop: index ? 3 : 0 }}>
+                            <strong>{field.tag ?? field.field ?? 'SNBI field'}</strong>
+                            {field.title ? ` - ${field.title}` : ''}: <span style={{ fontFamily: 'ui-monospace, monospace' }}>{String(field.value ?? 'null')}</span>
+                            {field.unit ? ` ${field.unit}` : ''}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                    <details>
+                      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                        Cited report evidence ({durableEvidence.knowledge_context.cited_report_evidence?.chunks?.length ?? 0})
+                      </summary>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 5, maxHeight: 180, overflow: 'auto' }}>
+                        {(durableEvidence.knowledge_context.cited_report_evidence?.chunks ?? []).map((chunk: any, index: number) => (
+                          <div key={`${chunk.evidence_id ?? chunk.chunk_id ?? 'chunk'}-${index}`} style={{ borderTop: index ? '1px solid ' + SX.border : undefined, paddingTop: index ? 4 : 0 }}>
+                            <strong>{chunk.evidence_id ?? chunk.chunk_id ?? `citation ${index + 1}`}</strong>
+                            {chunk.location ? ` - ${chunk.location}` : ''}
+                            {chunk.excerpt ? <div style={{ color: SX.label }}>{String(chunk.excerpt)}</div> : null}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  </div>
+                )}
+                {durableEvidence && durableEvidence.components.length > 0 && (
+                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 7, fontSize: 11 }}>
+                    <strong>Component Review</strong>
+                    <div style={{ color: SX.label }}>Fused candidate classifications remain provisional until a reviewer accepts this run.</div>
+                    {durableEvidence.components.map((component: any) => (
+                      <label key={component.candidate_id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(125px, 1fr)', alignItems: 'center', gap: 6 }}>
+                        <span style={{ minWidth: 0 }}>
+                          <strong>{component.candidate_id}</strong>
+                          <span style={{ display: 'block', color: SX.label }}>{component.proposed_class} - {component.disposition}</span>
+                        </span>
+                        <select
+                          aria-label={`Final class for ${component.candidate_id}`}
+                          value={componentCorrections[component.candidate_id] ?? component.final_class ?? component.proposed_class}
+                          style={sourceInputStyle}
+                          disabled={durableRun?.published || reviewBusy}
+                          onChange={event => setComponentCorrections(current => ({ ...current, [component.candidate_id]: event.target.value }))}
+                        >
+                          {POINT_CLOUD_COMPONENT_CLASSES.map(value => (
+                            <option key={value} value={value}>{value.replace(/_/g, ' ')}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {durableEvidence && durableEvidence.measurements.length > 0 && (
+                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fffbeb', border: '1px solid #fde68a', display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
+                    <strong style={{ color: '#92400e' }}>Feature-bound clearance candidates</strong>
+                    <div style={{ color: '#92400e' }}>
+                      These are screening candidates, not accepted BH12/BH13 values. Feature identity and evidence gates must be reviewed before publication.
+                    </div>
+                    {durableEvidence.measurements.map((measurementCandidate: any) => (
+                      <div key={measurementCandidate.candidate_id} style={{ borderTop: '1px solid #fde68a', paddingTop: 5 }}>
+                        <ClrRow label="Candidate" value={measurementCandidate.candidate_id} />
+                        <ClrRow label="Feature" value={measurementCandidate.feature_id ?? 'unbound'} />
+                        <ClrRow label="Product" value={measurementCandidate.product} />
+                        <ClrRow label="Status" value={measurementCandidate.status} />
+                        {measurementCandidate.evidence?.reason && <ClrRow label="Gate" value={String(measurementCandidate.evidence.reason)} muted />}
+                        {measurementCandidate.evidence?.feature_binding_version && <ClrRow label="Binding" value={String(measurementCandidate.evidence.feature_binding_version)} muted />}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {durableRun?.status === 'succeeded' && !durableRun.published && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                    <button onClick={() => reviewDurableRun('reject')} disabled={reviewBusy} className="pcbtn pcbtn-danger pcbtn-block">
+                      Reject Candidate
+                    </button>
+                    <button onClick={() => reviewDurableRun('accept')} disabled={reviewBusy} className="pcbtn pcbtn-primary pcbtn-block">
+                      Accept Reviewed Result
+                    </button>
+                  </div>
+                )}
                 {analysisInfo && (
                   <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 5, fontSize: 11 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1925,7 +2543,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
                         {analysisInfo.vlm_used && (
                           <span title="Each component was reviewed by the hosted vision model, which confirmed bridge structure and removed clutter."
                             style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 4, padding: '1px 5px' }}>
-                            âœ¦ AI-REVIEWED
+                            ✦ AI-ASSISTED
                           </span>
                         )}
                       </span>
@@ -1977,7 +2595,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
                 )}
                 {clearance !== null && (
                   <div style={{ padding: '9px 11px', borderRadius: 8, background: '#ecfdf5', border: '1px solid #a7f3d0' }}>
-                    <div style={{ fontSize: 9.5, color: '#059669', fontWeight: 700, letterSpacing: 0.6 }}>VERTICAL CLEARANCE</div>
+                    <div style={{ fontSize: 9.5, color: '#059669', fontWeight: 700, letterSpacing: 0.6 }}>SCREENING VERTICAL GAP</div>
                     {cloudScaleKnownRef.current ? (
                       <>
                         <div style={{ fontSize: 22, fontWeight: 800, color: '#047857', lineHeight: 1.15 }}>{clearance.toFixed(3)} m</div>
@@ -2000,12 +2618,12 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
                       </div>
                     )}
                     {clearanceInfo.waterway?.is_waterway && (
-                      <div title="Waterway under the bridge â€” navigation vertical clearance from the soffit to an inferred reference water level. Confirm against the controlling gage datum."
+                      <div title="Waterway under the bridge — this is an inferred water-surface gap without a controlling datum, not SNBI BN02."
                         style={{ padding: '4px 8px', borderRadius: 6, background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af', fontSize: 10.5, fontWeight: 600 }}>
-                        ðŸŒŠ Waterway â€” navigation clearance
+                        Waterway — surface-gap proxy, not BN02
                       </div>
                     )}
-                    <ClrRow label={clearanceInfo.waterway?.is_waterway ? 'Navigation clr.' : 'Controlling min.'} value={clearanceInfo.scale_known === false
+                    <ClrRow label={clearanceInfo.waterway?.is_waterway ? 'Surface-gap proxy' : 'Screening minimum'} value={clearanceInfo.scale_known === false
                       ? `${clearanceInfo.min_clearance_m?.toFixed(3)} (relative)`
                       : `${clearanceInfo.min_clearance_m?.toFixed(3)} m / ${(clearanceInfo.min_clearance_m * 3.28084).toFixed(2)} ft`} />
                     {!clearanceInfo.waterway?.is_waterway && (
@@ -2013,7 +2631,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
                         ? `${clearanceInfo.typical_clearance_m?.toFixed(3)} (relative)`
                         : `${clearanceInfo.typical_clearance_m?.toFixed(3)} m`} />
                     )}
-                    <ClrRow label="Method" value={`${({ roadway_sections: 'per-roadway', waterway_navigation: 'navigation', global_fallback: 'global est.', road_center: 'road centre' }[clearanceInfo.method as string]) || clearanceInfo.method} Â· ${clearanceInfo.confidence}`} muted />
+                    <ClrRow label="Method" value={`${({ roadway_sections: 'per-roadway', water_surface_proxy: 'water-surface proxy', global_fallback: 'global estimate', road_center: 'road centre' }[clearanceInfo.method as string]) || clearanceInfo.method} · ${clearanceInfo.confidence}`} muted />
                     {clearanceInfo.roadway_count > 1 && (
                       <div style={{ marginTop: 3, paddingTop: 5, borderTop: '1px solid ' + SX.border }}>
                         <div style={{ color: SX.label, marginBottom: 3 }}>{clearanceInfo.roadway_count} roadways under the deck</div>

@@ -1,7 +1,6 @@
 import sqlite3
-import unittest
-from pathlib import Path
-from uuid import uuid4
+
+import pytest
 
 from app.routers.services.database import (
     ensure_schema,
@@ -17,9 +16,10 @@ STATE_CODE = 34
 BRIDGE_NUMBER = "01HML58"
 
 
-class BridgeSnapshotScopingTests(unittest.TestCase):
-    def setUp(self):
-        self.db_file = Path(__file__).parent / f"snapshot-test-{uuid4().hex}.db"
+class TestBridgeSnapshotScoping:
+    @pytest.fixture(autouse=True)
+    def isolated_database(self, test_workspace):
+        self.db_file = test_workspace / "snapshot.db"
         self.db_path = str(self.db_file)
         ensure_schema(self.db_path)
 
@@ -64,9 +64,7 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
-
-    def tearDown(self):
-        self.db_file.unlink(missing_ok=True)
+        yield
 
     def test_year_scoped_get_returns_only_matching_snapshot(self):
         snapshot = get_bridge_details(
@@ -76,22 +74,20 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
             year=2023,
         )
 
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(snapshot["data_year"], 2023)
-        self.assertEqual(snapshot["BW01"], 1977)
-        self.assertEqual(int(snapshot["BC09"]), 6)
-        self.assertEqual(
-            [feature["feature_name"] for feature in snapshot["Features"]],
-            ["2023 waterway"],
-        )
-        self.assertEqual(
-            [element["element_number"] for element in snapshot["Elements"]],
-            ["12"],
-        )
-        self.assertTrue(
+        assert snapshot is not None
+        assert snapshot["data_year"] == 2023
+        assert snapshot["BW01"] == 1977
+        assert int(snapshot["BC09"]) == 6
+        assert [
+            feature["feature_name"] for feature in snapshot["Features"]
+        ] == ["2023 waterway"]
+        assert [
+            element["element_number"] for element in snapshot["Elements"]
+        ] == ["12"]
+        assert (
             all(feature["data_year"] == 2023 for feature in snapshot["Features"])
         )
-        self.assertTrue(
+        assert (
             all(element["data_year"] == 2023 for element in snapshot["Elements"])
         )
 
@@ -102,14 +98,13 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
             BRIDGE_NUMBER,
         )
 
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(snapshot["data_year"], 2024)
-        self.assertEqual(snapshot["BW01"], 1939)
-        self.assertEqual(int(snapshot["BC09"]), 7)
-        self.assertEqual(
-            [feature["feature_name"] for feature in snapshot["Features"]],
-            ["2024 waterway"],
-        )
+        assert snapshot is not None
+        assert snapshot["data_year"] == 2024
+        assert snapshot["BW01"] == 1939
+        assert int(snapshot["BC09"]) == 7
+        assert [
+            feature["feature_name"] for feature in snapshot["Features"]
+        ] == ["2024 waterway"]
 
     def test_save_updates_only_selected_year_and_data_year_is_immutable(self):
         updated = update_bridge_main(
@@ -125,7 +120,7 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
             },
             year=2023,
         )
-        self.assertEqual(updated, 1)
+        assert updated == 1
 
         conn = sqlite3.connect(self.db_path)
         try:
@@ -141,7 +136,7 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual(rows, [(2023, 1978, 5.0), (2024, 1939, 7.0)])
+        assert rows == [(2023, 1978, 5.0), (2024, 1939, 7.0)]
         conn = sqlite3.connect(self.db_path)
         try:
             changed_identity_count = conn.execute(
@@ -153,9 +148,9 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
             ).fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(changed_identity_count, 0)
+        assert changed_identity_count == 0
 
-        with self.assertRaisesRegex(ValueError, "does not match"):
+        with pytest.raises(ValueError, match="does not match"):
             update_bridge_main(
                 self.db_path,
                 STATE_CODE,
@@ -177,7 +172,7 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
             ).fetchall()
         finally:
             conn.close()
-        self.assertEqual(years, [(2023,), (2024,)])
+        assert years == [(2023,), (2024,)]
 
     def test_export_preserves_invalid_direct_value_for_review(self):
         conn = sqlite3.connect(self.db_path)
@@ -196,16 +191,16 @@ class BridgeSnapshotScopingTests(unittest.TestCase):
 
         exported = export_all_bridges_snbi(self.db_path, STATE_CODE, year=2023)
         bridge = next(row for row in exported if row["BID01"] == BRIDGE_NUMBER)
-        self.assertEqual(bridge["BC09"], "N")
+        assert bridge["BC09"] == "N"
 
         validation = validate_snbi_payload([bridge], submission_year=2026)
         bc09_issues = validation["by_bridge"][BRIDGE_NUMBER]["by_tag"]["BC09"]
-        self.assertTrue(
+        assert (
             any(issue["rule"] == "BC09-waterway-range" for issue in bc09_issues)
         )
 
 
-class DirectTransitionMappingTests(unittest.TestCase):
+class TestDirectTransitionMapping:
     def test_bw01_and_bc09_preserve_valid_nbi_values(self):
         mapped = map_bridge_to_snbi(
             {
@@ -217,22 +212,19 @@ class DirectTransitionMappingTests(unittest.TestCase):
             [],
         )
 
-        self.assertEqual(mapped["BW01"], 1977)
-        self.assertEqual(mapped["BC09"], "6")
+        assert mapped["BW01"] == 1977
+        assert mapped["BC09"] == "6"
 
-    def test_blank_or_invalid_item_27_does_not_become_year_zero(self):
-        for invalid_year in (None, "", "not-a-year"):
-            with self.subTest(invalid_year=invalid_year):
-                mapped = map_bridge_to_snbi(
-                    {
-                        "STATE_CODE_001": "34",
-                        "STRUCTURE_NUMBER_008": BRIDGE_NUMBER,
-                        "YEAR_BUILT_027": invalid_year,
-                    },
-                    [],
-                )
-                self.assertNotIn("BW01", mapped)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    @pytest.mark.parametrize("invalid_year", [None, "", "not-a-year"])
+    def test_blank_or_invalid_item_27_does_not_become_year_zero(
+        self, invalid_year
+    ):
+        mapped = map_bridge_to_snbi(
+            {
+                "STATE_CODE_001": "34",
+                "STRUCTURE_NUMBER_008": BRIDGE_NUMBER,
+                "YEAR_BUILT_027": invalid_year,
+            },
+            [],
+        )
+        assert "BW01" not in mapped

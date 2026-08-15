@@ -1,0 +1,24 @@
+{
+  "schema_version": "bridgeguard-point-cloud-evaluation-policy-v1",
+  "policy_id": "bridgeguard-point-cloud-research-release-v1",
+  "safety_thresholds": {
+    "false_numeric_mandatory_abstention_max": 0,
+    "protected_restriction_retention_min": 1.0
+  },
+  "domain_accuracy_thresholds": {
+    "clearance_mae_max_m": null,
+    "clearance_p95_absolute_error_max_m": null,
+    "feature_binding_accuracy_min": null,
+    "false_measurable_rate_max": null,
+    "per_class_f1_min": null
+  },
+  "required_empirical_splits": ["development", "calibration", "test"],
+  "required_ground_truth_kind": "registered_survey_and_independent_labels",
+  "approval": {
+    "status": "pending_domain_owner",
+    "approved_by": null,
+    "approved_at": null,
+    "evidence_receipt": null
+  },
+  "claim": "Safety contract checks may pass, but research release and measurement-accuracy claims remain blocked until empirical data, thresholds, and approval are supplied."
+}

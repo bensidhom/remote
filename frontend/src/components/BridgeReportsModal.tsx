@@ -23,7 +23,7 @@ function fmtDate(ts: string): string {
   return isNaN(d.getTime()) ? ts : d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-const ACCEPTED = '.pdf,.doc,.docx,.xlsx,.xls,.txt,.csv,.png,.jpg,.jpeg';
+const ACCEPTED = '.pdf,.docx,.xlsx,.txt,.csv,.png,.jpg,.jpeg';
 
 const BridgeReportsModal: React.FC<BridgeReportsModalProps> = ({ stateCode, bridgeNumber, bridgeName, onClose, embedded }) => {
   const [reports, setReports] = useState<Report[]>([]);
@@ -43,19 +43,21 @@ const BridgeReportsModal: React.FC<BridgeReportsModalProps> = ({ stateCode, brid
     setIngest({ stage: 'Starting…', pct: 2 });
     pollRef.current = setInterval(async () => {
       try {
-        const r = await fetch('/api/vision-progress');
+        const r = await fetch(`/api/bridges/${encodeURIComponent(sc)}/${encodeURIComponent(bn)}/reports-status`);
         const d = await r.json();
-        const stage = d.stage || '';
-        const pct = d.total_steps ? Math.min(100, Math.round((d.step / d.total_steps) * 100)) : 5;
-        setIngest({ stage: stage || 'Indexing…', pct });
-        if (stage === 'Ready' || (d.total_steps && d.step >= d.total_steps)) {
+        if (d.ready) {
           if (pollRef.current) clearInterval(pollRef.current);
           setIngest({ stage: 'Indexed ✓', pct: 100 });
           setTimeout(() => setIngest(null), 2500);
+        } else if (d.error && !d.indexing) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setIngest({ stage: 'Index unavailable', pct: 0 });
+        } else {
+          setIngest({ stage: 'Indexing this bridge…', pct: 50 });
         }
       } catch { /* keep polling */ }
     }, 1200);
-  }, []);
+  }, [sc, bn]);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
@@ -104,11 +106,18 @@ const BridgeReportsModal: React.FC<BridgeReportsModalProps> = ({ stateCode, brid
     a.click();
   };
   const handleDelete = async (report: Report) => {
-    if (!window.confirm(`Delete "${report.filename}"?`)) return;
+    const reason = window.prompt(
+      `Why should "${report.filename}" be deleted? This reason is retained in the audit log.`,
+    )?.trim();
+    if (!reason) return;
     try {
-      const res = await fetch(`/api/bridges/${sc}/${bn}/reports/${report.id}`, { method: 'DELETE' });
+      const query = new URLSearchParams({ reason });
+      const res = await fetch(`/api/bridges/${sc}/${bn}/reports/${report.id}?${query}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
-      setStatus(`Deleted "${report.filename}".`);
+      const result = await res.json();
+      setStatus(result.status === 'deleted'
+        ? `Deleted "${report.filename}".`
+        : `Deletion of "${report.filename}" is queued for secure cleanup.`);
       setReports((prev) => prev.filter((r) => r.id !== report.id));
     } catch (err) { setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`); }
   };

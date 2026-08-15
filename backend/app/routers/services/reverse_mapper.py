@@ -9,6 +9,7 @@ import csv
 import io
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional
+from app.services.spreadsheet_csv import spreadsheet_safe_value
 from .constants import mapping, field_names
 from .snbi_rules import (
     BRIDGE_RAILING_CODES,
@@ -32,6 +33,19 @@ from .snbi_rules import (
     TOLL_CODES,
     WEARING_SURFACE_CODES,
 )
+
+try:
+    from ...services.conversion.legacy_projection import (
+        build_legacy_projection_manifest,
+        legacy_state_code,
+        projection_metadata,
+    )
+except ImportError:  # pragma: no cover - legacy direct-module launch mode
+    from services.conversion.legacy_projection import (
+        build_legacy_projection_manifest,
+        legacy_state_code,
+        projection_metadata,
+    )
 
 
 def _invert(table: Dict[str, Optional[str]], overrides: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -296,16 +310,15 @@ def _ft_to_m_str(val: Any, decimals: int = 2) -> Optional[str]:
 # Fields ending in _MT expect meters; geometry fields stored as feet in SNBI
 # are converted back via _SNBI_TO_NBI_FT (feet→meters) below.
 _SNBI_TO_NBI = {
-    'BL01': 'STATE_CODE_001',
     'BID01': 'STRUCTURE_NUMBER_008',
     'BL02': 'COUNTY_CODE_003',
     'BL03': 'PLACE_CODE_004',
     'BL04': 'HIGHWAY_DISTRICT_002',
     'BL11': 'LOCATION_009',
-    'BL12': 'BASE_HWY_NETWORK_012',
+    # BL12 (Metropolitan Planning Organization) has no legacy transition.
     # BL05/BL06 (lat/lon) stored as decimal in SNBI; converted back to DMS int below
     'BL07': 'OTHR_STATE_STRUC_NO_099',
-    'BL08': 'OTHER_STATE_CODE_098A',
+    # BL08 needs country expansion or the legacy Item 1 state/region table.
     # BL09 codes (0/1/2) map back to Item 98B percentages below.
     'BW01': 'YEAR_BUILT_027',
     'BC01': 'DECK_COND_058',
@@ -409,6 +422,17 @@ def snbi_to_nbi_row(bridge: Dict[str, Any]) -> Dict[str, str]:
         if val is not None and val != '':
             row[nbi_field] = str(val)
 
+    # SNBI retains the two-digit FIPS value but not the historical FHWA region
+    # character required by legacy Item 1/98A.  Reconstruct only values present
+    # in the pinned Item 1 table; do not pass malformed three-character values
+    # through as if they were valid SNBI.
+    state_decision = legacy_state_code(bridge.get('BL01'), allow_country=False)
+    if state_decision.value is not None:
+        row['STATE_CODE_001'] = state_decision.value
+    border_decision = legacy_state_code(bridge.get('BL08'), allow_country=True)
+    if border_decision.value is not None:
+        row['OTHER_STATE_CODE_098A'] = border_decision.value
+
     for snbi_key, (nbi_field, inverse) in _SNBI_TO_NBI_CODED.items():
         val = bridge.get(snbi_key)
         if val is not None and val != '':
@@ -486,18 +510,17 @@ def snbi_to_nbi_row(bridge: Dict[str, Any]) -> Dict[str, str]:
         elif desc == 'RECONSTRUCTED' and not row.get('YEAR_RECONSTRUCTED_106'):
             row['YEAR_RECONSTRUCTED_106'] = str(yr)
 
-    # Pull posting status/date from PostingStatuses when provided.
+    # Pull posting status from PostingStatuses when provided. B.PS.02 is a
+    # posting-status date and has no defensible transition to Item 90.
     posting_statuses = bridge.get('PostingStatuses') or []
     if posting_statuses:
         ps0 = posting_statuses[0] or {}
         if not row.get('OPEN_CLOSED_POSTED_041'):
             v = ps0.get('BPS01')
             if v is not None and v != '':
-                row['OPEN_CLOSED_POSTED_041'] = str(v)
-        if not row.get('DATE_OF_INSPECT_090'):
-            v = ps0.get('BPS02')
-            if v is not None and v != '':
-                row['DATE_OF_INSPECT_090'] = str(v)
+                inverse = _INV_POSTING.get(str(v).strip().upper())
+                if inverse is not None:
+                    row['OPEN_CLOSED_POSTED_041'] = inverse
 
     # Pull inspection events back into Items 90/91 (routine) and 92/93 (NSTM,
     # underwater, special) keyed on the SNBI inspection type BIE01.
@@ -514,10 +537,8 @@ def snbi_to_nbi_row(bridge: Dict[str, Any]) -> Dict[str, str]:
             # BIE05 may be an integer 0; guard against the `0 or ''` pitfall
             if not row.get('INSPECT_FREQ_MONTHS_091') and interval is not None:
                 row['INSPECT_FREQ_MONTHS_091'] = str(interval)
-            if not row.get('WORK_PROPOSED_075A'):
-                v = insp.get('BIE11')
-                if v is not None and v != '':
-                    row['WORK_PROPOSED_075A'] = str(v)
+            # B.IE.11 is an inspection note, not Item 75A Work Proposed. It is
+            # intentionally omitted and accounted for in the loss manifest.
         elif itype in {'3', '4', '7'}:
             date_field, flag_field = {
                 '4': ('FRACTURE_LAST_DATE_093A', 'FRACTURE_092A'),
@@ -575,13 +596,12 @@ def snbi_to_nbi_row(bridge: Dict[str, Any]) -> Dict[str, str]:
                 if not row.get('STRAHNET_HIGHWAY_100'):
                     v = _INV_STRAHNET.get(str(feat.get('BH05') or ''))
                     if v: row['STRAHNET_HIGHWAY_100'] = v
-                # BH06 = LRS_INV_ROUTE_013A + SUBROUTE_NO_013B concatenated
+                # BH06 = 10-character Item 13A + 2-character Item 13B.
                 if not row.get('LRS_INV_ROUTE_013A'):
                     bh06 = str(feat.get('BH06') or '')
                     if bh06:
-                        row['LRS_INV_ROUTE_013A'] = bh06[:12]
-                        if len(bh06) > 12:
-                            row['SUBROUTE_NO_013B'] = bh06[12:17]
+                        row['LRS_INV_ROUTE_013A'] = bh06[:10]
+                        row['SUBROUTE_NO_013B'] = bh06[10:12]
                 # BH07 = miles; KILOPOINT_011 is raw NBI integer (km_to_mile divided by 1000 first)
                 if not row.get('KILOPOINT_011'):
                     bh07 = feat.get('BH07')
@@ -789,14 +809,24 @@ def snbi_to_nbi_row(bridge: Dict[str, Any]) -> Dict[str, str]:
     return row
 
 
-def bridges_to_nbi_csv(bridges: List[Dict[str, Any]]) -> str:
-    """Generate NBI CSV text (with header row) from a list of SNBI bridge dicts."""
-    buf = __import__('io').StringIO()
-    writer = csv.DictWriter(buf, fieldnames=field_names, lineterminator='\n')
+def _legacy_rows_to_csv(rows: List[Dict[str, str]]) -> str:
+    """Serialize already-projected legacy-shaped rows as headered CSV."""
+    buf = io.StringIO(newline='')
+    writer = csv.DictWriter(buf, fieldnames=field_names, lineterminator='\r\n')
     writer.writeheader()
-    for bridge in bridges:
-        writer.writerow(snbi_to_nbi_row(bridge))
+    writer.writerows(
+        {
+            field: spreadsheet_safe_value(row.get(field, ''))
+            for field in field_names
+        }
+        for row in rows
+    )
     return buf.getvalue()
+
+
+def bridges_to_nbi_csv(bridges: List[Dict[str, Any]]) -> str:
+    """Generate a review-only legacy-shaped CSV, never an NBI 445 TXT file."""
+    return _legacy_rows_to_csv([snbi_to_nbi_row(bridge) for bridge in bridges])
 
 
 def bridges_to_elements_xml(bridges: List[Dict[str, Any]]) -> str:
@@ -829,10 +859,18 @@ def convert_snbi_to_outputs(bridges: List[Dict[str, Any]]) -> Dict[str, Any]:
         flat_list.append(snbi_to_flat_json(bridge))
         text_parts.append(snbi_to_text(bridge))
 
+    legacy_rows = [snbi_to_nbi_row(bridge) for bridge in bridges]
+    metadata = projection_metadata(bridge_count=len(bridges))
+    loss_manifest = build_legacy_projection_manifest(bridges, legacy_rows)
+
     return {
         'flat_json': flat_list,
         'text': '\n\n'.join(text_parts),
-        'nbi_csv': bridges_to_nbi_csv(bridges),
+        # Backward-compatible key. The accompanying metadata makes clear that
+        # this is a headered, synthetic legacy projection rather than NBI TXT.
+        'nbi_csv': _legacy_rows_to_csv(legacy_rows),
         'elements_xml': bridges_to_elements_xml(bridges),
         'count': len(bridges),
+        'legacy_projection': metadata,
+        'loss_manifest': loss_manifest,
     }

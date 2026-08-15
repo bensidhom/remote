@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios, { CancelTokenSource } from 'axios';
 import { Camera, Upload, Sparkles, User, Bot, Trash2, X, ZoomIn, ZoomOut, Ban, Clock, ChevronLeft, ChevronRight, Paperclip, Send, Settings2, Database, FileText, RotateCcw } from 'lucide-react';
+import { privateStorageNamespace } from '../lib/access';
 
 interface ChatImage {
   filename: string;
@@ -20,10 +21,14 @@ interface ChatMessage {
 }
 
 interface VisionProps {
-  onRagActiveChange?: (active: boolean) => void;
+  onRagActiveChange?: (active: boolean, requestId?: string) => void;
+  ownerNamespace: string;
+  workspaceNamespace: string;
 }
 
-const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
+const DOCUMENT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+const Vision: React.FC<VisionProps> = ({ onRagActiveChange, ownerNamespace, workspaceNamespace }) => {
   const [sourceType, setSourceType] = useState<'document' | 'database'>('document');
   const [file, setFile] = useState<File | null>(null);
   const [fileIngested, setFileIngested] = useState(false);
@@ -36,8 +41,6 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
   const [strictGrounding, setStrictGrounding] = useState(true);
   const [outputFormat, setOutputFormat] = useState<'text' | 'json'>('text');
   const [targetFields, setTargetFields] = useState('BL01,BID01,BID02,BIE03,BC01,BC02,BC03,BC04,BC13');
-  const [forceDefectSegmentation, setForceDefectSegmentation] = useState(false);
-  const [defectSegmentationMode, setDefectSegmentationMode] = useState<'fast' | 'balanced' | 'high_precision'>('balanced');
   const [resettingIndex, setResettingIndex] = useState(false);
   const [indexedStatus, setIndexedStatus] = useState<{ indexed: boolean; pages: number; images: number }>({ indexed: false, pages: 0, images: 0 });
   const [checkingIndex, setCheckingIndex] = useState(false);
@@ -55,18 +58,15 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
   const cancelSourceRef = useRef<CancelTokenSource | null>(null);
+  const activeAiRequestRef = useRef<string | null>(null);
   const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  const PERSIST_INDEXED_KEY = 'vision_indexed_session';
-  const PERSIST_DOC_HASH_KEY = 'vision_indexed_doc_hash';
-  const PERSIST_DOC_NAME_KEY = 'vision_indexed_doc_name';
-  const PERSIST_CHAT_KEY = 'vision_chat_history';
-  // Notify parent when Vision RAG processing starts/stops
-  useEffect(() => {
-    onRagActiveChange?.(loading);
-  }, [loading]);
-
+  const storagePrefix = `${privateStorageNamespace(ownerNamespace, workspaceNamespace)}vision:`;
+  const PERSIST_INDEXED_KEY = `${storagePrefix}indexed_session`;
+  const PERSIST_DOC_HASH_KEY = `${storagePrefix}indexed_doc_hash`;
+  const PERSIST_DOC_NAME_KEY = `${storagePrefix}indexed_doc_name`;
+  const PERSIST_CHAT_KEY = `${storagePrefix}chat_history`;
   /** Save doc state to localStorage so it survives app restarts. */
   const persistDocState = (indexed: boolean, docHash: string, docName?: string) => {
     try {
@@ -218,21 +218,12 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
     if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
     progressIntervalRef.current = setInterval(async () => {
       try {
-        const resp = await axios.get('/api/vision-progress');
+        const requestId = activeAiRequestRef.current;
+        if (!requestId) return;
+        const resp = await axios.get(`/api/ai/requests/${encodeURIComponent(requestId)}/evidence`);
         const data = resp.data;
-        if (data.stage) {
-          setProgressText(data.stage);
-        }
-        if (typeof data.eta_seconds === 'number') {
-          setEtaSeconds(data.eta_seconds);
-        }
-        if (typeof data.elapsed === 'number') {
-          setElapsedSeconds(data.elapsed);
-        }
-        if (data.total_steps > 0) {
-          const pct = Math.min(95, Math.round((data.step / data.total_steps) * 90) + 5);
-          setProgress(pct);
-        }
+        setProgressText(data.status === 'active' ? 'Processing request…' : String(data.status || ''));
+        setEtaSeconds(null);
       } catch {
         // Ignore polling errors
       }
@@ -249,8 +240,11 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
   }, []);
 
   const handleCancel = useCallback(async () => {
+    const requestId = activeAiRequestRef.current;
     try {
-      await axios.post('/api/vision-cancel');
+      if (requestId) {
+        await axios.post(`/api/ai/requests/${encodeURIComponent(requestId)}/cancel`);
+      }
     } catch {
       // Ignore cancel request errors
     }
@@ -258,6 +252,7 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
       cancelSourceRef.current.cancel('User cancelled');
       cancelSourceRef.current = null;
     }
+    activeAiRequestRef.current = null;
     stopProgressPolling();
     setLoading(false);
     setProgress(0);
@@ -268,7 +263,24 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files?.length) {
-      setFile(event.target.files[0]);
+      const selected = event.target.files[0];
+      const isPdf = selected.name.toLowerCase().endsWith('.pdf')
+        && (!selected.type || selected.type === 'application/pdf');
+      if (!isPdf) {
+        setFile(null);
+        setStatusType('error');
+        setStatusMessage('Document Ask accepts PDF files only.');
+        event.target.value = '';
+        return;
+      }
+      if (selected.size > DOCUMENT_MAX_UPLOAD_BYTES) {
+        setFile(null);
+        setStatusType('error');
+        setStatusMessage('The PDF exceeds the 50 MB upload limit.');
+        event.target.value = '';
+        return;
+      }
+      setFile(selected);
       setFileIngested(false);
       setActiveDocHash('');
       setHasIndexedSession(false);
@@ -340,6 +352,9 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
     setStatusMessage(null);
 
     const callQueryOnly = async (): Promise<{ ok: boolean; noIndexedDoc: boolean; message?: string }> => {
+      const requestId = crypto.randomUUID();
+      activeAiRequestRef.current = requestId;
+      onRagActiveChange?.(true, requestId);
       setDebugPath('document:query-only');
       setProgress(30);
       setProgressText('Querying indexed document...');
@@ -349,17 +364,19 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
         formData.append('strict_grounding', String(strictGrounding));
         formData.append('output_format', outputFormat);
         formData.append('target_fields', targetFields);
-        formData.append('force_defect_segmentation', String(forceDefectSegmentation));
-        formData.append('defect_segmentation_mode', defectSegmentationMode);
+        formData.append('analysis_mode', 'text');
         if (activeDocHash) {
           formData.append('doc_hash', activeDocHash);
         }
 
         const response = await axios.post('/api/vision-query', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
+          headers: { 'Content-Type': 'multipart/form-data', 'X-Request-ID': requestId },
         });
 
         const data = response.data;
+        if (activeAiRequestRef.current !== requestId || data.request_id !== requestId) {
+          return { ok: false, noIndexedDoc: false, message: 'Stale response ignored.' };
+        }
         if (data.status === 'success') {
           addAssistantMessage(
             data.answer || 'No answer returned.',
@@ -398,6 +415,9 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
           setStatusMessage(msg);
         }
         return { ok: false, noIndexedDoc, message: detail };
+      } finally {
+        if (activeAiRequestRef.current === requestId) activeAiRequestRef.current = null;
+        onRagActiveChange?.(false);
       }
     };
 
@@ -414,6 +434,9 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
 
       const source = axios.CancelToken.source();
       cancelSourceRef.current = source;
+      const requestId = crypto.randomUUID();
+      activeAiRequestRef.current = requestId;
+      onRagActiveChange?.(true, requestId);
 
       try {
         const formData = new FormData();
@@ -422,12 +445,11 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
         formData.append('strict_grounding', String(strictGrounding));
         formData.append('output_format', outputFormat);
         formData.append('target_fields', targetFields);
-        formData.append('force_defect_segmentation', String(forceDefectSegmentation));
-        formData.append('defect_segmentation_mode', defectSegmentationMode);
+        formData.append('analysis_mode', 'text');
 
         let uploadDone = false;
         const response = await axios.post('/api/vision-rag', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
+          headers: { 'Content-Type': 'multipart/form-data', 'X-Request-ID': requestId },
           cancelToken: source.token,
           onUploadProgress: (progressEvent) => {
             if (progressEvent.total) {
@@ -447,6 +469,7 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
         setProgress(90);
         setProgressText('Processing document...');
         const data = response.data;
+        if (activeAiRequestRef.current !== requestId || data.request_id !== requestId) return false;
         if (data.status === 'success') {
           const indexed = data.indexed === true;
           setFileIngested(indexed);
@@ -498,6 +521,8 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
         return false;
       } finally {
         cancelSourceRef.current = null;
+        if (activeAiRequestRef.current === requestId) activeAiRequestRef.current = null;
+        onRagActiveChange?.(false);
       }
     };
 
@@ -586,6 +611,9 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
     addUserMessage(q);
     setQuestion('');
     setLoading(true);
+    const requestId = crypto.randomUUID();
+    activeAiRequestRef.current = requestId;
+    onRagActiveChange?.(true, requestId);
 
     try {
       const formData = new FormData();
@@ -593,6 +621,7 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
       formData.append('strict_grounding', String(strictGrounding));
       formData.append('output_format', outputFormat);
       formData.append('target_fields', targetFields);
+      formData.append('analysis_mode', 'text');
       if (dbStateCode.trim()) {
         formData.append('state_code', dbStateCode.trim());
       }
@@ -601,10 +630,11 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
       }
 
       const response = await axios.post('/api/db-rag', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: { 'Content-Type': 'multipart/form-data', 'X-Request-ID': requestId },
       });
 
       const data = response.data;
+      if (activeAiRequestRef.current !== requestId || data.request_id !== requestId) return;
       if (data.status === 'success') {
         addAssistantMessage(
           data.answer || 'No answer returned.',
@@ -626,6 +656,8 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
       setStatusType('error');
       setStatusMessage(msg);
     } finally {
+      if (activeAiRequestRef.current === requestId) activeAiRequestRef.current = null;
+      onRagActiveChange?.(false);
       setLoading(false);
     }
   };
@@ -645,6 +677,9 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
     if (sourceType === 'database') {
       // Inline retry to avoid stale `question` state closure
       const submitRetry = async () => {
+        const requestId = crypto.randomUUID();
+        activeAiRequestRef.current = requestId;
+        onRagActiveChange?.(true, requestId);
         setDebugPath('database:rag');
         addUserMessage(q);
         setLoading(true);
@@ -654,10 +689,12 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
           formData.append('strict_grounding', String(strictGrounding));
           formData.append('output_format', outputFormat);
           formData.append('target_fields', targetFields);
+          formData.append('analysis_mode', 'text');
           if (dbStateCode.trim()) formData.append('state_code', dbStateCode.trim());
           if (dbBridgeNumber.trim()) formData.append('bridge_number', dbBridgeNumber.trim());
-          const response = await axios.post('/api/db-rag', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+          const response = await axios.post('/api/db-rag', formData, { headers: { 'Content-Type': 'multipart/form-data', 'X-Request-ID': requestId } });
           const data = response.data;
+          if (activeAiRequestRef.current !== requestId || data.request_id !== requestId) return;
           if (data.status === 'success') {
             addAssistantMessage(data.answer || 'No answer returned.', data.source_chunks || [], [], data.json_answer);
           } else {
@@ -666,6 +703,8 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
         } catch (err: any) {
           addAssistantMessage(err?.response?.data?.detail || 'Failed to query the database.');
         } finally {
+          if (activeAiRequestRef.current === requestId) activeAiRequestRef.current = null;
+          onRagActiveChange?.(false);
           setLoading(false);
         }
       };
@@ -839,36 +878,6 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
                 </div>
               </div>
 
-              {/* Defect segmentation */}
-              {sourceType === 'document' && (
-                <div className="space-y-2">
-                  <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Defect Segmentation</label>
-                  <label className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={forceDefectSegmentation}
-                      onChange={(e) => setForceDefectSegmentation(e.target.checked)}
-                      className="rounded border-gray-300 text-green-600"
-                    />
-                    Force defect overlays
-                  </label>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 pl-5">
-                    For crack, spall, rust, delamination, or rebar prompts.
-                  </p>
-                  {forceDefectSegmentation && (
-                    <select
-                      value={defectSegmentationMode}
-                      onChange={(e) => setDefectSegmentationMode(e.target.value as 'fast' | 'balanced' | 'high_precision')}
-                      className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-900 dark:text-white"
-                    >
-                      <option value="fast">Fast</option>
-                      <option value="balanced">Balanced (recommended)</option>
-                      <option value="high_precision">High precision</option>
-                    </select>
-                  )}
-                </div>
-              )}
-
               {/* Model info */}
               <div className="pt-2 border-t border-gray-100 dark:border-gray-700">
                 <p className="text-xs text-gray-400 dark:text-gray-500">Model: <span className="font-medium text-gray-600 dark:text-gray-300">AI</span></p>
@@ -899,7 +908,7 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
                 <Sparkles className="w-10 h-10 mb-3 opacity-30" />
                 <p className="text-sm">Ask a question to start the conversation.</p>
                 <p className="text-xs mt-1 opacity-70">
-                  {sourceType === 'document' ? 'Attach a PDF or image using the paperclip below.' : 'Using loaded database as source.'}
+                  {sourceType === 'document' ? 'Attach a PDF (up to 50 MB) using the paperclip below.' : 'Using loaded database as source.'}
                 </p>
               </div>
             ) : (
@@ -1071,7 +1080,7 @@ const Vision: React.FC<VisionProps> = ({ onRagActiveChange }) => {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff"
+                    accept=".pdf,application/pdf"
                     onChange={handleFileChange}
                     className="hidden"
                   />

@@ -10,6 +10,7 @@ import { AdminProvider } from './context/AdminContext';
 import { Modal } from './components/ui';
 import { onOpenTool, type ToolId, type ToolPayload } from './lib/tools';
 import { getCurrentUser, signOut, type AuthUser } from './lib/access';
+import { startDataGenerationObserver } from './lib/dataGeneration';
 
 import HomeSidebar from './components/HomeSidebar';
 import MapPage from './pages/Map';
@@ -58,6 +59,14 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
   const [visionRagActive, setVisionRagActive] = useState(false);
   const [visionRagStage, setVisionRagStage] = useState('');
   const [visionRagEta, setVisionRagEta] = useState<number | null>(null);
+  const [visionRequestId, setVisionRequestId] = useState<string | null>(null);
+
+  // One authenticated, visibility-aware observer fans generation changes out to
+  // every mounted data surface. Individual tools subscribe; none starts a timer.
+  useEffect(
+    () => startDataGenerationObserver({ expectedWorkspaceId: user.workspace_id }),
+    [user.workspace_id],
+  );
 
   // Tool launcher subscription.
   useEffect(() => {
@@ -79,21 +88,24 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
 
   // Poll Vision RAG progress.
   useEffect(() => {
-    if (!visionRagActive) { setVisionRagStage(''); setVisionRagEta(null); return; }
+    if (!visionRagActive || !visionRequestId) { setVisionRagStage(''); setVisionRagEta(null); return; }
     const id = setInterval(async () => {
       try {
-        const r = await axios.get('/api/vision-progress');
-        if (r.data.stage) setVisionRagStage(r.data.stage);
-        setVisionRagEta(typeof r.data.eta_seconds === 'number' ? r.data.eta_seconds : null);
+        const r = await axios.get(`/api/ai/requests/${encodeURIComponent(visionRequestId)}/evidence`);
+        setVisionRagStage(r.data?.status === 'active' ? 'Request running' : String(r.data?.status || ''));
+        setVisionRagEta(null);
       } catch { /* ignore */ }
     }, 2000);
     return () => clearInterval(id);
-  }, [visionRagActive]);
+  }, [visionRagActive, visionRequestId]);
 
   const handleGlobalCancel = useCallback(async () => {
-    try { await axios.post('/api/vision-cancel'); } catch { /* ignore */ }
+    if (visionRequestId) {
+      try { await axios.post(`/api/ai/requests/${encodeURIComponent(visionRequestId)}/cancel`); } catch { /* ignore */ }
+    }
     setVisionRagActive(false); setVisionRagStage(''); setVisionRagEta(null);
-  }, []);
+    setVisionRequestId(null);
+  }, [visionRequestId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
@@ -198,7 +210,12 @@ const AppContent: React.FC<{ user: AuthUser; onSignOut: () => void }> = ({ user,
           <div className="flex-1 overflow-auto ui-scroll p-6">
             <React.Suspense fallback={<div className="p-8 text-center text-slate-500">Loading Vision…</div>}>
               <Vision
-                onRagActiveChange={setVisionRagActive}
+                onRagActiveChange={(active, requestId) => {
+                  setVisionRagActive(active);
+                  setVisionRequestId(active ? (requestId || null) : null);
+                }}
+                ownerNamespace={user.email}
+                workspaceNamespace={user.workspace_id}
               />
             </React.Suspense>
           </div>
@@ -264,7 +281,7 @@ const App: React.FC = () => {
     <Router>
       <AdminProvider role={user.role}>
         <AppContent user={user} onSignOut={() => {
-          void signOut().then((logoutUrl) => {
+          void signOut(user.email, user.workspace_id).then((logoutUrl) => {
             setUser(null);
             if (logoutUrl) window.location.replace(logoutUrl);
           });

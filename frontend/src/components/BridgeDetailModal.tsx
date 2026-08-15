@@ -15,6 +15,24 @@ const PointCloud = lazy(() => import('../pages/PointCloud'));
 
 type Tab = 'history' | 'files' | 'pointcloud' | 'lcca' | 'rag' | 'custom' | 'edit';
 type ReportImage = { data: string; mime: string; label?: string; filename?: string; detections?: { label?: string; confidence?: number; bbox?: number[] }[] };
+type PrivateSession = { id: string; title: string };
+type PrivateTurn = {
+  role: 'user' | 'assistant';
+  content: string;
+  cited_revision?: string | null;
+  provenance_status: 'user_input' | 'unverified_model_output' | 'verified_answer';
+};
+type AskEvidence = {
+  analysis_mode?: 'text' | 'visual';
+  visual_processing_ran?: boolean;
+  model_id?: string;
+  inspected_count?: number;
+  estimated_cost_usd?: number;
+  privacy?: string;
+  evidence_receipt_sha256?: string;
+  provenance_status?: 'unverified_model_output' | 'verified_answer';
+  cited_revision?: string;
+};
 const TABS: { id: Tab; label: string; Icon: typeof History }[] = [
   { id: 'history', label: 'History', Icon: History },
   { id: 'files', label: 'Files', Icon: FileText },
@@ -57,12 +75,12 @@ const BridgeDetailModal: React.FC<{ bridge: PopupBridgeRef; onClose: () => void 
 
         {/* Tab body */}
         <div className="flex-1 overflow-auto ui-scroll p-4">
-          {tab === 'history' && <BridgeHistoryModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} onClose={noop} />}
+          {tab === 'history' && <BridgeHistoryModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} dataYear={bridge.data_year} onClose={noop} />}
           {tab === 'files' && <BridgeReportsModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} onClose={noop} />}
           {tab === 'pointcloud' && (
             <div className="-m-4 h-[calc(100%+2rem)] min-h-[620px]">
               <Suspense fallback={<div className="p-8 text-center text-slate-500">Loading point-cloud viewer…</div>}>
-                <PointCloud bridgeStateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} />
+                <PointCloud bridgeStateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} dataYear={bridge.data_year} />
               </Suspense>
             </div>
           )}
@@ -73,10 +91,18 @@ const BridgeDetailModal: React.FC<{ bridge: PopupBridgeRef; onClose: () => void 
               bridgeName={bridge.bridge_name}
               bridgeNumber={bn}
               yearBuilt={bridge.year_built}
+              dataYear={bridge.data_year}
               onClose={noop}
             />
           )}
-          {tab === 'rag' && <BridgeRagTab stateCode={sc} bridgeNumber={bn} />}
+          {tab === 'rag' && (
+            <BridgeRagTab
+              stateCode={sc}
+              bridgeNumber={bn}
+              dataYear={bridge.data_year}
+              snapshotRevisionId={bridge.snapshot_revision_id}
+            />
+          )}
           {tab === 'custom' && <BridgeCustomTablesTab stateCode={sc} bridgeNumber={bn} />}
           {tab === 'edit' && (
             <div className="space-y-5">
@@ -129,14 +155,23 @@ const ImageZoomModal: React.FC<{ image: ReportImage | null; onClose: () => void 
 };
 
 /** Bridge-scoped RAG chat (reuses /api/db-rag with bridge context). */
-const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string }> = ({ stateCode, bridgeNumber }) => {
+const BridgeRagTab: React.FC<{
+  stateCode: string | number;
+  bridgeNumber: string;
+  dataYear?: string | number;
+  snapshotRevisionId?: string | null;
+}> = ({ stateCode, bridgeNumber, dataYear, snapshotRevisionId }) => {
   const [q, setQ] = useState('');
-  const [history, setHistory] = useState<{ q: string; a?: string; sources?: string[]; images?: ReportImage[]; loading?: boolean }[]>([]);
+  const [history, setHistory] = useState<{ q: string; a?: string; sources?: string[]; images?: ReportImage[]; loading?: boolean; evidence?: AskEvidence }[]>([]);
   const [selectedImage, setSelectedImage] = useState<ReportImage | null>(null);
   const [allSources, setAllSources] = useState<string[]>(['Database']);
   const [selected, setSelected] = useState<Set<string>>(new Set(['Database']));
   const [useVisual, setUseVisual] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const activeVisualJobIdRef = useRef<string | null>(null);
+  const [sessions, setSessions] = useState<PrivateSession[]>([]);
+  const [sessionId, setSessionId] = useState('');
   // Real busy state held for the WHOLE request — not derived from per-turn
   // `loading`, which clears on the first streamed token (so Stop would vanish
   // mid-answer for typed/text questions).
@@ -156,6 +191,60 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
       })
       .catch(() => { /* keep just Database */ });
   }, [stateCode, bridgeNumber]);
+
+  useEffect(() => {
+    axios.get('/api/ai/sessions')
+      .then((response) => {
+        const loaded = (response.data?.sessions || []) as PrivateSession[];
+        setSessions(loaded);
+        if (loaded.length > 0) setSessionId((current) => current || loaded[0].id);
+      })
+      .catch(() => { /* private ephemeral mode remains available */ });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!sessionId) return () => { cancelled = true; };
+    axios.get(`/api/ai/sessions/${encodeURIComponent(sessionId)}`)
+      .then((response) => {
+        if (cancelled) return;
+        const turns = (response.data?.turns || []) as PrivateTurn[];
+        const restored: { q: string; a?: string; evidence?: AskEvidence }[] = [];
+        for (const turn of turns) {
+          if (turn.role === 'user') {
+            restored.push({ q: turn.content });
+          } else {
+            const target = [...restored].reverse().find((entry) => entry.a === undefined);
+            if (target) {
+              target.a = turn.content;
+              target.evidence = {
+                provenance_status: turn.provenance_status === 'verified_answer'
+                  ? 'verified_answer'
+                  : 'unverified_model_output',
+                cited_revision: turn.cited_revision || undefined,
+              };
+            }
+          }
+        }
+        setHistory(restored);
+      })
+      .catch(() => { if (!cancelled) setHistory([]); });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  const newPrivateSession = async () => {
+    try {
+      const response = await axios.post('/api/ai/sessions', {
+        title: `Bridge ${bridgeNumber}`,
+        retention_days: 30,
+      });
+      const created = response.data?.session as PrivateSession;
+      if (created?.id) {
+        setSessions((current) => [created, ...current]);
+        setSessionId(created.id);
+      }
+    } catch { /* keep private browser-only history */ }
+  };
 
   // Poll report-index readiness; keep polling while it's still indexing.
   useEffect(() => {
@@ -188,23 +277,101 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
     setHistory((h) => [...h, { q: question, loading: true }]);
     const controller = new AbortController();
     abortRef.current = controller;
+    const requestId = crypto.randomUUID();
+    activeRequestIdRef.current = requestId;
+    const requestedVisual = useVisual;
     const update = (patch: Record<string, unknown>) =>
       setHistory((h) => h.map((t, i) => (i === idx ? { ...t, ...patch } : t)));
     let answer = '';
     try {
-      if (useVisual) {
+      if (requestedVisual) {
         const fileSources = allSources.filter((s) => s !== 'Database');
         const selectedFileSources = [...selected].filter((s) => s !== 'Database');
         const fd = new FormData();
         fd.append('query', question);
         fd.append('state_code', String(stateCode));
         fd.append('bridge_number', String(bridgeNumber));
+        if (dataYear !== undefined && dataYear !== null) fd.append('data_year', String(dataYear));
+        if (snapshotRevisionId) fd.append('snapshot_revision_id', snapshotRevisionId);
+        fd.append('analysis_mode', 'visual');
+        if (sessionId) fd.append('conversation_id', sessionId);
         if (selectedFileSources.length < fileSources.length) {
           fd.append('selected_sources', JSON.stringify(selectedFileSources));
         }
-        const r = await axios.post('/api/bridge-visual-investigation', fd, { signal: controller.signal });
-        const d = r.data || {};
-        update({ loading: false, a: d.answer || 'Visual investigation complete.', sources: d.detections?.map((x: any) => x.source).filter(Boolean) || [], images: d.images || [] });
+        const r = await axios.post('/api/bridge-visual-investigation', fd, {
+          signal: controller.signal,
+          headers: {
+            'X-Request-ID': requestId,
+            'Idempotency-Key': requestId,
+          },
+        });
+        if (activeRequestIdRef.current !== requestId) return;
+        const visualJobId = String(r.data?.job?.job_id || '');
+        if (!visualJobId) throw new Error('Visual job was not accepted.');
+        activeVisualJobIdRef.current = visualJobId;
+
+        let terminalStatus = '';
+        for (let pollCount = 0; pollCount < 1200; pollCount += 1) {
+          if (controller.signal.aborted) throw new DOMException('Stopped', 'AbortError');
+          const statusResponse = await axios.get(
+            `/api/bridge-visual-investigation/jobs/${encodeURIComponent(visualJobId)}`,
+            { signal: controller.signal },
+          );
+          if (activeRequestIdRef.current !== requestId) return;
+          const job = statusResponse.data?.job || {};
+          terminalStatus = String(job.status || '');
+          if (terminalStatus === 'succeeded') break;
+          if (terminalStatus === 'cancelled') {
+            update({ loading: false, a: 'Stopped.' });
+            return;
+          }
+          if (terminalStatus === 'failed') {
+            throw new Error(String(job.error_code || 'Visual investigation failed.'));
+          }
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              window.clearTimeout(timer);
+              reject(new DOMException('Stopped', 'AbortError'));
+            };
+            const timer = window.setTimeout(() => {
+              controller.signal.removeEventListener('abort', onAbort);
+              resolve();
+            }, 1000);
+            controller.signal.addEventListener('abort', onAbort, { once: true });
+          });
+        }
+        if (terminalStatus !== 'succeeded') {
+          throw new Error('Visual investigation timed out while waiting for its durable job.');
+        }
+        const resultResponse = await axios.get(
+          `/api/bridge-visual-investigation/jobs/${encodeURIComponent(visualJobId)}/result`,
+          { signal: controller.signal },
+        );
+        if (
+          activeRequestIdRef.current !== requestId
+          || resultResponse.data?.request_id !== requestId
+        ) return;
+        const d = resultResponse.data || {};
+        const visual = d.visual_evidence || {};
+        update({
+          loading: false,
+          a: d.answer || 'Visual investigation complete.',
+          sources: d.detections?.map((x: any) => x.source).filter(Boolean) || [],
+          images: d.images || [],
+          evidence: {
+            analysis_mode: 'visual',
+            visual_processing_ran: Boolean(visual.visual_processing_ran),
+            provenance_status: sessionId ? 'unverified_model_output' : undefined,
+            cited_revision: d.bridge_snapshot?.identity?.snapshot_revision_id,
+            model_id: visual.model_id,
+            inspected_count: Number(visual.usage?.actual_images_inspected || 0),
+            estimated_cost_usd: Number(visual.usage?.estimated_cost_usd || 0),
+            evidence_receipt_sha256: d.evidence_receipt_sha256,
+            privacy: visual.privacy?.raw_report_images_may_be_sent_to_configured_model
+              ? 'Raw report images may be sent to the configured model.'
+              : undefined,
+          },
+        });
         return;
       }
 
@@ -212,14 +379,22 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
       fd.append('question', question);
       fd.append('state_code', String(stateCode));
       fd.append('bridge_number', String(bridgeNumber));
+      if (dataYear !== undefined && dataYear !== null) fd.append('data_year', String(dataYear));
+      if (snapshotRevisionId) fd.append('snapshot_revision_id', snapshotRevisionId);
+      fd.append('analysis_mode', 'text');
+      if (sessionId) fd.append('conversation_id', sessionId);
       // Only send a filter when a strict subset is chosen (so "all" keeps embedding ranking).
       if (selected.size < allSources.length) fd.append('selected_sources', JSON.stringify([...selected]));
       // Stream the answer (NDJSON: meta → token… → done; image routes send 'final').
-      const res = await fetch('/api/db-rag/stream', { method: 'POST', body: fd, signal: controller.signal });
+      const res = await fetch('/api/db-rag/stream', {
+        method: 'POST', body: fd, signal: controller.signal,
+        headers: { 'X-Request-ID': requestId },
+      });
       if (!res.ok || !res.body) throw new Error(`Request failed (${res.status})`);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
+      let citedRevision: string | undefined;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -231,8 +406,21 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
           if (!line) continue;
           let evt: any;
           try { evt = JSON.parse(line); } catch { continue; }
-          if (evt.type === 'meta') {
-            update({ loading: false, sources: evt.reports_used || [], images: evt.images || [] });
+          if (activeRequestIdRef.current !== requestId || evt.request_id !== requestId) continue;
+          if (evt.type === 'accepted') {
+            citedRevision = evt.bridge_snapshot?.identity?.snapshot_revision_id;
+            continue;
+          } else if (evt.type === 'evidence') {
+            update({
+              loading: false,
+              sources: evt.reports_used || [],
+              images: evt.images || [],
+              evidence: sessionId ? {
+                analysis_mode: 'text',
+                provenance_status: 'unverified_model_output',
+                cited_revision: citedRevision,
+              } : undefined,
+            });
           } else if (evt.type === 'token') {
             answer += evt.text;
             update({ loading: false, a: answer });
@@ -252,14 +440,25 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
       update({ loading: false, a: stopped ? (answer || 'Stopped.') : `Error: ${err?.message || 'failed'}` });
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      if (activeRequestIdRef.current === requestId) activeRequestIdRef.current = null;
+      activeVisualJobIdRef.current = null;
+      if (requestedVisual) setUseVisual(false);
       setBusy(false);
     }
   };
 
   // Stop both the client request AND the server-side LLM generation.
   const stop = () => {
+    const visualJobId = activeVisualJobIdRef.current;
     abortRef.current?.abort();
-    axios.post('/api/ask-cancel').catch(() => { /* best-effort */ });
+    const requestId = activeRequestIdRef.current;
+    if (visualJobId) {
+      axios.post(
+        `/api/bridge-visual-investigation/jobs/${encodeURIComponent(visualJobId)}/cancel`,
+      ).catch(() => { /* best-effort durable cancellation */ });
+    } else if (requestId) {
+      axios.post(`/api/ai/requests/${encodeURIComponent(requestId)}/cancel`).catch(() => { /* best-effort */ });
+    }
   };
 
   return (
@@ -298,6 +497,19 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
       </div>
 
       <div className="shrink-0 mb-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 p-3">
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <label className="text-xs font-semibold text-slate-500" htmlFor="bridge-private-session">Private session</label>
+          <select id="bridge-private-session" value={sessionId} onChange={(event) => setSessionId(event.target.value)} className="min-w-48 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs">
+            <option value="">Browser-only (ephemeral)</option>
+            {sessions.map((session) => <option key={session.id} value={session.id}>{session.title}</option>)}
+          </select>
+          <button type="button" onClick={newPrivateSession} className="text-xs text-brand-600 hover:underline">New private session</button>
+        </div>
+        {sessionId && (
+          <p className="mb-3 text-[11px] text-slate-500">
+            Saved privately for 30 days. Ordinary model answers are explicitly labeled unverified; the cited published revision and evidence receipt are retained when available.
+          </p>
+        )}
         <div className="flex flex-wrap items-center gap-3">
           <label className={`inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 ${busy ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
             <input type="checkbox" checked={useVisual} disabled={busy} onChange={(e) => setUseVisual(e.target.checked)} className="accent-brand-500 w-4 h-4" />
@@ -306,7 +518,7 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
           </label>
           <span className="text-xs text-slate-500">
             {useVisual
-              ? 'Checked: scans likely report images and returns only detected matches.'
+              ? 'One request only: up to 8 likely images; raw images may be sent to the configured model; estimated cap $0.25.'
               : 'Unchecked: uses database and report text only.'}
           </span>
         </div>
@@ -332,6 +544,20 @@ const BridgeRagTab: React.FC<{ stateCode: string | number; bridgeNumber: string 
               <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-slate-400 mt-1">
                 <FileText className="w-3 h-3" /> from:
                 {t.sources.map((s) => <span key={s} className="px-1.5 py-0.5 rounded bg-slate-500/10">{s}</span>)}
+              </div>
+            )}
+            {t.evidence && (
+              <div className="mt-1 text-[11px] text-slate-500">
+                {t.evidence.provenance_status === 'verified_answer'
+                  ? 'Verified answer'
+                  : t.evidence.provenance_status === 'unverified_model_output'
+                    ? 'Unverified model output'
+                    : t.evidence.analysis_mode === 'visual' ? 'Visual evidence' : 'Text evidence'}
+                {t.evidence.cited_revision ? ` Â· revision ${t.evidence.cited_revision}` : ''}
+                {typeof t.evidence.inspected_count === 'number' ? ` · ${t.evidence.inspected_count} image(s) inspected` : ''}
+                {t.evidence.model_id ? ` · ${t.evidence.model_id}` : ''}
+                {typeof t.evidence.estimated_cost_usd === 'number' ? ` · estimated $${t.evidence.estimated_cost_usd.toFixed(4)}` : ''}
+                {t.evidence.privacy ? ` · ${t.evidence.privacy}` : ''}
               </div>
             )}
           </div>

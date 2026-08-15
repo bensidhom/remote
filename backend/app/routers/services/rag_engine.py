@@ -18,6 +18,7 @@ import os
 import json
 import hashlib
 import base64
+import asyncio
 import shutil
 import io
 import time
@@ -31,7 +32,6 @@ from typing import Optional, List, Dict
 from . import llm_providers
 
 # ── Cancellation + progress tracking ────────────────────────────────
-_cancel_event = threading.Event()
 _progress_info: Dict[str, object] = {
     "stage": "",
     "step": 0,
@@ -47,14 +47,35 @@ class CancelledError(Exception):
     pass
 
 
+class DocumentLimitError(RuntimeError):
+    """Raised before a document can exceed a server-owned resource bound."""
+
+    def __init__(self, message: str, *, code: str = "document_limit_exceeded"):
+        super().__init__(message)
+        self.code = code
+        self.status_code = 413
+
+
+class DocumentFormatError(ValueError):
+    """Raised when the parser input is not an accepted PDF."""
+
+    def __init__(self, message: str, *, code: str = "invalid_pdf"):
+        super().__init__(message)
+        self.code = code
+        self.status_code = 415
+
+
 def cancel_processing():
-    """Signal that the current processing should be cancelled."""
-    _cancel_event.set()
+    """Reject the retired process-global cancellation operation."""
+    raise RuntimeError("global document cancellation is retired; use a request token")
 
 
-def _check_cancelled():
-    """Raise CancelledError if cancellation was requested."""
-    if _cancel_event.is_set():
+def _check_cancelled(cancellation=None):
+    """Raise when the supplied request token (or legacy token) is cancelled."""
+    if cancellation is None:
+        return
+    token = cancellation
+    if bool(getattr(token, "is_set", lambda: False)()):
         raise CancelledError("Processing cancelled by user.")
 
 
@@ -112,7 +133,6 @@ def _start_eta_heartbeat(
 
 def _reset_progress():
     """Reset progress tracking for a new operation."""
-    _cancel_event.clear()
     with _progress_lock:
         _progress_info.update({
             "stage": "",
@@ -145,6 +165,58 @@ CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', '500'))
 CHUNK_OVERLAP = int(os.getenv('CHUNK_OVERLAP', '100'))
 LIGHTRAG_TIKTOKEN_MODEL = os.getenv('LIGHTRAG_TIKTOKEN_MODEL', 'gpt-4o-mini')
 
+
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+# These are intentionally server-owned; request parameters cannot increase them.
+PDF_MAX_PAGES = _bounded_env_int(
+    "BRIDGEGUARD_PDF_MAX_PAGES", 300, minimum=1, maximum=2_000,
+)
+PDF_MAX_INPUT_BYTES = _bounded_env_int(
+    "BRIDGEGUARD_DOCUMENT_MAX_UPLOAD_BYTES", 50 * 1024 * 1024,
+    minimum=1024, maximum=250 * 1024 * 1024,
+)
+PDF_MAX_EMBEDDED_IMAGES = _bounded_env_int(
+    "BRIDGEGUARD_PDF_MAX_EMBEDDED_IMAGES", 512, minimum=1, maximum=2_000,
+)
+PDF_MAX_PAGE_PIXELS = _bounded_env_int(
+    "BRIDGEGUARD_PDF_MAX_PAGE_PIXELS", 24_000_000,
+    minimum=1_000_000, maximum=100_000_000,
+)
+PDF_MAX_TOTAL_RENDER_PIXELS = _bounded_env_int(
+    "BRIDGEGUARD_PDF_MAX_TOTAL_RENDER_PIXELS", 500_000_000,
+    minimum=1_000_000, maximum=2_000_000_000,
+)
+PDF_MAX_EXTRACTED_TEXT_CHARS = _bounded_env_int(
+    "BRIDGEGUARD_PDF_MAX_EXTRACTED_TEXT_CHARS", 5_000_000,
+    minimum=10_000, maximum=25_000_000,
+)
+PDF_MAX_DERIVATIVE_BYTES = _bounded_env_int(
+    "BRIDGEGUARD_PDF_MAX_DERIVATIVE_BYTES", 256 * 1024 * 1024,
+    minimum=1024 * 1024, maximum=1024 * 1024 * 1024,
+)
+DERIVATIVE_RESPONSE_MAX_IMAGES = _bounded_env_int(
+    "BRIDGEGUARD_DERIVATIVE_RESPONSE_MAX_IMAGES", 8, minimum=1, maximum=32,
+)
+DERIVATIVE_RESPONSE_MAX_BYTES = _bounded_env_int(
+    "BRIDGEGUARD_DERIVATIVE_RESPONSE_MAX_BYTES", 12 * 1024 * 1024,
+    minimum=256 * 1024, maximum=64 * 1024 * 1024,
+)
+DERIVATIVE_RESPONSE_MAX_SINGLE_BYTES = _bounded_env_int(
+    "BRIDGEGUARD_DERIVATIVE_RESPONSE_MAX_SINGLE_BYTES", 6 * 1024 * 1024,
+    minimum=64 * 1024, maximum=32 * 1024 * 1024,
+)
+QUERY_CONTEXT_MAX_CHARS = _bounded_env_int(
+    "BRIDGEGUARD_DOCUMENT_QUERY_CONTEXT_MAX_CHARS", 160_000,
+    minimum=8_000, maximum=1_000_000,
+)
+
 # Centralized under the repo-relative data/ folder (see datapaths.py); the
 # RAG_WORKING_DIR env override still applies.
 from .datapaths import RAG_WORKING_DIR
@@ -157,6 +229,45 @@ _lightrag_cache: Dict[str, object] = {}
 # Cleared on server start; only set after a real ingest_document() call.
 # Prevents queries from falling back to stale manifest docs across restarts.
 _active_session_hash: Optional[str] = None
+_active_session_hashes: Dict[str, str] = {}
+
+
+def _document_scope_key(
+    owner_id: str | None,
+    workspace_id: str | None,
+) -> str | None:
+    if owner_id is None and workspace_id is None:
+        return None
+    if owner_id is None or workspace_id is None:
+        raise ValueError("owner_id and workspace_id must be supplied together")
+    owner = str(owner_id).strip().lower()
+    if not owner or len(owner) > 255 or any(ord(char) < 32 for char in owner):
+        raise ValueError("owner_id is invalid")
+    workspace = str(workspace_id).strip()
+    if (
+        not workspace
+        or len(workspace) > 255
+        or any(ord(char) < 32 for char in workspace)
+    ):
+        raise ValueError("workspace_id is invalid")
+    return hashlib.sha256(
+        f"vision-document-scope-v1\0{workspace}\0{owner}".encode("utf-8")
+    ).hexdigest()
+
+
+def _entry_owned_by(
+    entry: dict | None,
+    owner_id: str | None,
+    workspace_id: str | None,
+) -> bool:
+    """Fail closed for HTTP callers while retaining unscoped internal tests."""
+    if entry is None:
+        return False
+    scope_key = _document_scope_key(owner_id, workspace_id)
+    if scope_key is None:
+        return True
+    scopes = entry.get("document_scope_sha256s")
+    return isinstance(scopes, list) and scope_key in scopes
 
 
 def _resolve_tiktoken_model_name() -> str:
@@ -264,16 +375,53 @@ def _save_manifest() -> None:
             "embedding_profile": v.get("embedding_profile"),
             "embeddings": emb.tolist() if isinstance(emb, np.ndarray) else (emb if emb else None),
             "image_embeddings": img_emb.tolist() if isinstance(img_emb, np.ndarray) else (img_emb if img_emb else None),
+            "document_scope_sha256s": sorted({
+                str(scope).strip().lower()
+                for scope in (v.get("document_scope_sha256s") or [])
+                if _re.fullmatch(r"[0-9a-f]{64}", str(scope).strip().lower())
+            }),
         }
     _MANIFEST_PATH.write_text(json.dumps(meta))
 
 
-def _file_hash(file_path: str) -> str:
+def _file_hash(file_path: str, cancellation=None) -> str:
     h = hashlib.sha256()
     with open(file_path, 'rb') as f:
         for chunk in iter(lambda: f.read(1 << 16), b''):
+            _check_cancelled(cancellation)
             h.update(chunk)
+    _check_cancelled(cancellation)
     return h.hexdigest()
+
+
+def _validate_pdf_input(file_path: str) -> None:
+    path = Path(file_path)
+    if path.suffix.lower() != ".pdf":
+        raise DocumentFormatError(
+            "Document ingestion accepts PDF files only.",
+            code="unsupported_document_type",
+        )
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise DocumentFormatError("The PDF cannot be read.", code="unreadable_pdf") from exc
+    if size <= 0:
+        raise DocumentFormatError("The PDF is empty.", code="empty_document")
+    if size > PDF_MAX_INPUT_BYTES:
+        raise DocumentLimitError(
+            f"PDF exceeds the {PDF_MAX_INPUT_BYTES}-byte parser limit.",
+            code="document_too_large",
+        )
+    try:
+        with path.open("rb") as stream:
+            magic = stream.read(8)
+    except OSError as exc:
+        raise DocumentFormatError("The PDF cannot be read.", code="unreadable_pdf") from exc
+    if not magic.startswith(b"%PDF-"):
+        raise DocumentFormatError(
+            "The file does not have a valid PDF signature.",
+            code="invalid_pdf_signature",
+        )
 
 
 def _resize_image_b64(image_path: str, max_dim: int = 768) -> str:
@@ -334,15 +482,108 @@ def _query_image_bytes(data: bytes, question: str) -> str:
 _PHOTO_NUMBER_RE = _re.compile(r'\b(?:photo|figure|fig\.?|image|img)\s*[:#-]?\s*(\d+)\b', _re.IGNORECASE)
 
 
-def _extract_text_blocks_with_bbox(page) -> List[dict]:
+def _validate_pdf_page_count(pdf) -> int:
+    if bool(getattr(pdf, "needs_pass", False)):
+        raise DocumentFormatError(
+            "Password-protected PDFs are not supported.", code="encrypted_pdf",
+        )
+    page_count = len(pdf)
+    if page_count < 1:
+        raise DocumentFormatError("PDF contains no pages.", code="pdf_empty")
+    if page_count > PDF_MAX_PAGES:
+        raise DocumentLimitError(
+            f"PDF has {page_count} pages; the limit is {PDF_MAX_PAGES}.",
+            code="pdf_page_limit",
+        )
+    return page_count
+
+
+def _reserve_render_pixels(
+    width: float,
+    height: float,
+    consumed: int,
+    *,
+    label: str,
+) -> int:
+    pixels = max(0, int(width)) * max(0, int(height))
+    if pixels > PDF_MAX_PAGE_PIXELS:
+        raise DocumentLimitError(
+            f"{label} requires {pixels} rendered pixels; the per-image limit is "
+            f"{PDF_MAX_PAGE_PIXELS}.",
+            code="pdf_pixel_limit",
+        )
+    total = consumed + pixels
+    if total > PDF_MAX_TOTAL_RENDER_PIXELS:
+        raise DocumentLimitError(
+            "PDF derivative rendering exceeds the total pixel limit.",
+            code="pdf_total_pixel_limit",
+        )
+    return total
+
+
+def _encoded_base64_size(raw_bytes: int) -> int:
+    return 4 * ((max(0, int(raw_bytes)) + 2) // 3)
+
+
+def _bounded_image_payload(
+    path: Path,
+    *,
+    mime: str,
+    remaining_encoded_bytes: int = DERIVATIVE_RESPONSE_MAX_BYTES,
+) -> tuple[Optional[dict], int]:
+    """Return one bounded base64 image and its encoded-byte charge."""
+    try:
+        raw_size = path.stat().st_size
+    except OSError:
+        return None, 0
+    encoded_size = _encoded_base64_size(raw_size)
+    if (
+        raw_size <= 0
+        or raw_size > DERIVATIVE_RESPONSE_MAX_SINGLE_BYTES
+        or encoded_size > max(0, remaining_encoded_bytes)
+    ):
+        return None, 0
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None, 0
+    # Re-check after reading in case the file changed between stat and read.
+    encoded_size = _encoded_base64_size(len(data))
+    if (
+        len(data) > DERIVATIVE_RESPONSE_MAX_SINGLE_BYTES
+        or encoded_size > max(0, remaining_encoded_bytes)
+    ):
+        return None, 0
+    return {
+        "filename": path.name,
+        "mime": mime,
+        "data": base64.b64encode(data).decode("ascii"),
+    }, encoded_size
+
+
+def _cleanup_partial_document_derivatives(doc_hash: str) -> None:
+    if not _re.fullmatch(r"[0-9a-f]{64}", str(doc_hash or "")):
+        return
+    root = Path(RAG_WORKING_DIR).resolve()
+    for category in ("extracted_images", "page_images"):
+        category_root = (root / category).resolve()
+        target = (category_root / doc_hash[:16]).resolve()
+        if target.parent == category_root and target.exists():
+            shutil.rmtree(target)
+
+
+def _extract_text_blocks_with_bbox(page, cancellation=None) -> List[dict]:
     blocks: List[dict] = []
     try:
+        _check_cancelled(cancellation)
         data = page.get_text("dict")
         for b in data.get("blocks", []):
+            _check_cancelled(cancellation)
             if b.get("type") != 0:
                 continue
             lines = []
             for ln in b.get("lines", []):
+                _check_cancelled(cancellation)
                 parts = [sp.get("text", "") for sp in ln.get("spans", []) if sp.get("text")]
                 if parts:
                     lines.append(''.join(parts))
@@ -353,6 +594,9 @@ def _extract_text_blocks_with_bbox(page) -> List[dict]:
             if not bbox or len(bbox) != 4:
                 continue
             blocks.append({"text": text, "bbox": bbox})
+        _check_cancelled(cancellation)
+    except CancelledError:
+        raise
     except Exception:
         pass
     return blocks
@@ -370,7 +614,9 @@ def _parse_photo_number(text: str) -> Optional[int]:
         return None
 
 
-def _nearest_caption_for_rect(text_blocks: List[dict], rect) -> tuple[Optional[str], Optional[int]]:
+def _nearest_caption_for_rect(
+    text_blocks: List[dict], rect, cancellation=None,
+) -> tuple[Optional[str], Optional[int]]:
     """Find a likely caption nearest/below image rect and parse photo number if present."""
     if rect is None or not text_blocks:
         return None, None
@@ -378,6 +624,7 @@ def _nearest_caption_for_rect(text_blocks: List[dict], rect) -> tuple[Optional[s
     candidates = []
     rx0, ry0, rx1, ry1 = rect.x0, rect.y0, rect.x1, rect.y1
     for b in text_blocks:
+        _check_cancelled(cancellation)
         bx0, by0, bx1, by1 = b["bbox"]
         # Horizontal overlap ratio
         overlap = max(0.0, min(rx1, bx1) - max(rx0, bx0))
@@ -400,7 +647,7 @@ def _nearest_caption_for_rect(text_blocks: List[dict], rect) -> tuple[Optional[s
     return caption, _parse_photo_number(caption)
 
 
-def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
+def _extract_text_and_images(file_path: str, doc_hash: str, cancellation=None) -> tuple:
     """
         Extract text and visual assets from a PDF using PyMuPDF.
     Returns (pages, extracted_images) where:
@@ -414,23 +661,46 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
 
     pages: List[dict] = []
     extracted_images: List[dict] = []
+    extracted_chars = 0
+    rendered_pixels = 0
+    derivative_bytes = 0
 
-    pdf = pymupdf.open(file_path)
     try:
-        for page_num in range(len(pdf)):
+        pdf = pymupdf.open(file_path)
+    except Exception as exc:
+        raise DocumentFormatError(
+            "The PDF could not be opened.", code="unreadable_pdf",
+        ) from exc
+    try:
+        page_count = _validate_pdf_page_count(pdf)
+        for page_num in range(page_count):
+            _check_cancelled(cancellation)
             page = pdf[page_num]
             pg = page_num + 1
-            text_blocks = _extract_text_blocks_with_bbox(page)
             seen_instances = set()
             page_image_counter = 0
 
             # ── Extract text ──
             text = page.get_text("text").strip()
+            extracted_chars += len(text)
+            if extracted_chars > PDF_MAX_EXTRACTED_TEXT_CHARS:
+                raise DocumentLimitError(
+                    "PDF extracted text exceeds the configured safety limit.",
+                    code="pdf_text_limit",
+                )
             pages.append({"page": pg, "text": text if text else f"[Page {pg}: no text content]"})
+            _check_cancelled(cancellation)
+            text_blocks = _extract_text_blocks_with_bbox(page, cancellation)
 
             # ── Extract embedded images by placement rects (prevents index drift) ──
             img_list = page.get_images(full=True)
+            if len(img_list) > PDF_MAX_EMBEDDED_IMAGES:
+                raise DocumentLimitError(
+                    f"PDF page {pg} advertises more images than the configured limit.",
+                    code="pdf_image_limit",
+                )
             for img_idx, img_info in enumerate(img_list):
+                _check_cancelled(cancellation)
                 xref = img_info[0]
                 try:
                     rects = page.get_image_rects(xref)
@@ -438,6 +708,7 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
                         rects = [None]
 
                     for rect_idx, rect in enumerate(rects):
+                        _check_cancelled(cancellation)
                         if rect is not None:
                             # Dedupe repeated placements.
                             key = (xref, round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1))
@@ -448,9 +719,27 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
                             if rect.width < 80 or rect.height < 80:
                                 continue
 
+                            if len(extracted_images) >= PDF_MAX_EMBEDDED_IMAGES:
+                                raise DocumentLimitError(
+                                    "PDF contains more extractable images than the configured limit.",
+                                    code="pdf_image_limit",
+                                )
+                            rendered_pixels = _reserve_render_pixels(
+                                rect.width * 2,
+                                rect.height * 2,
+                                rendered_pixels,
+                                label=f"PDF page {pg} image",
+                            )
                             pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=rect, alpha=False)
+                            _check_cancelled(cancellation)
                             out_path = images_dir / f"page_{pg:03d}_img_{img_idx:02d}_inst_{rect_idx:02d}.png"
                             pix.save(str(out_path))
+                            derivative_bytes += out_path.stat().st_size
+                            if derivative_bytes > PDF_MAX_DERIVATIVE_BYTES:
+                                raise DocumentLimitError(
+                                    "PDF extracted derivatives exceed the configured byte limit.",
+                                    code="pdf_derivative_limit",
+                                )
                             w, h, ext = pix.width, pix.height, "png"
                             bbox = [rect.x0, rect.y0, rect.x1, rect.y1]
                         else:
@@ -463,11 +752,28 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
                             h = base_image.get("height", 0)
                             if w < 80 or h < 80:
                                 continue
+                            if len(extracted_images) >= PDF_MAX_EMBEDDED_IMAGES:
+                                raise DocumentLimitError(
+                                    "PDF contains more extractable images than the configured limit.",
+                                    code="pdf_image_limit",
+                                )
+                            rendered_pixels = _reserve_render_pixels(
+                                w, h, rendered_pixels, label=f"PDF page {pg} image",
+                            )
+                            derivative_bytes += len(img_data)
+                            if derivative_bytes > PDF_MAX_DERIVATIVE_BYTES:
+                                raise DocumentLimitError(
+                                    "PDF extracted derivatives exceed the configured byte limit.",
+                                    code="pdf_derivative_limit",
+                                )
                             out_path = images_dir / f"page_{pg:03d}_img_{img_idx:02d}_inst_{rect_idx:02d}.{ext}"
                             out_path.write_bytes(img_data)
                             bbox = None
 
-                        caption, photo_number = _nearest_caption_for_rect(text_blocks, rect) if rect is not None else (None, None)
+                        caption, photo_number = (
+                            _nearest_caption_for_rect(text_blocks, rect, cancellation)
+                            if rect is not None else (None, None)
+                        )
                         image_id = f"P{pg:03d}-I{page_image_counter:03d}"
                         page_image_counter += 1
 
@@ -486,17 +792,24 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
                             "photo_number": photo_number,
                             "source": "embedded_rect" if rect is not None else "embedded_raw",
                         })
+                except (CancelledError, DocumentLimitError):
+                    raise
                 except Exception as exc:
                     print(f"  [extract] Failed to extract image xref={xref} page {pg}: {exc}")
 
             # ── Caption-driven fallback splitting for scanned pages with merged visuals ──
             if page_image_counter <= 1:
-                caption_blocks = [b for b in text_blocks if _parse_photo_number(b.get("text", "")) is not None]
+                caption_blocks = []
+                for block in text_blocks:
+                    _check_cancelled(cancellation)
+                    if _parse_photo_number(block.get("text", "")) is not None:
+                        caption_blocks.append(block)
                 caption_blocks.sort(key=lambda b: b["bbox"][1])
                 if len(caption_blocks) >= 2:
                     page_rect = page.rect
                     segment_top = page_rect.y0 + 5
                     for cap_idx, cap in enumerate(caption_blocks):
+                        _check_cancelled(cancellation)
                         cap_x0, cap_y0, cap_x1, cap_y1 = cap["bbox"]
                         segment_bottom = cap_y0 - 6
                         if segment_bottom - segment_top < 120:
@@ -509,9 +822,27 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
                             continue
 
                         try:
+                            if len(extracted_images) >= PDF_MAX_EMBEDDED_IMAGES:
+                                raise DocumentLimitError(
+                                    "PDF contains more extractable images than the configured limit.",
+                                    code="pdf_image_limit",
+                                )
+                            rendered_pixels = _reserve_render_pixels(
+                                clip.width * 2,
+                                clip.height * 2,
+                                rendered_pixels,
+                                label=f"PDF page {pg} caption image",
+                            )
                             pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=clip, alpha=False)
+                            _check_cancelled(cancellation)
                             out_path = images_dir / f"page_{pg:03d}_caption_{cap_idx:02d}.png"
                             pix.save(str(out_path))
+                            derivative_bytes += out_path.stat().st_size
+                            if derivative_bytes > PDF_MAX_DERIVATIVE_BYTES:
+                                raise DocumentLimitError(
+                                    "PDF extracted derivatives exceed the configured byte limit.",
+                                    code="pdf_derivative_limit",
+                                )
                             image_id = f"P{pg:03d}-C{cap_idx:03d}"
                             extracted_images.append({
                                 "image_id": image_id,
@@ -529,10 +860,19 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
                                 "source": "caption_region",
                             })
                             page_image_counter += 1
+                        except (CancelledError, DocumentLimitError):
+                            raise
                         except Exception:
                             pass
 
                         segment_top = cap_y1 + 6
+        _check_cancelled(cancellation)
+    except (CancelledError, DocumentLimitError, DocumentFormatError):
+        raise
+    except Exception as exc:
+        raise DocumentFormatError(
+            "The PDF content could not be parsed.", code="unreadable_pdf",
+        ) from exc
     finally:
         pdf.close()
 
@@ -540,7 +880,12 @@ def _extract_text_and_images(file_path: str, doc_hash: str) -> tuple:
 
 
 # ── PDF → page images (PyMuPDF) — for "show page" requests ──────────
-def _render_pdf_pages(file_path: str, doc_hash: str, dpi: int = 150) -> List[str]:
+def _render_pdf_pages(
+    file_path: str,
+    doc_hash: str,
+    dpi: int = 150,
+    cancellation=None,
+) -> List[str]:
     """Render each PDF page as a PNG image. Returns list of image paths."""
     pymupdf = _get_pymupdf_module()
 
@@ -548,15 +893,45 @@ def _render_pdf_pages(file_path: str, doc_hash: str, dpi: int = 150) -> List[str
     images_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths: List[str] = []
-    pdf = pymupdf.open(file_path)
+    rendered_pixels = 0
+    derivative_bytes = 0
     try:
-        for page_num in range(len(pdf)):
+        pdf = pymupdf.open(file_path)
+    except Exception as exc:
+        raise DocumentFormatError(
+            "The PDF could not be opened.", code="unreadable_pdf",
+        ) from exc
+    try:
+        page_count = _validate_pdf_page_count(pdf)
+        for page_num in range(page_count):
+            _check_cancelled(cancellation)
             page = pdf[page_num]
+            scale = dpi / 72
+            rendered_pixels = _reserve_render_pixels(
+                page.rect.width * scale,
+                page.rect.height * scale,
+                rendered_pixels,
+                label=f"PDF page {page_num + 1}",
+            )
             mat = pymupdf.Matrix(dpi / 72, dpi / 72)
-            pix = page.get_pixmap(matrix=mat)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            _check_cancelled(cancellation)
             out_path = images_dir / f"page_{page_num + 1:03d}.png"
             pix.save(str(out_path))
+            derivative_bytes += out_path.stat().st_size
+            if derivative_bytes > PDF_MAX_DERIVATIVE_BYTES:
+                raise DocumentLimitError(
+                    "PDF rendered pages exceed the configured byte limit.",
+                    code="pdf_derivative_limit",
+                )
             image_paths.append(str(out_path))
+        _check_cancelled(cancellation)
+    except (CancelledError, DocumentLimitError, DocumentFormatError):
+        raise
+    except Exception as exc:
+        raise DocumentFormatError(
+            "The PDF pages could not be rendered.", code="unreadable_pdf",
+        ) from exc
     finally:
         pdf.close()
     return image_paths
@@ -911,13 +1286,19 @@ def _annotate_image_with_detections(image_path: str, detections: List[dict]) -> 
 
 
 # ── text chunking (embedding fallback) ──────────────────────────────
-def _split_page_chunks(pages: List[dict], chunk_size: int = None, overlap: int = None) -> List[dict]:
+def _split_page_chunks(
+    pages: List[dict],
+    chunk_size: int = None,
+    overlap: int = None,
+    cancellation=None,
+) -> List[dict]:
     if chunk_size is None:
         chunk_size = CHUNK_SIZE
     if overlap is None:
         overlap = CHUNK_OVERLAP
     chunks: List[dict] = []
     for pg in pages:
+        _check_cancelled(cancellation)
         text = pg["text"]
         if text.startswith("[Page") and "no text content]" in text:
             continue
@@ -926,6 +1307,7 @@ def _split_page_chunks(pages: List[dict], chunk_size: int = None, overlap: int =
             continue
         start = 0
         while start < len(words):
+            _check_cancelled(cancellation)
             end = min(start + chunk_size, len(words))
             chunks.append({"page": pg["page"], "text": ' '.join(words[start:end])})
             if end == len(words):
@@ -981,15 +1363,17 @@ def _get_relevant(question: str, chunks: List[dict], k: int = 8,
     return scored[:k] if scored else chunks[:k]
 
 
-def _compute_embeddings(chunks: List[dict]) -> Optional[np.ndarray]:
+def _compute_embeddings(chunks: List[dict], cancellation=None) -> Optional[np.ndarray]:
     if not chunks:
         return None
     texts = [c["text"] for c in chunks]
     all_embs = []
     batch_size = 16
     for i in range(0, len(texts), batch_size):
+        _check_cancelled(cancellation)
         batch = texts[i:i + batch_size]
         emb = _embed(batch, input_type="passage")
+        _check_cancelled(cancellation)
         if emb is None:
             print(f"[rag_engine] Embedding batch {i // batch_size} failed")
             return None
@@ -1235,9 +1619,8 @@ def get_page_image_b64(page_num: int, doc_hash: str = None) -> Optional[dict]:
     if not fpath.exists():
         return None
     try:
-        data = fpath.read_bytes()
-        b64 = base64.b64encode(data).decode('utf-8')
-        return {"filename": fpath.name, "mime": "image/png", "data": b64}
+        payload, _ = _bounded_image_payload(fpath, mime="image/png")
+        return payload
     except Exception:
         return None
 
@@ -1289,10 +1672,11 @@ def get_photo_image_b64(photo_num: int, doc_hash: str = None) -> Optional[dict]:
     if not fpath.exists():
         return None
     try:
-        data = fpath.read_bytes()
-        b64 = base64.b64encode(data).decode('utf-8')
         ext = (target.get("ext") or "png").lower()
         mime = f"image/{ext}" if ext != "jpg" else "image/jpeg"
+        payload, _ = _bounded_image_payload(fpath, mime=mime)
+        if payload is None:
+            return None
         raw_cap = target.get('caption') or ''
         if raw_cap:
             display_cap = _re.sub(r'^Description:\s*', '', raw_cap.strip(), flags=_re.IGNORECASE)
@@ -1303,13 +1687,14 @@ def get_photo_image_b64(photo_num: int, doc_hash: str = None) -> Optional[dict]:
             label = f"Photo {photo_num}"
             if target.get('page'):
                 label += f" (page {target['page']})"
-        return {"filename": fpath.name, "mime": mime, "data": b64, "label": label}
+        payload["label"] = label
+        return payload
     except Exception:
         return None
 
 
-def get_all_page_images_b64(doc_hash: str = None) -> List[dict]:
-    """Get all page images as base64."""
+def get_all_page_images_b64(doc_hash: str = None, *, cancellation=None) -> List[dict]:
+    """Get a server-bounded prefix of page images as base64."""
     global _ingested
     if not _ingested:
         _ingested = _load_manifest()
@@ -1320,21 +1705,33 @@ def get_all_page_images_b64(doc_hash: str = None) -> List[dict]:
         return []
 
     results = []
+    remaining = DERIVATIVE_RESPONSE_MAX_BYTES
     for fpath_str in entry.get("page_images", []):
+        _check_cancelled(cancellation)
+        if len(results) >= DERIVATIVE_RESPONSE_MAX_IMAGES or remaining <= 0:
+            break
         fpath = Path(fpath_str)
         if not fpath.exists():
             continue
         try:
-            data = fpath.read_bytes()
-            b64 = base64.b64encode(data).decode('utf-8')
-            results.append({"filename": fpath.name, "mime": "image/png", "data": b64})
+            payload, charged = _bounded_image_payload(
+                fpath, mime="image/png", remaining_encoded_bytes=remaining,
+            )
+            if payload is not None:
+                results.append(payload)
+                remaining -= charged
         except Exception:
             continue
     return results
 
 
-def get_all_extracted_images_b64(doc_hash: str = None, limit: int = 32) -> List[dict]:
-    """Get extracted embedded images (photos/figures) as base64 with labels."""
+def get_all_extracted_images_b64(
+    doc_hash: str = None,
+    limit: int = DERIVATIVE_RESPONSE_MAX_IMAGES,
+    *,
+    cancellation=None,
+) -> List[dict]:
+    """Get a bounded prefix of extracted images as base64 with labels."""
     global _ingested
     if not _ingested:
         _ingested = _load_manifest()
@@ -1345,15 +1742,23 @@ def get_all_extracted_images_b64(doc_hash: str = None, limit: int = 32) -> List[
         return []
 
     results = []
-    for seq, img in enumerate(entry.get('extracted_images', [])[:max(1, min(limit, 200))], start=1):
+    remaining = DERIVATIVE_RESPONSE_MAX_BYTES
+    effective_limit = max(1, min(int(limit), DERIVATIVE_RESPONSE_MAX_IMAGES))
+    for seq, img in enumerate(entry.get('extracted_images', []), start=1):
+        _check_cancelled(cancellation)
+        if len(results) >= effective_limit or remaining <= 0:
+            break
         fpath = Path(img.get('path', ''))
         if not fpath.exists():
             continue
         try:
-            data = fpath.read_bytes()
-            b64 = base64.b64encode(data).decode('utf-8')
             ext = (img.get('ext') or 'png').lower()
             mime = f"image/{ext}" if ext != 'jpg' else 'image/jpeg'
+            payload, charged = _bounded_image_payload(
+                fpath, mime=mime, remaining_encoded_bytes=remaining,
+            )
+            if payload is None:
+                continue
             raw_cap = img.get('caption') or ''
             if raw_cap:
                 # Strip leading "Description: " prefix for cleaner display
@@ -1365,13 +1770,10 @@ def get_all_extracted_images_b64(doc_hash: str = None, limit: int = 32) -> List[
                 label = f"Image {seq}"
                 if img.get('page'):
                     label += f" | Page {img['page']}"
-            results.append({
-                'filename': fpath.name,
-                'mime': mime,
-                'data': b64,
-                'caption': label,
-                'label': label,
-            })
+            payload['caption'] = label
+            payload['label'] = label
+            results.append(payload)
+            remaining -= charged
         except Exception:
             continue
     return results
@@ -1401,15 +1803,19 @@ def get_extracted_image_count(doc_hash: str = None) -> int:
     return len(entry.get("extracted_images", [])) if entry else 0
 
 
-async def _reindex_cached_entry(doc_hash: str, entry: dict) -> bool:
+async def _reindex_cached_entry(doc_hash: str, entry: dict, cancellation=None) -> bool:
     """Reuse parsed content but never vectors from an unknown/different profile."""
     chunks = entry.get("chunks") or []
     descriptions = entry.get("image_descriptions") or []
     entry["kg_ready"] = False
 
-    text_embeddings = _compute_embeddings(chunks) if chunks else None
-    image_embeddings = _compute_embeddings(
-        [{"page": 0, "text": text} for text in descriptions]
+    text_embeddings = await asyncio.to_thread(
+        _compute_embeddings, chunks, cancellation,
+    ) if chunks else None
+    image_embeddings = await asyncio.to_thread(
+        _compute_embeddings,
+        [{"page": 0, "text": text} for text in descriptions],
+        cancellation,
     ) if descriptions else None
     complete = (
         (not chunks or text_embeddings is not None)
@@ -1439,7 +1845,14 @@ async def _reindex_cached_entry(doc_hash: str, entry: dict) -> bool:
 
 
 # ── public API ──────────────────────────────────────────────────────
-async def ingest_document(file_path: str) -> dict:
+async def ingest_document(
+    file_path: str,
+    *,
+    analysis_mode: str = "text",
+    cancellation=None,
+    owner_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict:
     """
     Hybrid ingestion pipeline:
       1. Extract text directly from PDF (instant, no LLM)
@@ -1449,18 +1862,35 @@ async def ingest_document(file_path: str) -> dict:
       5. Compute embeddings for text chunks
       6. Describe extracted images with vision model (only real images, not every page)
     """
-    global _ingested, _active_session_hash
+    mode = str(analysis_mode or "").strip().lower()
+    if mode not in {"text", "visual"}:
+        raise ValueError("analysis_mode must be text or visual")
+    _check_cancelled(cancellation)
+
+    global _ingested, _active_session_hash, _active_session_hashes
+    scope_key = _document_scope_key(owner_id, workspace_id)
 
     if not _ingested:
         _ingested = _load_manifest()
 
-    doc_hash = _file_hash(file_path)
+    await asyncio.to_thread(_validate_pdf_input, file_path)
+    _check_cancelled(cancellation)
+    doc_hash = await asyncio.to_thread(_file_hash, file_path, cancellation)
+    _check_cancelled(cancellation)
     fname = Path(file_path).name
 
     # Check cache
     if doc_hash in _ingested:
         entry = _ingested[doc_hash]
         if entry.get("pages"):
+            if scope_key is not None:
+                scopes = {
+                    str(value).strip().lower()
+                    for value in (entry.get("document_scope_sha256s") or [])
+                    if _re.fullmatch(r"[0-9a-f]{64}", str(value).strip().lower())
+                }
+                scopes.add(scope_key)
+                entry["document_scope_sha256s"] = sorted(scopes)
             reindexed = False
             reindex_attempted = False
             if _entry_embeddings_compatible(entry):
@@ -1480,8 +1910,13 @@ async def ingest_document(file_path: str) -> dict:
                     f"[rag_engine] Cached vectors for {fname} have no compatible "
                     "embedding profile; re-indexing parsed content"
                 )
-                reindexed = await _reindex_cached_entry(doc_hash, entry)
+                reindexed = await _reindex_cached_entry(
+                    doc_hash, entry, cancellation=cancellation,
+                )
             _active_session_hash = doc_hash  # mark as active even on cache hit
+            if scope_key is not None:
+                _active_session_hashes[scope_key] = doc_hash
+                _save_manifest()
             print(f"[rag_engine] Cache hit for {fname} - parsed content reused")
             return {
                 "status": "success",
@@ -1497,15 +1932,24 @@ async def ingest_document(file_path: str) -> dict:
                 ),
                 "pages_found": len(entry.get("page_images", [])),
                 "images_found": len(entry.get("extracted_images", [])),
+                "analysis_mode": mode,
+                "visual_processing_ran": False,
+                "inspected_images": [],
             }
 
     # ── Step 1: Extract text + embedded images (fast, no LLM) ──
     _reset_progress()
     _update_progress("Extracting text and images", 0, 5)  # placeholder total until images known
-    _check_cancelled()
+    _check_cancelled(cancellation)
 
     print(f"[rag_engine] Extracting text and images from {fname} ...")
-    pages, extracted_images = _extract_text_and_images(file_path, doc_hash)
+    try:
+        pages, extracted_images = await asyncio.to_thread(
+            _extract_text_and_images, file_path, doc_hash, cancellation,
+        )
+    except Exception:
+        await asyncio.to_thread(_cleanup_partial_document_derivatives, doc_hash)
+        raise
     text_pages = [p for p in pages if not p["text"].startswith("[Page")]
     print(f"[rag_engine] Extracted text from {len(text_pages)}/{len(pages)} pages, "
           f"found {len(extracted_images)} embedded images")
@@ -1515,21 +1959,36 @@ async def ingest_document(file_path: str) -> dict:
 
     # ── Step 2: Render page images for display ──
     _update_progress("Rendering page images", 1, total_steps)
-    _check_cancelled()
+    _check_cancelled(cancellation)
     print(f"[rag_engine] Rendering {len(pages)} page images for display ...")
-    page_images = _render_pdf_pages(file_path, doc_hash)
+    try:
+        page_images = await asyncio.to_thread(
+            _render_pdf_pages, file_path, doc_hash, 150, cancellation,
+        )
+    except Exception:
+        await asyncio.to_thread(_cleanup_partial_document_derivatives, doc_hash)
+        raise
 
     # ── Step 3: Build text chunks + embeddings ──
     # Estimate: ~0.5s per chunk, capped 15–120s
-    chunks = _split_page_chunks(pages)
+    try:
+        chunks = await asyncio.to_thread(
+            _split_page_chunks, pages, None, None, cancellation,
+        )
+    except Exception:
+        await asyncio.to_thread(_cleanup_partial_document_derivatives, doc_hash)
+        raise
     est_embed_s = max(15.0, min(120.0, len(chunks) * 0.5))
     _embed_stop = threading.Event()
     _embed_hb = _start_eta_heartbeat("Computing text embeddings", est_embed_s, _embed_stop)
     _update_progress("Computing text embeddings", 2, total_steps, eta_override=est_embed_s)
-    _check_cancelled()
+    _check_cancelled(cancellation)
     print(f"[rag_engine] Computing embeddings for {len(chunks)} text chunks ...")
     try:
-        emb = _compute_embeddings(chunks)
+        emb = await asyncio.to_thread(_compute_embeddings, chunks, cancellation)
+    except CancelledError:
+        await asyncio.to_thread(_cleanup_partial_document_derivatives, doc_hash)
+        raise
     finally:
         _embed_stop.set()
         _embed_hb.join(timeout=1.0)
@@ -1544,7 +2003,11 @@ async def ingest_document(file_path: str) -> dict:
     _kg_stop = threading.Event()
     _kg_hb = _start_eta_heartbeat("Building knowledge graph", est_kg_s, _kg_stop)
     _update_progress("Building knowledge graph", 3, total_steps, eta_override=est_kg_s)
-    _check_cancelled()
+    try:
+        _check_cancelled(cancellation)
+    except CancelledError:
+        await asyncio.to_thread(_cleanup_partial_document_derivatives, doc_hash)
+        raise
     kg_ok = False
     if full_text.strip():
         print(f"[rag_engine] Building knowledge graph from extracted text (~{int(est_kg_s)}s est) ...")
@@ -1558,18 +2021,27 @@ async def ingest_document(file_path: str) -> dict:
         _kg_stop.set()
         _kg_hb.join(timeout=1.0)
 
+    try:
+        _check_cancelled(cancellation)
+    except CancelledError:
+        await asyncio.to_thread(_cleanup_partial_document_derivatives, doc_hash)
+        raise
+
     # ── Step 5: Describe extracted images with vision model (ONLY actual images) ──
-    _check_cancelled()
+    _check_cancelled(cancellation)
     image_descriptions: List[str] = []
     image_embeddings = None
-    if extracted_images:
-        n_images = len(extracted_images)
+    inspected_images: List[dict] = []
+    if extracted_images and mode == "visual":
+        max_images = max(1, min(int(os.getenv("VISION_REQUEST_MAX_IMAGES", "8")), 8))
+        visual_images = extracted_images[:max_images]
+        n_images = len(visual_images)
         # Estimate ~25s per image for the first-image ETA seed
         est_per_image_s = 25.0
         print(f"[rag_engine] Describing {n_images} extracted images with vision model ...")
         image_phase_start = time.time()
-        for i, img_info in enumerate(extracted_images):
-            _check_cancelled()
+        for i, img_info in enumerate(visual_images):
+            _check_cancelled(cancellation)
             # Per-image ETA: use actual observed rate after first image, else use seed estimate
             if i > 0:
                 per_image_sec = (time.time() - image_phase_start) / i
@@ -1587,7 +2059,12 @@ async def ingest_document(file_path: str) -> dict:
             photo_number = img_info.get("photo_number")
             caption = img_info.get("caption")
             image_id = img_info.get("image_id")
-            print(f"  [vision] Describing image {i + 1}/{len(extracted_images)} (page {pg}) ...")
+            inspected_images.append({
+                "image_id": image_id,
+                "page": pg,
+                "photo_number": photo_number,
+            })
+            print(f"  [vision] Describing image {i + 1}/{len(visual_images)} (page {pg}) ...")
             try:
                 img_b64 = _resize_image_b64(img_path)
                 _desc_prompt = (
@@ -1604,6 +2081,7 @@ async def ingest_document(file_path: str) -> dict:
                     prefix_parts.append(f"Caption: {caption}")
                 prefix = " | ".join(prefix_parts)
                 image_descriptions.append(f"{prefix} | Description: {desc.strip()}" if desc.strip() else f"{prefix} | Description: [no description]")
+                _check_cancelled(cancellation)
             except Exception as exc:
                 print(f"  [vision] Failed: {exc}")
                 prefix_parts = [f"ImageID {image_id}", f"Page {pg}"]
@@ -1616,8 +2094,10 @@ async def ingest_document(file_path: str) -> dict:
         # Embed image descriptions for semantic search
         if image_descriptions:
             print(f"[rag_engine] Computing embeddings for {len(image_descriptions)} image descriptions ...")
-            image_embeddings = _compute_embeddings(
-                [{"page": 0, "text": d} for d in image_descriptions]
+            image_embeddings = await asyncio.to_thread(
+                _compute_embeddings,
+                [{"page": 0, "text": d} for d in image_descriptions],
+                cancellation,
             )
 
     parsed = {
@@ -1637,9 +2117,12 @@ async def ingest_document(file_path: str) -> dict:
             )
             else None
         ),
+        "document_scope_sha256s": [scope_key] if scope_key is not None else [],
     }
     _ingested[doc_hash] = parsed
     _active_session_hash = doc_hash
+    if scope_key is not None:
+        _active_session_hashes[scope_key] = doc_hash
     _save_manifest()
 
     _update_progress("Complete", total_steps, total_steps)
@@ -1651,6 +2134,9 @@ async def ingest_document(file_path: str) -> dict:
         "message": f"Document processed: {fname}",
         "pages_found": len(page_images),
         "images_found": len(extracted_images),
+        "analysis_mode": mode,
+        "visual_processing_ran": bool(inspected_images),
+        "inspected_images": inspected_images,
     }
 
 
@@ -1658,24 +2144,42 @@ async def query_document(
     question: str,
     doc_hash: str = None,
     model: str = None,
-    force_defect_segmentation: bool = False,
+    analysis_mode: str = "text",
     defect_segmentation_mode: str = 'balanced',
+    cancellation=None,
+    owner_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict:
     """
     LangGraph-style query routing:
       - Text questions → KG hybrid first, embedding fallback
       - Vision questions → find relevant images, send to vision model
     """
+    mode = str(analysis_mode or "").strip().lower()
+    if mode not in {"text", "visual"}:
+        raise ValueError("analysis_mode must be text or visual")
+    _check_cancelled(cancellation)
+
     global _ingested
+    scope_key = _document_scope_key(owner_id, workspace_id)
     if not _ingested:
         _ingested = _load_manifest()
     if not _ingested:
         return {"context": "", "sources": [], "chunks": [], "images": []}
 
     entry = _ingested.get(doc_hash) if doc_hash else None
-    if not entry:
+    if scope_key is not None and not _entry_owned_by(entry, owner_id, workspace_id):
+        active = _active_session_hashes.get(scope_key)
+        doc_hash = active if active and active in _ingested else None
+        entry = _ingested.get(doc_hash) if doc_hash else None
+    if not entry and scope_key is None:
         doc_hash = list(_ingested.keys())[-1]
         entry = _ingested[doc_hash]
+    if not entry or not _entry_owned_by(entry, owner_id, workspace_id):
+        return {
+            "context": "", "sources": [], "chunks": [], "images": [],
+            "analysis_mode": mode, "visual_processing_ran": False,
+        }
 
     total_pages = len(entry.get("page_images", []))
     chunks = entry.get("chunks", [])
@@ -1711,7 +2215,9 @@ async def query_document(
             "images": [],
             "total_pages": total_pages,
             "kg_used": False,
-            "vision_used": True,
+            "vision_used": False,
+            "analysis_mode": mode,
+            "visual_processing_ran": False,
         }
 
     # ── Route the query ──
@@ -1719,18 +2225,23 @@ async def query_document(
     print(f"[rag_engine] Query route: {route} - \"{question[:80]}\"")
 
     # ── Vision path: send relevant images to vision model ──
-    if route == 'vision':
+    if route == 'vision' and mode == "visual":
         # First try extracted (embedded) images
-        relevant_imgs = get_relevant_extracted_images(question, doc_hash)
+        max_images = max(1, min(int(os.getenv("VISION_REQUEST_MAX_IMAGES", "8")), 8))
+        relevant_imgs = get_relevant_extracted_images(
+            question, doc_hash, k=max_images,
+        )[:max_images]
         if relevant_imgs:
             answers = []
             return_images = []
-            defect_analysis = force_defect_segmentation or detect_vision_analysis_request(question)
+            defect_analysis = detect_vision_analysis_request(question)
             for img_info in relevant_imgs:
+                _check_cancelled(cancellation)
                 img_path = Path(img_info["path"])
                 if not img_path.exists():
                     continue
                 ans = _query_page_image(str(img_path), question)
+                _check_cancelled(cancellation)
                 if ans:
                     pg = img_info["page"]
                     label_parts = [f"Page {pg}"]
@@ -1752,6 +2263,7 @@ async def query_document(
                     # Defect segmentation-style overlays for defect-focused questions.
                     if defect_analysis:
                         detections = _detect_defects_with_bboxes(str(img_path), question)
+                        _check_cancelled(cancellation)
                         if detections:
                             detections = _refine_defect_detections_hybrid(
                                 str(img_path),
@@ -1789,12 +2301,16 @@ async def query_document(
                     "total_pages": total_pages,
                     "kg_used": False,
                     "vision_used": True,
+                    "analysis_mode": mode,
+                    "visual_processing_ran": True,
                 }
 
         # Fallback: use page images if no extracted images found
-        page_imgs = get_relevant_page_images(question, doc_hash)
+        page_imgs = get_relevant_page_images(question, doc_hash)[:max_images]
         if page_imgs:
-            result = await query_page_with_vision(question, page_imgs)
+            result = await query_page_with_vision(
+                question, page_imgs, cancellation=cancellation,
+            )
             if result.get("answers"):
                 combined = '\n\n'.join(result["answers"])
                 return {
@@ -1805,6 +2321,8 @@ async def query_document(
                     "total_pages": total_pages,
                     "kg_used": False,
                     "vision_used": True,
+                    "analysis_mode": mode,
+                    "visual_processing_ran": True,
                 }
 
     # ── Text path: KG hybrid first, embedding fallback ──
@@ -1818,6 +2336,8 @@ async def query_document(
                 "images": [],
                 "total_pages": total_pages,
                 "kg_used": True,
+                "analysis_mode": mode,
+                "visual_processing_ran": False,
             }
 
     # ── Embedding fallback ──
@@ -1828,9 +2348,26 @@ async def query_document(
     )
     entry["embeddings"] = emb
 
-    relevant = _get_relevant(question, chunks, embeddings=emb)
+    relevant = await asyncio.to_thread(
+        _get_relevant, question, chunks, 8, emb,
+    )
+    _check_cancelled(cancellation)
     if _is_broad_question(question):
         relevant = chunks
+
+    bounded_relevant = []
+    used_chars = 0
+    for chunk in relevant:
+        _check_cancelled(cancellation)
+        text = str(chunk.get("text") or "")
+        remaining = QUERY_CONTEXT_MAX_CHARS - used_chars
+        if remaining <= 0:
+            break
+        if len(text) > remaining:
+            text = text[:remaining]
+        bounded_relevant.append({**chunk, "text": text})
+        used_chars += len(text)
+    relevant = bounded_relevant
 
     context_parts = [f"[Page {c['page']}]\n{c['text']}" for c in relevant]
     context = '\n\n---\n\n'.join(context_parts)
@@ -1848,18 +2385,27 @@ async def query_document(
         "images": [],
         "total_pages": total_pages,
         "kg_used": False,
+        "analysis_mode": mode,
+        "visual_processing_ran": False,
     }
 
 
-async def query_page_with_vision(question: str, page_images: List[str]) -> dict:
+async def query_page_with_vision(
+    question: str,
+    page_images: List[str],
+    *,
+    cancellation=None,
+) -> dict:
     """Send page images directly to the vision model for visual analysis."""
     answers = []
     return_images = []
     for img_path in page_images:
+        _check_cancelled(cancellation)
         p = Path(img_path)
         if not p.exists():
             continue
         ans = _query_page_image(str(p), question)
+        _check_cancelled(cancellation)
         if ans:
             page_label = p.stem.replace("page_", "Page ").lstrip("0") or "Page"
             answers.append(f"**{page_label}**:\n{ans}")
@@ -1890,8 +2436,19 @@ async def query_extracted_image(question: str, image_info: dict) -> dict:
     return {"answer": ans, "image": img_data}
 
 
-def get_last_doc_hash() -> Optional[str]:
-    global _ingested, _active_session_hash
+def get_last_doc_hash(
+    owner_id: str | None = None,
+    workspace_id: str | None = None,
+) -> Optional[str]:
+    global _ingested, _active_session_hash, _active_session_hashes
+    scope_key = _document_scope_key(owner_id, workspace_id)
+    if scope_key is not None:
+        active = _active_session_hashes.get(scope_key)
+        if active and _entry_owned_by(
+            _ingested.get(active), owner_id, workspace_id,
+        ):
+            return active
+        return None
     # Prefer the session-scoped hash so we never silently return a stale manifest doc.
     if _active_session_hash:
         return _active_session_hash
@@ -1902,12 +2459,29 @@ def get_last_doc_hash() -> Optional[str]:
     return None
 
 
-def resolve_doc_hash(preferred_doc_hash: Optional[str] = None) -> Optional[str]:
-    global _ingested, _active_session_hash
+def resolve_doc_hash(
+    preferred_doc_hash: Optional[str] = None,
+    *,
+    owner_id: str | None = None,
+    workspace_id: str | None = None,
+) -> Optional[str]:
+    global _ingested, _active_session_hash, _active_session_hashes
+    scope_key = _document_scope_key(owner_id, workspace_id)
     if not _ingested:
         _ingested = _load_manifest()
-    if preferred_doc_hash and preferred_doc_hash in _ingested:
+    if (
+        preferred_doc_hash
+        and preferred_doc_hash in _ingested
+        and _entry_owned_by(_ingested[preferred_doc_hash], owner_id, workspace_id)
+    ):
         return preferred_doc_hash
+    if scope_key is not None:
+        active = _active_session_hashes.get(scope_key)
+        if active and _entry_owned_by(
+            _ingested.get(active), owner_id, workspace_id,
+        ):
+            return active
+        return None
     # Only fall back to manifest if a document was actually uploaded this session.
     if _active_session_hash and _active_session_hash in _ingested:
         return _active_session_hash
@@ -1915,12 +2489,32 @@ def resolve_doc_hash(preferred_doc_hash: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def reset_rag():
-    """Clear all cached documents, page images, and knowledge graphs."""
-    global _ingested, _lightrag_cache, _active_session_hash
+def reset_rag(
+    *,
+    owner_id: str | None = None,
+    workspace_id: str | None = None,
+):
+    """Remove one owner's document claims, or all state for internal maintenance."""
+    global _ingested, _lightrag_cache, _active_session_hash, _active_session_hashes
+    scope_key = _document_scope_key(owner_id, workspace_id)
+    if scope_key is not None:
+        if not _ingested:
+            _ingested = _load_manifest()
+        for entry in _ingested.values():
+            scopes = {
+                str(value).strip().lower()
+                for value in (entry.get("document_scope_sha256s") or [])
+                if _re.fullmatch(r"[0-9a-f]{64}", str(value).strip().lower())
+            }
+            scopes.discard(scope_key)
+            entry["document_scope_sha256s"] = sorted(scopes)
+        _active_session_hashes.pop(scope_key, None)
+        _save_manifest()
+        return
     _ingested = {}
     _lightrag_cache = {}
     _active_session_hash = None
+    _active_session_hashes = {}
     p = Path(RAG_WORKING_DIR)
     if p.exists():
         shutil.rmtree(p, ignore_errors=True)

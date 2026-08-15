@@ -1,15 +1,18 @@
 // frontend/src/pages/Editor.tsx
 
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
-import JSZip from 'jszip';
-import { Edit3, Save, Plus, Loader2, Download } from 'lucide-react';
+import axios, { type AxiosResponse } from 'axios';
+import { Edit3, Save, Plus, Loader2, Download, Trash2 } from 'lucide-react';
 import { SectionHeader } from '../components/ui';
 
 interface Bridge {
   state_code: number;
   bridge_number: string;
   bridge_name?: string;
+  revision_id: string;
+  data_year: number;
+  revision_number: number;
+  content_hash: string;
   /** 1 when legacy Item 42A marks a non-highway bridge FHWA says to omit from the SNBI transition. */
   fhwa_omit?: number;
   [key: string]: any;
@@ -65,8 +68,6 @@ const SNBI_MAIN_FIELDS = [
   'BIR04', 'BC01', 'BC02', 'BC03', 'BC04', 'BC05', 'BC06', 'BC07', 'BC08', 'BC09', 'BC10', 'BC11', 'BC12',
   'BC13', 'BC14', 'BC15', 'BAP01', 'BAP02', 'BAP03', 'BAP04', 'BAP05', 'BW01'
 ];
-
-const INTERNAL_EXPORT_KEYS = new Set(['id', 'rowid', 'state_code', 'bridge_number', 'data_year']);
 
 const COLUMN_TO_SNBI_KEY: Record<string, string> = {
   state_code: 'BL01',
@@ -324,6 +325,142 @@ const TABLE_ALLOWED_SNBI_KEYS: Record<string, Set<string>> = {
   works: new Set(['BW02', 'BW03']),
 };
 
+const isPlainObject = (value: unknown): value is Record<string, any> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const deepCopy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+
+const formatDiffValue = (value: unknown) => {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return 'undefined';
+  return serialized.length > 180 ? `${serialized.slice(0, 177)}...` : serialized;
+};
+
+/** Build an RFC 7396 merge patch so omitted/cleared fields are deleted explicitly. */
+const createMergePatch = (before: any, after: any): any => {
+  if (!isPlainObject(before) || !isPlainObject(after)) {
+    return JSON.stringify(before) === JSON.stringify(after) ? {} : after;
+  }
+
+  const patch: Record<string, any> = {};
+  Object.keys(before).forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(after, key)) patch[key] = null;
+  });
+  Object.entries(after).forEach(([key, nextValue]) => {
+    if (!Object.prototype.hasOwnProperty.call(before, key)) {
+      patch[key] = nextValue;
+      return;
+    }
+    const previousValue = before[key];
+    if (isPlainObject(previousValue) && isPlainObject(nextValue)) {
+      const nested = createMergePatch(previousValue, nextValue);
+      if (Object.keys(nested).length > 0) patch[key] = nested;
+    } else if (JSON.stringify(previousValue) !== JSON.stringify(nextValue)) {
+      patch[key] = nextValue;
+    }
+  });
+  return patch;
+};
+
+/** Split one canonical SNBI document into the Editor's main and child-table views. */
+const editorRowsFromCanonical = (document: Record<string, any>) => {
+  const children: Record<string, TableRow[]> = {};
+  CHILD_TABLES.forEach((table) => { children[table] = []; });
+
+  const features = Array.isArray(document.Features) ? document.Features : [];
+  features.forEach((feature: Record<string, any>) => {
+    const { Routes, ...featureFields } = feature;
+    children.features.push(featureFields);
+    (Array.isArray(Routes) ? Routes : []).forEach((route: Record<string, any>) => {
+      children.routes.push({ ...route, BF01: feature.BF01 });
+    });
+  });
+  CHILD_TABLES.filter((table) => table !== 'features' && table !== 'routes').forEach((table) => {
+    const schemaKey = TABLE_NAME_TO_SCHEMA_KEY[table];
+    children[table] = Array.isArray(document[schemaKey])
+      ? document[schemaKey].map((row: TableRow) => ({ ...row }))
+      : [];
+  });
+  const main = Object.fromEntries(
+    SNBI_MAIN_FIELDS
+      .filter((tag) => Object.prototype.hasOwnProperty.call(document, tag))
+      .map((tag) => [tag, deepCopy(document[tag])]),
+  );
+  return { main, children };
+};
+
+const SCHEMA_KEY_TO_TABLE: Record<string, string> = Object.fromEntries(
+  Object.entries(TABLE_NAME_TO_SCHEMA_KEY).map(([table, schemaKey]) => [schemaKey, table]),
+);
+
+/** Index validation attached to the exact revision into the existing field UI. */
+const revisionValidationForEditor = (
+  bridge: Bridge,
+  canonical: Record<string, any>,
+  rawIssues: unknown,
+) => {
+  const byTag: Record<string, ValidationIssue[]> = {};
+  const byTable: Record<string, Record<string, Record<string, ValidationIssue[]>>> = {};
+  const decodePointer = (pointer: string) => pointer
+    .split('/')
+    .slice(1)
+    .map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'));
+  const add = (issue: ValidationIssue, table: string | null, rowIndex: number | null) => {
+    if (!issue.tag) return;
+    if (!table || rowIndex === null) {
+      (byTag[issue.tag] ||= []).push(issue);
+      return;
+    }
+    byTable[table] ||= {};
+    byTable[table][String(rowIndex)] ||= {};
+    (byTable[table][String(rowIndex)][issue.tag] ||= []).push(issue);
+  };
+
+  (Array.isArray(rawIssues) ? rawIssues : []).forEach((raw: any) => {
+    if (!isPlainObject(raw)) return;
+    const parts = decodePointer(String(raw.json_pointer || ''));
+    const tag = String(parts[parts.length - 1] || raw.tag || '');
+    const rawSeverity = String(raw.severity || raw.type || 'warning').toLowerCase();
+    const type: ValidationIssue['type'] = rawSeverity === 'critical' || rawSeverity === 'fatal'
+      ? 'critical'
+      : rawSeverity === 'error'
+        ? 'error'
+        : rawSeverity === 'safety'
+          ? 'safety'
+          : 'flag';
+    let table: string | null = null;
+    let rowIndex: number | null = null;
+    if (parts[0] === 'Features' && /^\d+$/.test(parts[1] || '')) {
+      const featureIndex = Number(parts[1]);
+      if (parts[2] === 'Routes' && /^\d+$/.test(parts[3] || '')) {
+        table = 'routes';
+        rowIndex = (Array.isArray(canonical.Features) ? canonical.Features : [])
+          .slice(0, featureIndex)
+          .reduce((sum: number, feature: any) => sum + (Array.isArray(feature?.Routes) ? feature.Routes.length : 0), 0)
+          + Number(parts[3]);
+      } else {
+        table = 'features';
+        rowIndex = featureIndex;
+      }
+    } else if (SCHEMA_KEY_TO_TABLE[parts[0]] && /^\d+$/.test(parts[1] || '')) {
+      table = SCHEMA_KEY_TO_TABLE[parts[0]];
+      rowIndex = Number(parts[1]);
+    }
+    add({
+      type,
+      bridge: String(bridge.bridge_number),
+      rule: String(raw.rule_id || raw.code || 'server_validation'),
+      tag,
+      message: String(raw.message || 'Server validation issue'),
+      table,
+      row_index: rowIndex,
+      expected: raw.expected == null ? undefined : String(raw.expected),
+      editable_hint: raw.editable_hint == null ? undefined : String(raw.editable_hint),
+    }, table, rowIndex);
+  });
+  return { by_bridge: { [String(bridge.bridge_number)]: { by_tag: byTag, by_table: byTable } } };
+};
+
 interface StateOption {
   state_code: number;
   state_name: string;
@@ -353,12 +490,18 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
   const [childData, setChildData] = useState<Record<string, TableRow[]>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [downloadingRevision, setDownloadingRevision] = useState(false);
   const [availableYears, setAvailableYears] = useState<number[]>([]);
   const [selectedExportYear, setSelectedExportYear] = useState<number | null>(null);
-  const [exportValidation, setExportValidation] = useState<any | null>(null);
   const [bridgeValidation, setBridgeValidation] = useState<any | null>(null);
   const [fieldMetadata, setFieldMetadata] = useState<any | null>(null);
+  const [publishedDocument, setPublishedDocument] = useState<Record<string, any> | null>(null);
+  const [publishedRevisionId, setPublishedRevisionId] = useState<string | null>(null);
+  const [publishedEtag, setPublishedEtag] = useState<string | null>(null);
+  const [dataGeneration, setDataGeneration] = useState<number | null>(null);
+  const [lastRevisionDiff, setLastRevisionDiff] = useState<any[]>([]);
+  const [stagedValidation, setStagedValidation] = useState<any | null>(null);
+  const [stagedValidationIssues, setStagedValidationIssues] = useState<any[]>([]);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const loadRequestIdRef = useRef(0);
 
@@ -418,27 +561,6 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     }, 0);
   };
 
-  const fetchBridgeValidation = async (
-    bridge: Bridge,
-    snapshotYear: number | null = selectedExportYear,
-    requestId?: number,
-  ) => {
-    try {
-      const res = await axios.get(
-        `/api/validate-bridge/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}`,
-        { params: { year: snapshotYear ?? undefined } },
-      );
-      if (requestId === undefined || requestId === loadRequestIdRef.current) {
-        setBridgeValidation(res.data);
-      }
-    } catch (err) {
-      console.error('Failed to load bridge validation:', err);
-      if (requestId === undefined || requestId === loadRequestIdRef.current) {
-        setBridgeValidation(null);
-      }
-    }
-  };
-
   const fetchFieldMetadata = async (
     bridge: Bridge,
     snapshotYear: number | null = selectedExportYear,
@@ -460,28 +582,6 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     }
   };
 
-  const escapeCsvValue = (value: unknown) => {
-    if (value === null || value === undefined) {
-      return '';
-    }
-    const text = String(value).replace(/\r?\n|\r/g, ' ');
-    if (/[",]/.test(text)) {
-      return `"${text.replace(/"/g, '""')}"`;
-    }
-    return text;
-  };
-
-  const tableToCsv = (rows: TableRow[]) => {
-    const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
-    if (columns.length === 0) {
-      return '';
-    }
-
-    const header = columns.join(',');
-    const body = rows.map((row) => columns.map((column) => escapeCsvValue(row[column])).join(','));
-    return [header, ...body].join('\n');
-  };
-
   const triggerFileDownload = (blob: Blob, fileName: string) => {
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -495,15 +595,20 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
 
   const cleanValue = (value: any): any => {
     if (typeof value !== 'string') return value;
-    const trimmed = value.trim().replace(/^['"]+|['"]+$/g, '').trim();
-    return trimmed;
+    // Preserve exact published/editor text. Only an all-whitespace input means
+    // "clear this field"; canonical validation owns any further coercion.
+    return value.trim() === '' ? '' : value;
   };
 
   const mapRowToSnbi = (row: Record<string, any>, tableName?: string) => {
     const out: Record<string, any> = {};
     const allowed = tableName ? TABLE_ALLOWED_SNBI_KEYS[tableName] : null;
+    // Extensions are canonical, non-editor data. Preserve them byte-for-byte
+    // through a field edit without rendering objects in text inputs.
+    if (isPlainObject(row?.extensions)) out.extensions = deepCopy(row.extensions);
     Object.entries(row || {}).forEach(([key, value]) => {
-      const snbiKey = COLUMN_TO_SNBI_KEY[key];
+      if (key === 'extensions') return;
+      const snbiKey = COLUMN_TO_SNBI_KEY[key] || (allowed?.has(key) || (!allowed && SNBI_MAIN_FIELDS.includes(key)) ? key : undefined);
       if (!snbiKey) return;
       if (allowed && !allowed.has(snbiKey)) return;
       const cleaned = cleanValue(value);
@@ -513,132 +618,38 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     return out;
   };
 
-  const cleanSnbiExport = (value: any): any => {
-    if (Array.isArray(value)) {
-      return value
-        .map((item) => cleanSnbiExport(item))
-        .filter((item) => item !== null && item !== undefined && !(typeof item === 'object' && Object.keys(item).length === 0));
-    }
-    if (!value || typeof value !== 'object') {
-      return cleanValue(value);
-    }
-    const out: Record<string, any> = {};
-    Object.entries(value).forEach(([key, val]) => {
-      if (INTERNAL_EXPORT_KEYS.has(key)) return;
-      const cleaned = cleanSnbiExport(val);
-      if (cleaned === null || cleaned === undefined || cleaned === '') return;
-      out[key] = cleaned;
-    });
-    return out;
-  };
-
-  const normalizeBridgeForFhwa = (bridge: Record<string, any>) => {
-    const toNumber = (value: any) => {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : null;
-    };
-    const postingEvaluations = Array.isArray(bridge.PostingEvaluations) ? bridge.PostingEvaluations : [];
-    const legalLoadFactors = postingEvaluations
-      .map((row: Record<string, any>) => toNumber(row.BEP02))
-      .filter((value: number | null): value is number => value !== null);
-    if (legalLoadFactors.length > 0) {
-      bridge.BLR07 = Math.trunc(Math.min(...legalLoadFactors) * 100) / 100;
-    } else if ((bridge.BLR07 === null || bridge.BLR07 === undefined || bridge.BLR07 === '') && bridge.BLR06) {
-      bridge.BLR07 = bridge.BLR06;
-    }
-
-    if (!bridge.BLR08) bridge.BLR08 = 'N';
-    if (!bridge.BG12) bridge.BG12 = 'N';
-    if (!bridge.BAP05 || bridge.BAP05 === 'U') bridge.BAP05 = '0';
-    if (!bridge.BG13 || bridge.BG13 === '0' || bridge.BG13 === 0) bridge.BG13 = 1;
-    if (!bridge.BG14) bridge.BG14 = 'N';
-
-    const features = Array.isArray(bridge.Features) ? bridge.Features : [];
-    // Keep direct-transition condition values unchanged. Invalid combinations
-    // such as BC09=N with a W## feature remain visible for validation/review.
-    features.forEach((feature: Record<string, any>) => {
-      const featureType = String(feature.BF01 || '');
-      if (featureType.startsWith('W') && !feature.BN01) {
-        feature.BN01 = 'N';
-      }
-      if (!featureType.startsWith('W')) {
-        ['BN01', 'BN02', 'BN03', 'BN04', 'BN05', 'BN06'].forEach((tag) => delete feature[tag]);
-      }
-      if (feature.BN01 === 'N' || feature.BN01 === 'U') {
-        ['BN02', 'BN03', 'BN04', 'BN05', 'BN06'].forEach((tag) => delete feature[tag]);
-      }
-      if (featureType.startsWith('H') && Array.isArray(feature.Routes)) {
-        feature.Routes.forEach((route: Record<string, any>) => {
-          if (!route.BRT03) route.BRT03 = '2-T';
-        });
-      }
+  const buildCanonicalBridgeDocument = () => {
+    if (!publishedDocument) throw new Error('Published canonical revision is unavailable.');
+    // Start from the exact published object so fields outside the current UI,
+    // including namespaced extensions, cannot be lost by an unrelated edit.
+    const mainBridge: Record<string, any> = deepCopy(publishedDocument);
+    const originalRows = editorRowsFromCanonical(publishedDocument);
+    SNBI_MAIN_FIELDS.forEach((tag) => {
+      if (tag === 'BL01' || tag === 'BID01') return;
+      if (JSON.stringify(bridgeData?.[tag]) === JSON.stringify(originalRows.main[tag])) return;
+      const cleaned = cleanValue(bridgeData?.[tag]);
+      if (cleaned === null || cleaned === undefined || cleaned === '') delete mainBridge[tag];
+      else mainBridge[tag] = cleaned;
     });
 
-    const substructures = Array.isArray(bridge.SubstructureSets) ? bridge.SubstructureSets : [];
-    substructures.forEach((sub: Record<string, any>, idx: number) => {
-      if (!sub.BSB01 || String(sub.BSB01).startsWith('SS')) sub.BSB01 = idx === 0 ? 'P01' : `P${String(idx + 1).padStart(2, '0')}`;
-      if (!sub.BSB02 || sub.BSB02 === '0' || sub.BSB02 === 0) sub.BSB02 = 1;
-      if (!sub.BSB03 || sub.BSB03 === 'X-T') sub.BSB03 = 'C01';
-      if (!sub.BSB04) sub.BSB04 = String(sub.BSB01 || '').startsWith('P') ? 'P01' : 'A01';
-      if (!sub.BSB05) sub.BSB05 = '0';
-      if (!sub.BSB06) sub.BSB06 = 'X';
-      if (!sub.BSB07) sub.BSB07 = '0';
-    });
-
-    const spans = Array.isArray(bridge.SpanSets) ? bridge.SpanSets : [];
-    spans.forEach((span: Record<string, any>) => {
-      if (!span.BSP03 || span.BSP03 === '0' || span.BSP03 === 0) span.BSP03 = 1;
-      if (!span.BSP07) span.BSP07 = '0';
-      if (String(span.BSP09 || '') === '0') {
-        delete span.BSP08;
-        delete span.BSP13;
-      } else {
-        if (!span.BSP08) span.BSP08 = '0';
-        if (!span.BSP13) span.BSP13 = '0';
-      }
-    });
-
-    const hasSteel = spans.some((span: Record<string, any>) => String(span.BSP04 || '').startsWith('S')) ||
-      substructures.some((sub: Record<string, any>) => String(sub.BSB03 || '').startsWith('S'));
-    if (!hasSteel) delete bridge.BIR02;
-    if (bridge.BIR01 !== 'Y') delete bridge.BC14;
-    else if (!bridge.BC14) bridge.BC14 = 'N';
-    if (bridge.BIR03 === 'Y' && !bridge.BC15) bridge.BC15 = 'N';
-    if (bridge.BIR03 !== 'Y') delete bridge.BC15;
-    const works = Array.isArray(bridge.Works) ? bridge.Works : [];
-    works.forEach((work: Record<string, any>) => {
-      if (!work.BW03) work.BW03 = '0';
-    });
-    if (!bridge.BG05 && (bridge.BG06 || bridge.BG09)) bridge.BG05 = bridge.BG06 || bridge.BG09;
-    return bridge;
-  };
-
-  const buildSnbiBridgePayload = () => {
-    const mainBridge = {
-      ...mapRowToSnbi({
-      ...(bridgeData || {}),
-      state_code: selectedBridge?.state_code ?? selectedStateCode,
-      bridge_number: selectedBridge?.bridge_number,
-      }),
-      // Keep existing SNBI-coded keys when Editor has /api/bridge payload directly.
-      ...(bridgeData || {}),
-      BL01: selectedBridge?.state_code ?? selectedStateCode,
-      BID01: selectedBridge?.bridge_number,
-    };
-
-    CHILD_TABLES.filter((tableName) => tableName !== 'routes').forEach((tableName) => {
+    CHILD_TABLES.filter((tableName) => tableName !== 'features' && tableName !== 'routes').forEach((tableName) => {
+      if (JSON.stringify(childData[tableName] || []) === JSON.stringify(originalRows.children[tableName] || [])) return;
       const schemaKey = TABLE_NAME_TO_SCHEMA_KEY[tableName];
       if (!schemaKey) return;
       const mappedRows = (childData[tableName] || []).map((row) => mapRowToSnbi(row, tableName));
       mainBridge[schemaKey] = mappedRows;
     });
 
+    const featuresChanged = JSON.stringify(childData.features || []) !== JSON.stringify(originalRows.children.features || []);
+    const routesChanged = JSON.stringify(childData.routes || []) !== JSON.stringify(originalRows.children.routes || []);
+    if (!featuresChanged && !routesChanged) return mainBridge;
+
     // Routes are nested under Features in SNBI schema. Attach by feature type (BF01).
     const routeRows = (childData.routes || []).map((row) => mapRowToSnbi(row, 'routes'));
     const routesByFeature = new Map<string, TableRow[]>();
     routeRows.forEach((route) => {
       const featureType = String(route.BF01 || '').trim();
-      if (!featureType) return;
+      if (!featureType) throw new Error('Every route row must identify its parent feature in BF01 before staging.');
       const routeOnly = { ...route };
       delete routeOnly.BF01;
       if (!routesByFeature.has(featureType)) {
@@ -647,76 +658,151 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       routesByFeature.get(featureType)?.push(routeOnly);
     });
 
-    const features = Array.isArray(mainBridge.Features) ? mainBridge.Features : [];
-    features.forEach((feature: TableRow) => {
+    const features = (childData.features || []).map((row) => mapRowToSnbi(row, 'features'));
+    const originalFeatures = Array.isArray(publishedDocument.Features) ? publishedDocument.Features : [];
+    features.forEach((feature: TableRow, featureIndex: number) => {
       const featureType = String(feature.BF01 || '').trim();
       if (!featureType) return;
       const routes = routesByFeature.get(featureType) || [];
       if (routes.length > 0) {
         feature.Routes = routes;
+      } else {
+        const original = originalFeatures.find((candidate: TableRow) =>
+          String(candidate?.BF01 || '').trim() === featureType,
+        ) || originalFeatures[featureIndex];
+        if (original && Object.prototype.hasOwnProperty.call(original, 'Routes')) feature.Routes = [];
       }
       routesByFeature.delete(featureType);
     });
 
-    // Keep orphan routes by creating minimal feature shells so data is not lost.
-    routesByFeature.forEach((routes, featureType) => {
-      features.push({ BF01: featureType, Routes: routes });
-    });
+    if (routesByFeature.size > 0) {
+      throw new Error(
+        `Route rows reference missing parent feature(s): ${Array.from(routesByFeature.keys()).join(', ')}. Remove them or assign an existing BF01.`,
+      );
+    }
     mainBridge.Features = features;
 
-    return [cleanSnbiExport(normalizeBridgeForFhwa(mainBridge))];
+    return mainBridge;
   };
 
-  const downloadBridgeJson = () => {
-    if (!bridgeData) {
-      setMessage({ type: 'error', text: 'No bridge data available to download.' });
+  const downloadPublishedRevisionPackage = async () => {
+    if (!publishedRevisionId || !selectedBridge) {
+      setMessage({ type: 'error', text: 'Reload the exact published revision before exporting.' });
       return;
     }
-
-    const baseName = buildBaseFileName();
-    const payload = buildSnbiBridgePayload();
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' });
-    triggerFileDownload(blob, `${baseName}_bridge.json`);
-    setMessage({ type: 'success', text: 'Downloaded bridge JSON file (SNBI schema format).' });
+    setDownloadingRevision(true);
+    try {
+      const response = await axios.post(
+        `/api/revisions/${encodeURIComponent(publishedRevisionId)}/exports`,
+        {
+          export_kind: 'canonical_profile',
+          profile_id: 'research_snbi_export_v1',
+          agency_id: 'NJDOT',
+          exported_at: new Date().toISOString(),
+        },
+        { responseType: 'blob' },
+      );
+      const disposition = String(response.headers['content-disposition'] || '');
+      const match = disposition.match(/filename="([^"\r\n]+)"/i);
+      const fallback = `${buildBaseFileName()}_${selectedExportYear ?? selectedBridge.data_year}_published.zip`;
+      triggerFileDownload(response.data, match?.[1] || fallback);
+      setMessage({
+        type: 'success',
+        text: 'Downloaded the immutable published revision package with its server manifest.',
+      });
+    } catch (err: any) {
+      console.error('Failed to download revision export:', err);
+      setMessage({ type: 'error', text: 'Failed to download the published revision package.' });
+    } finally {
+      setDownloadingRevision(false);
+    }
   };
 
-  // Load the bridge selector from the same snapshot used by the Editor.
+  // Load the bridge selector only from active canonical publication pointers.
+  // Pages are generation-bound by the server, preventing a mixed selector if
+  // another editor publishes while this bounded list is being assembled.
   useEffect(() => {
     if (!selectedStateCode || selectedExportYear === null) {
       setBridges([]);
       return;
     }
 
+    let cancelled = false;
     const fetchBridges = async () => {
       setLoading(true);
       try {
-        const response = await axios.get('/api/table/bridges', {
-          params: { state_code: selectedStateCode, year: selectedExportYear },
-        });
-        setBridges(response.data);
+        const rows: Bridge[] = [];
+        let cursor: string | null = null;
+        let generation: number | null = null;
+        const seenCursors = new Set<string>();
+        for (let page = 0; page < 20; page += 1) {
+          const response: AxiosResponse<any> = await axios.get('/api/revisions/snapshots', {
+            params: {
+              state_code: selectedStateCode,
+              data_year: selectedExportYear,
+              limit: 500,
+              cursor: cursor || undefined,
+            },
+          });
+          const responseGeneration = Number(response.data?.data_generation);
+          const headerGeneration = Number(response.headers['x-bridgeguard-data-version']);
+          if (
+            !Number.isSafeInteger(responseGeneration)
+            || responseGeneration < 0
+            || responseGeneration !== headerGeneration
+            || (generation !== null && generation !== responseGeneration)
+          ) {
+            throw new Error('Published snapshot generation changed while loading. Retry the selector.');
+          }
+          generation = responseGeneration;
+          const pageRows = Array.isArray(response.data?.snapshots) ? response.data.snapshots : [];
+          rows.push(...pageRows);
+          const next: unknown = response.data?.next_cursor;
+          if (!next) {
+            if (!cancelled) setBridges(rows);
+            return;
+          }
+          if (typeof next !== 'string' || seenCursors.has(next)) {
+            throw new Error('Published snapshot pagination metadata is invalid.');
+          }
+          seenCursors.add(next);
+          cursor = next;
+        }
+        throw new Error('More than 10,000 published bridges matched this selector. Narrow the state/year scope.');
       } catch (err) {
         console.error(err);
-        setMessage({ type: 'error', text: 'Failed to load bridges' });
+        if (!cancelled) {
+          setBridges([]);
+          setMessage({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'Failed to load published bridges',
+          });
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchBridges();
+    return () => { cancelled = true; };
   }, [selectedStateCode, selectedExportYear]);
 
-  // Load available years when state changes
+  // Year facets come from the same workspace-scoped publication registry.
   useEffect(() => {
     if (!selectedStateCode) {
       setAvailableYears([]);
       setSelectedExportYear(null);
       return;
     }
-    axios.get<{ years: number[] }>(`/api/available-years/${selectedStateCode}`)
+    axios.get('/api/revisions/snapshots', {
+      params: { state_code: selectedStateCode, limit: 1 },
+    })
       .then((res) => {
-        setAvailableYears(res.data.years);
-        setSelectedExportYear(res.data.years[0] ?? null);
+        const years = Array.isArray(res.data?.available_data_years)
+          ? res.data.available_data_years.filter((year: unknown) => Number.isSafeInteger(year))
+          : [];
+        setAvailableYears(years);
+        setSelectedExportYear(years[0] ?? null);
       })
       .catch(() => {
         setAvailableYears([]);
@@ -736,48 +822,47 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     setChildData({});
     setBridgeValidation(null);
     setFieldMetadata(null);
+    setPublishedDocument(null);
+    setPublishedRevisionId(null);
+    setPublishedEtag(null);
+    setDataGeneration(null);
+    setLastRevisionDiff([]);
+    setStagedValidation(null);
+    setStagedValidationIssues([]);
 
     try {
-      console.log(`Loading bridge details for ${bridge.state_code}/${bridge.bridge_number}, snapshot ${snapshotYear ?? 'latest'}`);
+      if (snapshotYear === null) {
+        throw new Error('Select an exact inventory year before editing.');
+      }
       const response = await axios.get(
-        `/api/bridge/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}`,
-        { params: { year: snapshotYear ?? undefined } },
+        `/api/revisions/snapshots/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}/${snapshotYear}`,
       );
       if (requestId !== loadRequestIdRef.current) return;
-      console.log('Bridge data received:', response.data);
-      setBridgeData(response.data);
-
-      // Load child tables
-      const childPromises = CHILD_TABLES.map(async (table) => {
-        try {
-          console.log(`Loading ${table} for bridge ${bridge.bridge_number}`);
-          const res = await axios.get(`/api/table/${table}`, {
-            params: {
-              state_code: bridge.state_code,
-              bridge_number: bridge.bridge_number,
-              limit: 100,
-              year: snapshotYear ?? undefined,
-            },
-          });
-          console.log(`${table} data:`, res.data);
-          return { table, data: res.data };
-        } catch (error) {
-          console.error(`Failed to load ${table}:`, error);
-          return { table, data: [] };
-        }
-      });
-
-      const results = await Promise.all(childPromises);
-      if (requestId !== loadRequestIdRef.current) return;
-      const newChildData: Record<string, TableRow[]> = {};
-      results.forEach(({ table, data }) => {
-        newChildData[table] = data;
-      });
-      setChildData(newChildData);
-      await Promise.all([
-        fetchBridgeValidation(bridge, snapshotYear, requestId),
-        fetchFieldMetadata(bridge, snapshotYear, requestId),
-      ]);
+      const canonical = response.data?.canonical_document;
+      if (!isPlainObject(canonical)) throw new Error('Published canonical revision is unavailable.');
+      const revisionId = String(response.data?.revision_id || '');
+      const etag = String(response.headers.etag || '');
+      const generation = Number(response.headers['x-bridgeguard-data-version']);
+      if (
+        !revisionId
+        || (bridge.revision_id && revisionId !== bridge.revision_id)
+        || !/^"[^"\r\n]+"$/.test(etag)
+        || !Number.isSafeInteger(generation)
+        || generation < 0
+      ) {
+        throw new Error('Published revision concurrency metadata is unavailable.');
+      }
+      const editorRows = editorRowsFromCanonical(canonical);
+      setPublishedDocument(deepCopy(canonical));
+      setPublishedRevisionId(revisionId);
+      setPublishedEtag(etag);
+      setDataGeneration(generation);
+      setBridgeData(editorRows.main);
+      setChildData(editorRows.children);
+      setBridgeValidation(
+        revisionValidationForEditor(bridge, canonical, response.data?.validation_issues),
+      );
+      await fetchFieldMetadata(bridge, snapshotYear, requestId);
 
     } catch (err: any) {
       if (requestId !== loadRequestIdRef.current) return;
@@ -789,6 +874,10 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       setBridgeData(null);
       setChildData({});
       setFieldMetadata(null);
+      setPublishedDocument(null);
+      setPublishedRevisionId(null);
+      setPublishedEtag(null);
+      setDataGeneration(null);
     } finally {
       if (requestId === loadRequestIdRef.current) {
         setLoading(false);
@@ -805,28 +894,63 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
   }, [bridges, initialBridgeNumber]);
 
   const handleSaveMainBridge = async () => {
-    if (!selectedBridge || !bridgeData) return;
+    if (!selectedBridge || !bridgeData || !publishedDocument || !publishedEtag || dataGeneration === null || selectedExportYear === null) {
+      setMessage({ type: 'error', text: 'Reload the exact published revision before staging edits.' });
+      return;
+    }
+
+    const reason = window.prompt('Briefly describe why this revision is being staged:')?.trim();
+    if (!reason) {
+      setMessage({ type: 'info', text: 'No revision was staged because a change reason is required.' });
+      return;
+    }
+
+    let canonicalDocument: Record<string, any>;
+    try {
+      canonicalDocument = buildCanonicalBridgeDocument();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'The canonical document could not be built.' });
+      return;
+    }
+    const patch = createMergePatch(publishedDocument, canonicalDocument);
+    if (!isPlainObject(patch) || Object.keys(patch).length === 0) {
+      setMessage({ type: 'info', text: 'No canonical changes were detected.' });
+      return;
+    }
 
     setSaving(true);
-    setMessage({ type: 'info', text: 'Saving bridge changes to database...' });
+    setLastRevisionDiff([]);
+    setStagedValidation(null);
+    setStagedValidationIssues([]);
+    setMessage({ type: 'info', text: 'Validating and staging the complete canonical bridge revision...' });
     try {
-      const response = await axios.put(
-        `/api/bridge/${selectedBridge.state_code}/${encodeURIComponent(selectedBridge.bridge_number)}`,
-        bridgeData,
-        { params: { year: selectedExportYear ?? undefined } },
+      const requestId = crypto.randomUUID();
+      const response = await axios.patch(
+        `/api/revisions/snapshots/${selectedBridge.state_code}/${encodeURIComponent(selectedBridge.bridge_number)}/${selectedExportYear}`,
+        { patch, reason, expected_data_generation: dataGeneration },
+        {
+          headers: {
+            'If-Match': publishedEtag,
+            'Idempotency-Key': crypto.randomUUID(),
+            'X-Request-ID': requestId,
+          },
+        },
       );
-      const saved = response.data?.data || bridgeData;
-      setBridgeData(saved);
-      await Promise.all([
-        fetchBridgeValidation(selectedBridge, selectedExportYear),
-        fetchFieldMetadata(selectedBridge, selectedExportYear),
-      ]);
+      const diff = Array.isArray(response.data?.diff) ? response.data.diff : [];
+      const issues = Array.isArray(response.data?.validation_issues) ? response.data.validation_issues : [];
+      setLastRevisionDiff(diff);
+      setStagedValidation(response.data?.validation || { status: 'unknown' });
+      setStagedValidationIssues(issues);
       setMessage({
         type: 'success',
-        text: `Main bridge data saved successfully${selectedExportYear ? ` for the ${selectedExportYear} snapshot` : ''}!`,
+        text: `Staged revision ${response.data?.revision_number ?? ''} with ${diff.length} canonical change${diff.length === 1 ? '' : 's'}. It is not published; review its validation evidence and publish it from the revision workflow.`,
       });
     } catch (err: any) {
-      setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to save changes' });
+      const detail = err.response?.data?.detail;
+      const text = typeof detail === 'string'
+        ? detail
+        : detail?.message || detail?.code || err.message || 'Failed to stage the revision';
+      setMessage({ type: 'error', text });
     } finally {
       setSaving(false);
     }
@@ -846,80 +970,20 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     setChildData(prev => ({ ...prev, [table]: updated }));
   };
 
-  // Append a blank row to the active child table (templated from an existing row, or
-  // the table schema when empty), pre-scoped to this bridge. The new row flows into
-  // the bridge JSON download.
-  const addChildRow = async () => {
-    const rows = childData[activeTab] || [];
-    const template: Record<string, any> = {};
-    if (rows.length > 0) {
-      Object.keys(rows[0]).forEach((k) => { template[k] = ''; });
-    } else {
-      try {
-        const res = await axios.get(`/api/table-schema/${activeTab}`);
-        const colsMeta: any[] = res.data?.columns || res.data || [];
-        colsMeta.forEach((c: any) => { const n = typeof c === 'string' ? c : c?.name; if (n && n !== 'id' && n !== 'rowid') template[n] = ''; });
-      } catch { /* fall back to an empty row */ }
-    }
-    if ('state_code' in template) template.state_code = selectedBridge?.state_code ?? selectedStateCode;
-    if ('bridge_number' in template) template.bridge_number = selectedBridge?.bridge_number;
-    if ('data_year' in template && selectedExportYear) template.data_year = selectedExportYear;
+  // Append a canonical SNBI row for the active collection. It remains local
+  // until the complete bridge document is staged through the revision API.
+  const addChildRow = () => {
+    const template = Object.fromEntries(
+      Array.from(TABLE_ALLOWED_SNBI_KEYS[activeTab] || []).map((tag) => [tag, '']),
+    );
     setChildData((prev) => ({ ...prev, [activeTab]: [...(prev[activeTab] || []), template] }));
   };
 
-  const downloadTable = (table: string) => {
-    const rows = childData[table] || [];
-    const csvContent = tableToCsv(rows);
-    const baseName = buildBaseFileName();
-    const fileName = `${baseName}_${sanitizeFileSegment(table)}.csv`;
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    triggerFileDownload(blob, fileName);
-    setMessage({ type: 'success', text: `Downloaded ${table} table as CSV.` });
-  };
-
-  const downloadAllBridgesZip = async () => {
-    if (!selectedStateCode) {
-      setMessage({ type: 'error', text: 'Please select a state first.' });
-      return;
-    }
-    try {
-      setDownloadingAll(true);
-      const stateOption = states.find((s) => s.state_code === selectedStateCode);
-      const stateName = stateOption ? sanitizeFileSegment(stateOption.state_name) : String(selectedStateCode);
-
-      const yearQuery = selectedExportYear ? `?year=${selectedExportYear}` : '';
-      const validationResponse = await axios.get(`/api/validate-bridges/${selectedStateCode}${yearQuery}`);
-      setExportValidation(validationResponse.data);
-      const response = await axios.get(`/api/export-bridges/${selectedStateCode}${yearQuery}`);
-      const allBridges: any[] = Array.isArray(response.data) ? response.data : [];
-
-      if (allBridges.length === 0) {
-        setMessage({ type: 'error', text: 'No bridges found for this state.' });
-        return;
-      }
-
-      const cleanBridge = (bridge: any): any => {
-        return cleanSnbiExport(bridge);
-      };
-
-      const zip = new JSZip();
-      for (const bridge of allBridges) {
-        const cleaned = cleanBridge(bridge);
-        const bridgeNum = sanitizeFileSegment(String(cleaned.BID01 || bridge.BID01 || 'unknown'));
-        // Wrap in array to match single-bridge download format
-        zip.file(`${bridgeNum}.json`, JSON.stringify([cleaned], null, 2));
-      }
-
-      const zipBlob = await zip.generateAsync({ type: 'blob' });
-      const yearSuffix = selectedExportYear ? `_${selectedExportYear}` : '';
-      triggerFileDownload(zipBlob, `${stateName}${yearSuffix}_all_bridges.zip`);
-      setMessage({ type: 'success', text: `Downloaded ${allBridges.length} bridges as individual JSON files in a ZIP.` });
-    } catch (err: any) {
-      console.error('Failed to generate ZIP:', err);
-      setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to create ZIP file.' });
-    } finally {
-      setDownloadingAll(false);
-    }
+  const removeChildRow = (table: string, index: number) => {
+    setChildData((prev) => ({
+      ...prev,
+      [table]: (prev[table] || []).filter((_, rowIndex) => rowIndex !== index),
+    }));
   };
 
   return (
@@ -945,6 +1009,13 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
               setChildData({});
               setBridgeValidation(null);
               setFieldMetadata(null);
+              setPublishedDocument(null);
+              setPublishedRevisionId(null);
+              setPublishedEtag(null);
+              setDataGeneration(null);
+              setLastRevisionDiff([]);
+              setStagedValidation(null);
+              setStagedValidationIssues([]);
             }}
             className="w-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-2xl px-5 py-4 focus:outline-none focus:ring-2 focus:ring-violet-500 text-gray-900 dark:text-white"
           >
@@ -984,7 +1055,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
         </div>
       </div>
 
-      {/* Download All — shown whenever a state is selected */}
+      {/* Exact canonical inventory year — shown whenever a state is selected */}
       {selectedStateCode && (
         <div className="glass rounded-3xl p-6 shadow-sm">
           <div className="flex flex-col md:flex-row md:items-end gap-4">
@@ -1013,27 +1084,9 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
               <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
                 The selected year scopes the bridge values, child tables, NBI provenance, validation, saves, and exports together.
               </p>
-              {exportValidation?.summary && (
-                <div className="mt-3 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30 p-3">
-                  <p className="text-sm font-medium text-amber-800 dark:text-amber-300">SNBI validation warnings for export</p>
-                  <p className="text-xs text-amber-700 dark:text-amber-200 mt-1">
-                    Critical: {exportValidation.summary.critical} · Errors: {exportValidation.summary.error} ·
-                    Flags: {exportValidation.summary.flag} · Safety: {exportValidation.summary.safety}
-                  </p>
-                </div>
-              )}
             </div>
-            <div className="shrink-0">
-              <button
-                onClick={downloadAllBridgesZip}
-                disabled={downloadingAll || bridges.length === 0}
-                className="flex items-center gap-2 text-sm text-white bg-violet-600 hover:bg-violet-700 px-5 py-3 rounded-2xl shadow-sm disabled:opacity-50 whitespace-nowrap"
-              >
-                {downloadingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                {downloadingAll
-                  ? 'Preparing ZIP...'
-                  : `Download All Bridges (ZIP)${bridges.length > 0 ? ` — ${bridges.length}` : ''}`}
-              </button>
+            <div className="max-w-md rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-800 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-200">
+              Bulk legacy-projection downloads are disabled. Select a bridge to download its immutable published revision package and server-generated manifest.
             </div>
           </div>
         </div>
@@ -1109,10 +1162,12 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                 <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Main Bridge Info</h3>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={downloadBridgeJson}
-                    className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800"
+                    onClick={downloadPublishedRevisionPackage}
+                    disabled={downloadingRevision || !publishedRevisionId}
+                    className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800 disabled:opacity-50"
                   >
-                    <Download className="w-4 h-4" /> Download JSON
+                    {downloadingRevision ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    {downloadingRevision ? 'Preparing Package…' : 'Published Package'}
                   </button>
                   <button
                     onClick={handleSaveMainBridge}
@@ -1120,7 +1175,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                     className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white px-5 py-2 rounded-xl font-semibold shadow-sm disabled:opacity-70 transition-all"
                   >
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    {saving ? "Saving…" : "Save"}
+                    {saving ? "Staging…" : "Stage All Edits"}
                   </button>
                 </div>
               </div>
@@ -1161,8 +1216,9 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                       type="text"
                       value={bridgeData[key] ?? ''}
                       onChange={(e) => setBridgeData({ ...bridgeData, [key]: e.target.value })}
+                      disabled={key === 'BL01' || key === 'BID01'}
                       title={issues[0]?.expected || metadata[0]?.source_value || metadata[0]?.note || undefined}
-                      className={`w-full bg-gray-50 dark:bg-gray-900 border rounded-xl px-4 py-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 ${issueClasses(issues)}`}
+                      className={`w-full bg-gray-50 dark:bg-gray-900 border rounded-xl px-4 py-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${issueClasses(issues)}`}
                     />
                     <IssueMessages issues={issues} />
                     <FieldMetadataMessages metadata={metadata} />
@@ -1184,22 +1240,26 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                 </h3>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={downloadBridgeJson}
-                    className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800"
+                    onClick={downloadPublishedRevisionPackage}
+                    disabled={downloadingRevision || !publishedRevisionId}
+                    className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800 disabled:opacity-50"
                   >
-                    <Download className="w-4 h-4" /> Download JSON
-                  </button>
-                  <button
-                    onClick={() => downloadTable(activeTab)}
-                    className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800"
-                  >
-                    <Download className="w-4 h-4" /> Download Table
+                    {downloadingRevision ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    {downloadingRevision ? 'Preparing Package…' : 'Published Package'}
                   </button>
                   <button
                     onClick={addChildRow}
                     className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-xl font-semibold shadow-sm"
                   >
                     <Plus className="w-4 h-4" /> Add Row
+                  </button>
+                  <button
+                    onClick={handleSaveMainBridge}
+                    disabled={saving}
+                    className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-xl font-semibold shadow-sm disabled:opacity-70"
+                  >
+                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    {saving ? 'Staging…' : 'Stage All Edits'}
                   </button>
                 </div>
               </div>
@@ -1221,19 +1281,20 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="bg-gray-50 dark:bg-gray-900">
-                        {Object.keys(childData[activeTab][0] || {}).map(col => (
+                        {Array.from(TABLE_ALLOWED_SNBI_KEYS[activeTab] || []).map(col => (
                           <th key={col} className="px-4 py-3 text-left font-medium text-gray-700 dark:text-gray-300">{getFieldLabel(col)}</th>
                         ))}
+                        <th className="px-4 py-3 text-right font-medium text-gray-700 dark:text-gray-300">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {childData[activeTab].map((row, idx) => (
                         <tr key={idx} className="border-t border-gray-100 dark:border-gray-800">
-                          {Object.keys(row).map((key, i) => {
+                          {Array.from(TABLE_ALLOWED_SNBI_KEYS[activeTab] || []).map((key) => {
                             const issues = getChildIssues(activeTab, idx, key);
                             const metadata = getChildMetadata(activeTab, idx, key);
                             return (
-                            <td key={i} className="px-4 py-3 align-top">
+                            <td key={key} className="px-4 py-3 align-top">
                               <div className="mb-1 flex flex-wrap gap-1">
                                 {metadata.some((item) => item.is_temporary) && (
                                   <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] uppercase text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
@@ -1263,6 +1324,16 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                             </td>
                             );
                           })}
+                          <td className="px-4 py-3 text-right align-top">
+                            <button
+                              type="button"
+                              onClick={() => removeChildRow(activeTab, idx)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/30"
+                              aria-label={`Remove ${activeTab.replace('_', ' ')} row ${idx + 1}`}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" /> Remove
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1313,6 +1384,51 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
               : 'bg-red-50 text-red-700'
         }`}>
           {message.text}
+        </div>
+      )}
+      {lastRevisionDiff.length > 0 && (
+        <div className="rounded-2xl border border-violet-200 bg-violet-50 p-5 text-violet-900 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-100">
+          <p className="font-semibold">Staged canonical diff</p>
+          <ul className="mt-2 max-h-48 space-y-1 overflow-auto text-xs font-mono">
+            {lastRevisionDiff.slice(0, 100).map((change, index) => (
+              <li key={`${change.path || 'change'}-${index}`}>
+                {String(change.op || 'replace').toUpperCase()} {String(change.path || '/')}
+                {Object.prototype.hasOwnProperty.call(change, 'before') && (
+                  <span className="block pl-3 text-violet-700 dark:text-violet-300">before: {formatDiffValue(change.before)}</span>
+                )}
+                {Object.prototype.hasOwnProperty.call(change, 'after') && (
+                  <span className="block pl-3 text-violet-700 dark:text-violet-300">after: {formatDiffValue(change.after)}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {lastRevisionDiff.length > 100 && <p className="mt-2 text-xs">Only the first 100 changes are shown.</p>}
+        </div>
+      )}
+      {stagedValidation && (
+        <div className="rounded-2xl border border-sky-200 bg-sky-50 p-5 text-sky-900 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-100">
+          <p className="font-semibold">Server validation result</p>
+          <p className="mt-1 text-sm">
+            Status: <span className="font-semibold">{String(stagedValidation.status || 'unknown')}</span>
+            {' · '}Owner: {String(stagedValidation.validation_owner || 'server')}
+            {' · '}Issues: {stagedValidationIssues.length}
+          </p>
+          {stagedValidation.official_validation_status && (
+            <p className="mt-1 text-xs">Official-profile validation: {String(stagedValidation.official_validation_status)}</p>
+          )}
+        </div>
+      )}
+      {stagedValidationIssues.length > 0 && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+          <p className="font-semibold">Server validation evidence ({stagedValidationIssues.length})</p>
+          <div className="mt-2 space-y-1 text-xs">
+            {stagedValidationIssues.slice(0, 20).map((issue, index) => (
+              <p key={`${issue.code || issue.rule_id || issue.rule || 'issue'}-${index}`}>
+                <span className="font-semibold uppercase">{issue.severity || issue.type || 'review'}</span>{' '}
+                {issue.json_pointer || issue.tag || '/'}: {issue.message || issue.code}
+              </p>
+            ))}
+          </div>
         </div>
       )}
     </div>

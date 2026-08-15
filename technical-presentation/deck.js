@@ -23,11 +23,8 @@ function updateDeckState(index, { updateHash = true } = {}) {
   });
 
   indexButtons.forEach((button, buttonIndex) => {
-    if (buttonIndex === activeSlide) {
-      button.setAttribute("aria-current", "true");
-    } else {
-      button.removeAttribute("aria-current");
-    }
+    if (buttonIndex === activeSlide) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
   });
 
   currentSlideLabel.textContent = pad(activeSlide + 1);
@@ -47,7 +44,10 @@ function goToSlide(index, { focus = true, updateHash = true } = {}) {
   if (navigationLocked || destination === activeSlide) return;
 
   navigationLocked = true;
-  slides[destination].scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "start" });
+  slides[destination].scrollIntoView({
+    behavior: reducedMotion.matches ? "auto" : "smooth",
+    block: "start",
+  });
   updateDeckState(destination, { updateHash });
   if (focus) slides[destination].focus({ preventScroll: true });
 
@@ -88,9 +88,12 @@ document.addEventListener("keydown", (event) => {
 
 function startSlideObserver() {
   if (slideObserver || document.documentElement.classList.contains("no-observer")) return;
+  if (!("IntersectionObserver" in window)) {
+    document.documentElement.classList.add("no-observer");
+    return;
+  }
 
-  if ("IntersectionObserver" in window) {
-    slideObserver = new IntersectionObserver(
+  slideObserver = new IntersectionObserver(
     (entries) => {
       if (navigationLocked) return;
       const visibleEntry = entries
@@ -102,134 +105,178 @@ function startSlideObserver() {
       if (index >= 0 && index !== activeSlide) updateDeckState(index);
     },
     { threshold: [0.45, 0.65, 0.85] },
-    );
-
-    slides.forEach((slide) => slideObserver.observe(slide));
-  } else {
-    document.documentElement.classList.add("no-observer");
-  }
+  );
+  slides.forEach((slide) => slideObserver.observe(slide));
 }
 
 const contractData = {
   map: {
-    title: "Map explorer",
-    route: "GET /api/map-data",
-    inputTitle: "state · county · year · condition key",
-    inputCopy: "Filter selections or a Bridgette focus request.",
-    processTitle: "query + normalize + render",
-    processCopy: "Returns map-safe identity, location and rating fields.",
-    outputTitle: "markers + selected bridge card",
-    outputCopy: "Actionable map context keyed by state and structure ID.",
+    title: "ArcGIS map",
+    route: "GET /api/map-counties · GET /api/map-data",
+    inputTitle: "county · snapshot year · condition key · basemap",
+    inputCopy: "The current UI is New Jersey-fixed; a blank year means latest per bridge.",
+    processTitle: "query + coordinate guard + client FeatureLayer",
+    processCopy: "Valid records are deduped, normalized into WKID 4326, and colored by the selected numeric condition field.",
+    outputTitle: "markers + condition legend + bridge popup",
+    outputCopy: "The popup exposes identity, primary ratings, dimensions, and bridge actions.",
     persists: "No — read-only view state",
-    guardrail: "Invalid coordinates are excluded from rendering.",
+    guardrail: "Invalid coordinates are removed; categorical and missing ratings render gray.",
+  },
+  locate: {
+    title: "Show me bridge",
+    route: "sidebar event → GET /api/map-data?state_code=34",
+    inputTitle: "desktop sidebar phrase with bridge number or name",
+    inputCopy: "Example: “Show bridge 0313151 on the map.”",
+    processTitle: "detect intent + rank statewide index + synchronize filters",
+    processCopy: "Number, name, and location matches set the target year/county before ArcGIS queries the marker.",
+    outputTitle: "zoom 16 + existing bridge popup",
+    outputCopy: "Success, ambiguity, and not-found statuses return to the sidebar.",
+    persists: "No — statewide search index is component-lifetime cache",
+    guardrail: "Desktop sidebar only; target must have valid map coordinates.",
   },
   bridgette: {
-    title: "Bridgette",
+    title: "Bridgette database analyst",
     route: "POST /api/bridgette/stream",
-    inputTitle: "plain-language bridge question",
-    inputCopy: "A statewide question, aggregation request or map navigation command.",
-    processTitle: "route intent + query data",
-    processCopy: "Map requests resolve locally; analytical questions stream through the database assistant.",
-    outputTitle: "streamed answer or map focus",
-    outputCopy: "Text, tabular findings or a focused bridge card.",
-    persists: "No — conversation is session state",
-    guardrail: "Generated SQL is constrained to read-only database access.",
+    inputTitle: "plain-language statewide inventory question",
+    inputCopy: "Questions can request counts, comparisons, rankings, or time trends.",
+    processTitle: "Cerebras SELECT + read-only guard + SQLite execution",
+    processCopy: "The route emits SQL metadata and rows, then streams a result-grounded summary.",
+    outputTitle: "SQL + columns + rows + NDJSON tokens",
+    outputCopy: "Queries are limited to 500 rows; the UI exposes up to 100.",
+    persists: "No — page conversation is React memory",
+    guardrail: "Generated SQL must be read-only; cancellation is currently process-global.",
   },
-  converter: {
-    title: "SNBI converter",
-    route: "POST /api/convert",
-    inputTitle: "NBI TXT + optional element XML",
-    inputCopy: "Legacy inventory and element exchange files.",
-    processTitle: "parse + map + normalize + validate",
-    processCopy: "Builds nested SNBI records and reports coverage and parity issues.",
-    outputTitle: "SNBI JSON + validation summary",
-    outputCopy: "A load-ready New Jersey bridge array plus actionable warnings.",
-    persists: "No — conversion returns a downloadable payload",
-    guardrail: "Hosted build retains New Jersey state code 34 only.",
+  kpis: {
+    title: "Inventory KPIs",
+    route: "GET /api/kpis · GET /api/kpis/county",
+    inputTitle: "selected inventory year",
+    inputCopy: "The UI defaults to the newest loaded snapshot.",
+    processTitle: "controlling rating + state/county aggregation",
+    processCopy: "Minimum Deck/Super/Sub determines class; Culvert is fallback only if all three are absent.",
+    outputTitle: "cards + donut + county stack + PDF",
+    outputCopy: "Good 7–9, Fair 5–6, Poor below 5, and derived Unknown.",
+    persists: "No — read-only snapshot calculation",
+    guardrail: "Average age uses the current calendar year, not the selected inventory year.",
+  },
+  history: {
+    title: "History and Markov forecast",
+    route: "GET /api/bridge-history · POST /api/forecasts/train-bridge",
+    inputTitle: "bridge identity + observations + 1–50 year horizon",
+    inputCopy: "Snapshot, report-derived, and fallback observations are resolved by provenance.",
+    processTitle: "fleet Markov cohort + uncertainty + maintenance simulation",
+    processCopy: "Metric, rating, county, age band, traffic band, and work years select the transition matrix.",
+    outputTitle: "observed/forecast lines + event timeline",
+    outputCopy: "Dashed baseline, deck ±1σ band, and dotted learned-recovery what-if.",
+    persists: "Forecast runs persist; simulations do not",
+    guardrail: "Derived backcast is not an inspection; Culvert is not drawn in the History UI.",
+  },
+  lcca: {
+    title: "Life-cycle cost analysis",
+    route: "GET /api/lcca/bridge/{state}/{bridge}",
+    inputTitle: "bridge + horizon + NHS/cost/discount assumptions",
+    inputCopy: "Defaults use NJ replacement and rehab unit costs with a 3% discount rate.",
+    processTitle: "Markov condition walk + fixed trigger policy + NPV",
+    processCopy: "Compare do-nothing with rehab whenever 3.0 < rating ≤ 4.9; replace at ≤3.0.",
+    outputTitle: "condition/cost charts + recommendation + savings",
+    outputCopy: "Capital steps, routine cost, poor penalty, and discounted salvage are exposed.",
+    persists: "No — read-only calculation",
+    guardrail: "This is condition-triggered policy comparison, not optimization over every rehab year.",
   },
   loader: {
-    title: "Inventory loader",
+    title: "SNBI inventory loader",
     route: "POST /api/load-json",
-    inputTitle: "SNBI JSON[] + data year",
-    inputCopy: "Normalized bridge records with BL01 and BID01 identity.",
-    processTitle: "schema check + relational load",
-    processCopy: "Validates identity, state scope and nested table relationships.",
-    outputTitle: "year-versioned bridge dataset",
-    outputCopy: "Queryable map, KPI, history and editor records.",
-    persists: "Yes — SQLite inventory tables",
-    guardrail: "Editor role required; non-NJ records are rejected.",
+    inputTitle: "nonempty NJ SNBI JSON[] + authoritative year",
+    inputCopy: "First record requires BL01 and BID01; selected year must be 1990–2100.",
+    processTitle: "validate + relationalize + rebuild same-year rows",
+    processCopy: "Main and nine child/provenance groups are refreshed for the chosen snapshot.",
+    outputTitle: "loaded/refreshed/skipped counts + validation",
+    outputCopy: "Records become available to Map, KPI, History, Forecast, and Editor.",
+    persists: "Yes — SQLite inventory snapshots",
+    guardrail: "Editor role required; current all-existing response can say conflict after rows were refreshed.",
   },
-  reports: {
-    title: "Bridge report ingest + Q&A",
-    route: "POST /.../reports → POST /api/db-rag/stream",
-    inputTitle: "bridge file, then bridge question",
-    inputCopy: "Upload evidence up to 50 MB; query the selected bridge in a separate request.",
-    processTitle: "store + background ingest; retrieve + answer",
-    processCopy: "The upload starts a cached 768-D Nomic index; Q&A streams from database and selected report sources.",
-    outputTitle: "upload receipt; grounded answer",
-    outputCopy: "The first route returns status, ID and ingestion state. The second streams answer content and sources.",
-    persists: "Yes — source file, parse cache and embeddings",
-    guardrail: "Hosted extraction is best-effort and has no OCR; profile mismatch triggers re-embedding.",
+  converter: {
+    title: "NBI ⇄ SNBI converter",
+    route: "POST /api/convert · POST /api/reverse-convert",
+    inputTitle: "NBI TXT/CSV + optional FHWAED XML, or SNBI JSON",
+    inputCopy: "Forward parses fixed-width/header/positional formats; reverse accepts object or array.",
+    processTitle: "map + normalize + NJ filter; or flatten + recode",
+    processCopy: "Forward reports coverage/parity. Reverse uses representative legacy values where needed.",
+    outputTitle: "SNBI JSON or NBI .txt + Elements XML",
+    outputCopy: "Forward output is load-ready; reverse output is explicitly best effort.",
+    persists: "No — conversion returns downloadable payloads",
+    guardrail: "Reverse is lossy; missing over-records are skipped.",
   },
-  vision: {
-    title: "Document and image vision",
-    route: "POST /api/vision-rag",
-    inputTitle: "file or image + question",
-    inputCopy: "Standalone visual/document investigation with grounding controls.",
-    processTitle: "ingest + retrieve + visual reasoning",
-    processCopy: "Indexes document context, then routes text and visual questions.",
-    outputTitle: "answer + cited regions/pages",
-    outputCopy: "Structured or narrative result with image/page references.",
-    persists: "Cached index; session chooses the active document",
-    guardrail: "Cancel and reset endpoints bound long-running work.",
+  preprocess: {
+    title: "File preprocessing",
+    route: "POST /api/bridge/{state}/{bridge}/attachments · background ingestion",
+    inputTitle: "bridge attachment set + file signature",
+    inputCopy: "PDF, image, Office, text, and CSV uploads are accepted up to 50 MB.",
+    processTitle: "store + extract + chunk + describe + embed",
+    processCopy: "Text uses 500/100 chunks; Cerebras describes technical images and Nomic embeds document content.",
+    outputTitle: "persistent report cache + indexing status",
+    outputCopy: "Chunks, 768-D vectors, extracted images, page renders, signature, and embedding profile are reusable.",
+    persists: "Yes — attachment files and parsed cache",
+    guardrail: "No OCR; legacy Office and plain-text extraction is limited in the hosted parser.",
+  },
+  retrieval: {
+    title: "Grounded retrieval",
+    route: "POST /api/db-rag/stream · Nomic TEI query embedding",
+    inputTitle: "bridge question + selected database/report sources",
+    inputCopy: "The bridge identity and explicit source selection scope every retrieval operation.",
+    processTitle: "concurrent read-only SQL + report chunk ranking",
+    processCopy: "Nomic query vectors retrieve text/table chunks while image-description chunks stay behind the visual gate.",
+    outputTitle: "evidence bundle + Cerebras answer stream",
+    outputCopy: "Ranked context and source labels ground the NDJSON response.",
+    persists: "Parsed indexes persist; question and answer state do not",
+    guardrail: "Embedding-profile mismatches re-embed parsed content; vector dimensions are never mixed.",
+  },
+  ask: {
+    title: "Bridge Ask / visual investigation",
+    route: "POST /api/db-rag/stream · POST /api/bridge-visual-investigation",
+    inputTitle: "bridge question + selected sources + visual checkbox",
+    inputCopy: "Database and report sources are selected independently.",
+    processTitle: "hard request-scoped route branch",
+    processCopy: "Unchecked retrieves SQL and text/table chunks; checked retrieves candidate images and runs detection.",
+    outputTitle: "text/source stream or annotated detections",
+    outputCopy: "The two paths do not silently blend.",
+    persists: "Parsed caches persist; checkbox and conversation do not",
+    guardrail: "Checkbox defaults false; flattened PDFs may have no extracted images for bridge inspection.",
   },
   pointcloud: {
-    title: "Point-cloud upload + analysis",
-    route: "POST /.../point-cloud → POST /.../analyze → GET /.../processed/download",
-    inputTitle: "raw file, then registered scan or point payload",
-    inputCopy: "Upload E57, LAS, PLY, XYZ, PCD, CSV, TXT or NPZ; analyze it in a separate request.",
-    processTitle: "parse + CPU clean + segment + fit",
-    processCopy: "Numerical geometry is combined with bounded Cerebras scene judgment.",
-    outputTitle: "analysis JSON + saved artifacts",
-    outputCopy: "The analysis response describes components and clearance; PLY is downloaded through a separate route.",
-    persists: "Best-effort — bridge analysis saves NPZ, PLY and JSON on success",
-    guardrail: "Editors upload/delete; current route enforcement also lets viewers run analysis. Operate one large job at a time.",
+    title: "Point-cloud analysis",
+    route: "POST /.../point-cloud · POST /.../analyze",
+    inputTitle: "registered scan + scale/mode/AI options",
+    inputCopy: "LAS, PLY, E57, XYZ, PCD, CSV, TXT, or NPZ.",
+    processTitle: "CPU clean + PCA + segment + fit + Cerebras review",
+    processCopy: "Labels expand to the full cloud; clearance uses cleaned road/water and soffit evidence.",
+    outputTitle: "components + labels + clearance + warnings",
+    outputCopy: "Successful bridge analyses save NPZ, PLY, and JSON artifacts.",
+    persists: "Yes — one raw cloud and best-effort processed artifacts per bridge",
+    guardrail: "One large job at a time; new raw upload deletes the prior processed result.",
   },
   editor: {
-    title: "SNBI editor",
-    route: "PUT /api/bridge/{state}/{bridge} + GET /api/validate-bridge/...",
-    inputTitle: "bridge identity + main-record field edits",
-    inputCopy: "Scalar fields from the primary bridge row; nested feature, element, span and work tables are excluded.",
-    processTitle: "update row; validate separately",
-    processCopy: "The save endpoint updates the main row. The editor requests SNBI validation as a separate operation.",
-    outputTitle: "updated row + validation response",
-    outputCopy: "Saved bridge data is returned first; flags and errors come from the validation endpoint.",
-    persists: "Yes — primary bridge row in SQLite",
-    guardrail: "Editor role required for the main row; nested-table mutation is outside this save and requires admin/raw-table routes.",
+    title: "Year-scoped SNBI editor",
+    route: "PUT /api/bridge/{state}/{bridge}?year=YYYY",
+    inputTitle: "bridge snapshot + scalar main-row edits",
+    inputCopy: "Identity, data year, and nested keys are immutable or excluded.",
+    processTitle: "save one main row + refetch validation/metadata",
+    processCopy: "All requests use the same selected year; validation reports but does not block.",
+    outputTitle: "updated main row + validation + exports",
+    outputCopy: "Nested client edits can be exported but are not persisted by Editor.",
+    persists: "Main row only",
+    guardrail: "The Editor UI currently depends on admin-only /api/table/* reads.",
   },
-  decision: {
-    title: "Forecast and LCCA",
-    route: "GET /api/forecasts/bridge/... · GET /api/lcca/bridge/...",
-    inputTitle: "history + horizon + treatment assumptions",
-    inputCopy: "Observed component ratings and user-adjustable planning parameters.",
-    processTitle: "forecast + simulate + discount costs",
-    processCopy: "Generates condition paths and compares intervention scenarios.",
-    outputTitle: "condition curve + lifecycle cost",
-    outputCopy: "Bridge-level timing, risk and cost evidence.",
-    persists: "No for LCCA — read-only calculation using separately persisted forecast state",
-    guardrail: "Forecast confidence depends on available historical observations.",
-  },
-  admin: {
-    title: "Database administration",
-    route: "/api/table-rows/* · /api/table/*/row · /api/sql-query",
-    inputTitle: "table, query or row mutation",
-    inputCopy: "Schema-aware database maintenance reserved for the owner.",
-    processTitle: "authorize + validate + execute",
-    processCopy: "Exposes controlled table reads, edits and system information.",
-    outputTitle: "rows, schema or mutation result",
-    outputCopy: "Administrative database state with explicit success/failure response.",
-    persists: "Yes — direct database administration",
-    guardrail: "Admin role required; editors cannot access raw database controls.",
+  custom: {
+    title: "Custom operational tables",
+    route: "POST /api/custom-tables · POST/PUT/DELETE rows",
+    inputTitle: "name + columns + color + bridge/state scope",
+    inputCopy: "State scope shares the definition; rows remain keyed to each bridge.",
+    processTitle: "persist definition + JSON-cell row values",
+    processCopy: "Cells save the full row on blur.",
+    outputTitle: "editable non-SNBI bridge tables",
+    outputCopy: "Definitions and rows live outside inventory import/export.",
+    persists: "Yes — custom_tables + custom_table_rows",
+    guardrail: "State-definition deletion is global; concurrent cell edits are last-write-wins.",
   },
 };
 
@@ -261,8 +308,10 @@ function selectContract(key, { focus = false } = {}) {
   });
 
   Object.entries(contractFields).forEach(([field, element]) => {
-    element.textContent = contract[field];
+    if (element) element.textContent = contract[field];
   });
+
+  window.BridgeGuardFeatureGraphs?.render(key);
 }
 
 contractTabs.forEach((tab, index) => {
@@ -287,7 +336,7 @@ selectContract("map");
 const tabList = document.querySelector(".contract-tabs");
 const mobileTabs = window.matchMedia("(max-width: 850px)");
 const updateTabOrientation = () => {
-  tabList.setAttribute("aria-orientation", mobileTabs.matches ? "horizontal" : "vertical");
+  tabList?.setAttribute("aria-orientation", mobileTabs.matches ? "horizontal" : "vertical");
 };
 updateTabOrientation();
 mobileTabs.addEventListener?.("change", updateTabOrientation);

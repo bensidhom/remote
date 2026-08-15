@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Test runner used locally and by CI. Keep this pinned so collection and fixture
+# behavior is identical across developer machines and GitHub Actions.
+pytest==9.1.1
+

@@ -6,8 +6,9 @@
 # is imported lazily inside forecasting.py and the app uses the Markov engine
 # instead), so they are intentionally omitted. SciPy/matplotlib/pye57 support the
 # hosted point-cloud feature without loading local ML models. E57 decoding is
-# optional on ARM64 (pye57 publishes no Linux aarch64 wheel); NPZ/PLY/LAS remain
-# available there.
+# optional on ARM64 (pye57 publishes no Linux aarch64 wheel). On that platform,
+# external source ingestion is disabled; NPZ remains an internal preview format
+# and browser-only PLY/LAS rendering is never advertised as metric ingestion.
 #
 # Versions below were verified together on Python 3.14 (Windows) and Python 3.11+.
 # IMPORTANT: lightrag-hku is PINNED to 1.4.12 — 1.5.x changed the LightRAG(...)
@@ -19,6 +20,10 @@ uvicorn[standard]==0.51.0
 gunicorn>=23.0.0            # production ASGI worker manager (Linux server)
 python-multipart==0.0.32
 pydantic==2.13.4
+# MIT-licensed, pinned executor for locally hashed FHWA JSON Schema artifacts.
+jsonschema==4.26.0
+# MIT-licensed XSD 1.0 validator for the pinned legacy FHWA element schema.
+xmlschema==4.3.2
 PyJWT[crypto]>=2.10.1,<3.0
 
 # ---- Data / document parsing ----

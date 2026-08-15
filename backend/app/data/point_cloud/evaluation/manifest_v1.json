@@ -1,0 +1,20 @@
+{
+  "schema_version": "bridgeguard-point-cloud-evaluation-manifest-v1",
+  "manifest_id": "bridgeguard-point-cloud-evaluation-v1",
+  "artifacts": [
+    {
+      "artifact_id": "safety_contract_v1",
+      "filename": "safety_contract_v1.json",
+      "byte_size": 4310,
+      "sha256": "2cc67da470b341ca3301fb96d41bab0ee6494b148f2797c26c821678cfbe0995",
+      "role": "synthetic_safety_contract"
+    },
+    {
+      "artifact_id": "release_policy_v1",
+      "filename": "release_policy_v1.json",
+      "byte_size": 950,
+      "sha256": "b8b376328ea5f3d3f46cff0a8f63edc066773b703c21c94e174dd436139dbb12",
+      "role": "threshold_and_approval_policy"
+    }
+  ]
+}

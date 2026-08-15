@@ -45,6 +45,13 @@ export interface MapBridge {
   bridge_joints_condition_rating?: string | number;
   total_bridge_length?: string | number;
   bridge_width_out_to_out?: string | number;
+  /** Stable identities returned by the server resolver for a focused target. */
+  bridge_id?: string;
+  snapshot_id?: string;
+  snapshot_revision_id?: string | null;
+  inventory_revision?: string | null;
+  data_revision?: number;
+  snapshot_year?: number;
 }
 
 export type MapMode = 'heatmap' | 'markers';
@@ -63,12 +70,24 @@ export interface PopupBridgeRef {
   superstructure_condition_rating?: string | number;
   substructure_condition_rating?: string | number;
   lowest_condition_rating_code?: string | number;
+  data_year?: string | number;
+  bridge_id?: string;
+  snapshot_id?: string;
+  snapshot_revision_id?: string | null;
+  inventory_revision?: string | null;
+  data_revision?: number;
 }
 
 export interface MapBridgeFocus {
   requestId: string;
   state_code: string | number;
   bridge_number: string;
+  snapshot_year: number;
+  bridge_id: string;
+  snapshot_id: string;
+  snapshot_revision_id?: string | null;
+  inventory_revision?: string | null;
+  data_revision: number;
 }
 
 interface ArcgisMapProps {
@@ -150,6 +169,12 @@ const ATTR_KEYS: (keyof MapBridge)[] = [
   ...POPUP_ROWS.map((r) => r.key),
   'total_bridge_length',
   'bridge_width_out_to_out',
+  'data_year',
+  'bridge_id',
+  'snapshot_id',
+  'snapshot_revision_id',
+  'inventory_revision',
+  'data_revision',
 ];
 
 const STRING_ATTR_KEYS = new Set<keyof MapBridge>([
@@ -161,6 +186,10 @@ const STRING_ATTR_KEYS = new Set<keyof MapBridge>([
   'state_name',
   'year_built',
   'bridge_condition_classification',
+  'bridge_id',
+  'snapshot_id',
+  'snapshot_revision_id',
+  'inventory_revision',
 ]);
 
 const isValidCoordinate = (bridge: MapBridge): boolean => {
@@ -213,15 +242,42 @@ function buildPopupContent(
   const meta = [attrs['state_name'], attrs['year_built'] ? `Built ${attrs['year_built']}` : null]
     .filter(Boolean)
     .join('  ·  ');
-  header.innerHTML =
-    (sub ? `<div style="color:#64748b;font-size:11.5px;margin:-2px 0 8px;overflow:hidden;` +
-           `text-overflow:ellipsis;white-space:nowrap" title="${sub}">${sub}</div>` : '') +
-    `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px">` +
-    `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:9999px;` +
-    `font-weight:600;font-size:11.5px;background:${kcolor}14;color:${kcolor};border:1px solid ${kcolor}33">` +
-    `<span style="width:6px;height:6px;border-radius:50%;background:${kcolor}"></span>${klass}</span>` +
-    `<span style="color:#94a3b8;font-size:11px">Lowest: <b style="color:#475569">${lowest ?? 'N/A'}</b></span></div>` +
-    (meta ? `<div style="color:#64748b;font-size:11.5px;margin-bottom:9px">${meta}</div>` : '');
+  if (sub) {
+    const subtitle = document.createElement('div');
+    subtitle.style.cssText =
+      'color:#64748b;font-size:11.5px;margin:-2px 0 8px;overflow:hidden;' +
+      'text-overflow:ellipsis;white-space:nowrap';
+    subtitle.textContent = sub;
+    subtitle.title = sub;
+    header.appendChild(subtitle);
+  }
+  const statusRow = document.createElement('div');
+  statusRow.style.cssText =
+    'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px';
+  const condition = document.createElement('span');
+  condition.style.cssText =
+    `display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:9999px;` +
+    `font-weight:600;font-size:11.5px;background:${kcolor}14;color:${kcolor};border:1px solid ${kcolor}33`;
+  const conditionDot = document.createElement('span');
+  conditionDot.style.cssText = `width:6px;height:6px;border-radius:50%;background:${kcolor}`;
+  const conditionText = document.createElement('span');
+  conditionText.textContent = String(klass);
+  condition.append(conditionDot, conditionText);
+  const lowestText = document.createElement('span');
+  lowestText.style.cssText = 'color:#94a3b8;font-size:11px';
+  lowestText.append(document.createTextNode('Lowest: '));
+  const lowestValue = document.createElement('b');
+  lowestValue.style.cssText = 'color:#475569';
+  lowestValue.textContent = String(lowest ?? 'N/A');
+  lowestText.appendChild(lowestValue);
+  statusRow.append(condition, lowestText);
+  header.appendChild(statusRow);
+  if (meta) {
+    const metadata = document.createElement('div');
+    metadata.style.cssText = 'color:#64748b;font-size:11.5px;margin-bottom:9px';
+    metadata.textContent = meta;
+    header.appendChild(metadata);
+  }
   wrap.appendChild(header);
 
   // Compact primary-condition chips (the rest live in Bridge Details).
@@ -240,9 +296,14 @@ function buildPopupContent(
     const chip = document.createElement('div');
     chip.style.cssText =
       `flex:1;text-align:center;border-radius:9px;padding:6px 4px;background:${c}0f;border:1px solid ${c}2e`;
-    chip.innerHTML =
-      `<div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#64748b">${label}</div>` +
-      `<div style="font-size:17px;font-weight:750;color:${c};line-height:1.2">${val}</div>`;
+    const chipLabel = document.createElement('div');
+    chipLabel.style.cssText =
+      'font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#64748b';
+    chipLabel.textContent = label;
+    const chipValue = document.createElement('div');
+    chipValue.style.cssText = `font-size:17px;font-weight:750;color:${c};line-height:1.2`;
+    chipValue.textContent = String(val);
+    chip.append(chipLabel, chipValue);
     grid.appendChild(chip);
   }
   if (grid.childElementCount) wrap.appendChild(grid);
@@ -253,9 +314,19 @@ function buildPopupContent(
     const dims = document.createElement('div');
     dims.style.cssText =
       'border-top:1px solid #eef1f5;padding-top:7px;font-size:12px;display:flex;gap:18px';
-    dims.innerHTML =
-      (len ? `<span style="color:#94a3b8">Length <b style="color:#334155;font-weight:600">${len} ft</b></span>` : '') +
-      (wid ? `<span style="color:#94a3b8">Width <b style="color:#334155;font-weight:600">${wid} ft</b></span>` : '');
+    const appendDimension = (label: string, value: unknown) => {
+      if (value === null || value === undefined || value === '') return;
+      const span = document.createElement('span');
+      span.style.cssText = 'color:#94a3b8';
+      span.append(document.createTextNode(`${label} `));
+      const measurement = document.createElement('b');
+      measurement.style.cssText = 'color:#334155;font-weight:600';
+      measurement.textContent = `${String(value)} ft`;
+      span.appendChild(measurement);
+      dims.appendChild(span);
+    };
+    appendDimension('Length', len);
+    appendDimension('Width', wid);
     wrap.appendChild(dims);
   }
 
@@ -271,6 +342,12 @@ function buildPopupContent(
       superstructure_condition_rating: attrs['superstructure_condition_rating'] as string | number | undefined,
       substructure_condition_rating: attrs['substructure_condition_rating'] as string | number | undefined,
       lowest_condition_rating_code: attrs['lowest_condition_rating_code'] as string | number | undefined,
+      data_year: attrs['data_year'] as string | number | undefined,
+      bridge_id: attrs['bridge_id'] as string | undefined,
+      snapshot_id: attrs['snapshot_id'] as string | undefined,
+      snapshot_revision_id: attrs['snapshot_revision_id'] as string | null | undefined,
+      inventory_revision: attrs['inventory_revision'] as string | null | undefined,
+      data_revision: attrs['data_revision'] as number | undefined,
     };
     const bar = document.createElement('div');
     bar.style.cssText =
@@ -586,7 +663,8 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
       renderer,
       popupEnabled: true,
       popupTemplate: {
-        title: '{display_name}',
+        // Database strings are rendered only through DOM text nodes below.
+        title: 'Bridge details',
         outFields: ['*'],
         content: (f: any) => buildPopupContent(f.graphic.attributes, onActionRef.current),
       },
@@ -628,12 +706,27 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
         });
         const graphic = result?.features?.[0];
         if (!graphic) throw new Error('The bridge marker is not available in the selected county.');
+        Object.assign(graphic.attributes, {
+          data_year: focusBridge.snapshot_year,
+          bridge_id: focusBridge.bridge_id,
+          snapshot_id: focusBridge.snapshot_id,
+          snapshot_revision_id: focusBridge.snapshot_revision_id ?? null,
+          inventory_revision: focusBridge.inventory_revision,
+          data_revision: focusBridge.data_revision,
+        });
         await viewRef.current.goTo({ target: graphic.geometry, zoom: 16 }, { duration: 850 });
         if (cancelled) return;
         if (typeof viewRef.current.openPopup === 'function') {
           await viewRef.current.openPopup({ features: [graphic], location: graphic.geometry });
         } else {
           viewRef.current.popup.open({ features: [graphic], location: graphic.geometry });
+        }
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const popup = containerRef.current?.querySelector<HTMLElement>('.esri-popup__main-container');
+        if (popup) {
+          popup.tabIndex = -1;
+          popup.setAttribute('aria-label', `Bridge ${bridgeNumber} details`);
+          popup.focus({ preventScroll: true });
         }
         completedFocusRef.current = focusBridge.requestId;
         onFocusResultRef.current?.(focusBridge, true);

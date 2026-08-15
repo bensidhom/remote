@@ -1,356 +1,210 @@
-// frontend/src/components/BridgeLCCAModal.tsx
-// Forecast-driven Life-Cycle Cost Analysis. The deterioration curve comes from
-// the fleet-trained Markov forecast (not a guess); costs are triggered when the
-// controlling condition crosses thresholds and discounted to NPV; and the rehab
-// year is optimised to find the least-cost intervention vs. running to failure.
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine,
+  CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
-import { Coins, Loader2, TrendingDown, Wrench, ExternalLink, SlidersHorizontal, RotateCcw } from 'lucide-react';
-import { Modal, Button } from './ui';
+import { Coins, ExternalLink, Loader2, Play, RotateCcw, ShieldAlert } from 'lucide-react';
+import { Button, Modal } from './ui';
 
 interface Props {
   stateCode?: number | string;
   bridgeName?: string;
   bridgeNumber: string;
   yearBuilt?: string | number;
+  dataYear?: number | string;
   onClose: () => void;
   embedded?: boolean;
 }
 
-// Public, citable sources behind each cost assumption (opened from the UI).
-const SOURCES = {
-  replace: 'https://www.fhwa.dot.gov/bridge/nbi/sd2024.cfm',
-  rehab: 'https://wisconsindot.gov/Documents/doing-bus/local-gov/astnce-pgms/highway/tools/bos-cost.pdf',
-  maint: 'https://www.fhwa.dot.gov/bridge/preservation/guide/guide.pdf',
-  discount: 'https://onlinepubs.trb.org/onlinepubs/nchrp/nchrp_rpt_483.pdf',
-} as const;
-
-type NhsSel = 'blended' | 'nhs' | 'non_nhs';
-interface Draft { replace: string; rehab: string; maint: string; penalty: string; discount: string; }
-const EMPTY_DRAFT: Draft = { replace: '', rehab: '', maint: '', penalty: '', discount: '' };
-
-interface LccaResult {
-  status: string;
-  start_year: number;
-  horizon_years: number;
-  discount_rate: number;
-  parameters: {
-    current_controlling_rating: number;
-    annual_decline_rate: number;
-    recovery_bump: number;
-    recovery_source: 'learned' | 'default';
-    deck_area: number;
-    age: number | null;
-    year_built: number | null;
-    years_to_poor: number | null;
-    fleet_transitions: number;
+interface StatePoint { component: string; expected_rating: number; most_likely_rating: number; probabilities: number[]; }
+interface LedgerRow {
+  year: number; pre_action_states: StatePoint[]; post_action_states: StatePoint[];
+  selected_action_ids: string[]; base_cost: string; future_cost: string;
+  inflation_factor: string; discount_factor: string; present_value_cost: string;
+}
+interface Alternative {
+  strategy_id: string; total_present_value_cost: string; equivalent_annual_cost: string;
+  economic_mode: string; scheduled_actions: Array<{ year: number; treatment_id: string; present_cost: string; cost_unit: string }>;
+  applicability_issues: Array<{ treatment_id: string; status: string; reasons: string[] }>;
+  annual_ledger: LedgerRow[];
+}
+interface LccaResponse {
+  scenario_receipt_sha256: string; status: string; planning_only: boolean;
+  identity: { data_year: number; snapshot_revision_id: string; canonical_sha256: string };
+  facts: {
+    bridge_name?: string | null; age_at_snapshot?: number | null; component_ratings: Record<string, number | null>;
+    controlling_rating?: number | null; controlling_basis: string; deck_area?: number | null;
+    deck_area_method: string; deck_area_status: string; nhs?: boolean | null; nhs_status: string; nhs_source: string;
+    deck_material_codes: string[]; span_material_codes: string[]; substructure_material_codes: string[];
   };
-  nhs?: boolean | null;
-  unit_costs: { replace: number; rehab: number; annual_base: number; per_sqft_replace: number; per_sqft_rehab: number; per_sqft_annual_maint?: number; per_sqft_poor_penalty?: number };
-  do_nothing: { npv: number; npv_with_user_costs: number; first_replacement_year: number | null; replacement_count: number };
-  recommended: null | {
-    rehab_year: number; rehab_years?: number[]; npv: number; npv_with_user_costs: number; savings: number;
-    first_replacement_year: number | null; replacement_count: number;
+  forecast: { model_id: string; evaluation_receipt_id: string; qualification: string };
+  treatment_library: {
+    library_id: string; sha256: string; effect_evidence: string; source_title: string;
+    treatments: Array<{ treatment_id: string; title: string; component: string; trigger_kind: string; cycle_years?: number | null; source_reference: string; source_url: string }>;
   };
-  chart: Array<{ year: number; do_nothing: number; intervention: number | null }>;
-  cost_chart?: Array<{ year: number; do_nothing: number; intervention: number | null }>;
+  life_history: {
+    construction_year: number; unknown_history_interval?: [number, number] | null;
+    events: Array<{ event_id: string; event_year: number; component: string; treatment_id?: string | null; evidence_class: string; before_rating?: number | null; after_rating?: number | null }>;
+  };
+  alternatives: Alternative[];
 }
 
-const usd = (n: number | null | undefined) =>
-  n == null ? '—' : `$${Math.round(n).toLocaleString()}`;
+const STRATEGIES = [
+  ['no_action', 'No capital action'],
+  ['njdot_preventive_cycles', 'Typical NJDOT preventive-maintenance cycles'],
+  ['condition_triggered_rehabilitation', 'Condition-triggered rehabilitation'],
+  ['deck_and_substructure_rehabilitation', 'Deck + substructure rehabilitation now'],
+  ['full_replacement', 'Full replacement now'],
+] as const;
 
-// Compact money for axis ticks: $1.2M / $850k / $0.
-const usdShort = (n: number | null | undefined) => {
-  if (n == null) return '';
-  const a = Math.abs(n);
-  if (a >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (a >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
+const COST_FIELDS = [
+  ['bridge_cleaning', 'Bridge cleaning event'],
+  ['deck_seal', 'Deck sealing event'],
+  ['joint_repair_replace', 'Joint repair/replacement event'],
+  ['deck_replacement', 'Deck replacement'],
+  ['superstructure_rehabilitation', 'Superstructure rehabilitation'],
+  ['substructure_rehabilitation', 'Substructure rehabilitation'],
+  ['full_replacement', 'Full bridge replacement'],
+] as const;
+
+const STRATEGY_COLORS: Record<string, string> = {
+  no_action: '#dc2626', njdot_preventive_cycles: '#16a34a',
+  condition_triggered_rehabilitation: '#2563eb', deck_and_substructure_rehabilitation: '#d97706',
+  full_replacement: '#7c3aed', explicit_schedule: '#0891b2',
 };
 
-const BridgeLCCAModal: React.FC<Props> = ({ stateCode = 34, bridgeName, bridgeNumber, yearBuilt, onClose, embedded }) => {
-  const [horizon, setHorizon] = useState(40);
-  const [chartView, setChartView] = useState<'condition' | 'cost'>('condition');
-  const [nhs, setNhs] = useState<NhsSel>('blended');
-  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);   // live edits
-  const [applied, setApplied] = useState<Draft>(EMPTY_DRAFT); // what's actually sent
-  const [data, setData] = useState<LccaResult | null>(null);
-  const [loading, setLoading] = useState(true);
+const money = (value: string | number | null | undefined) => {
+  if (value == null || value === '') return '—';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Number(value));
+};
+const label = (value: string) => value.split('_').map((word) => word[0]?.toUpperCase() + word.slice(1)).join(' ');
+const detailText = (error: any) => error?.response?.data?.detail?.message || error?.response?.data?.detail || 'Could not run the annual LCCA simulation.';
+
+const BridgeLCCAModal: React.FC<Props> = ({
+  stateCode = 34, bridgeName, bridgeNumber, yearBuilt, dataYear, onClose, embedded,
+}) => {
+  const [horizon, setHorizon] = useState(50);
+  const [discountRate, setDiscountRate] = useState('2.5');
+  const [conditionThreshold, setConditionThreshold] = useState('4.5');
+  const [strategies, setStrategies] = useState<string[]>(['no_action', 'njdot_preventive_cycles', 'condition_triggered_rehabilitation']);
+  const [costs, setCosts] = useState<Record<string, string>>({});
+  const [enableResearchEffects, setEnableResearchEffects] = useState(false);
+  const [generation, setGeneration] = useState<number | null>(null);
+  const [data, setData] = useState<LccaResponse | null>(null);
+  const [selectedAlternative, setSelectedAlternative] = useState('no_action');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoading(true);
-    setError(null);
-    const qs = new URLSearchParams({ horizon_years: String(horizon) });
-    if (nhs === 'nhs') qs.set('nhs', 'true');
-    else if (nhs === 'non_nhs') qs.set('nhs', 'false');
-    if (applied.replace) qs.set('replace_per_sqft', applied.replace);
-    if (applied.rehab) qs.set('rehab_per_sqft', applied.rehab);
-    if (applied.maint !== '') qs.set('annual_maint_per_sqft', applied.maint);
-    if (applied.penalty !== '') qs.set('poor_penalty_per_sqft', applied.penalty);
-    if (applied.discount) qs.set('discount_rate', String(Number(applied.discount) / 100));
-    axios
-      .get<LccaResult>(`/api/lcca/bridge/${stateCode}/${encodeURIComponent(bridgeNumber)}?${qs.toString()}`)
-      .then((res) => setData(res.data))
-      .catch((e) => setError(e.response?.data?.detail || e.response?.data?.message || 'Could not compute LCCA for this bridge.'))
-      .finally(() => setLoading(false));
-  }, [stateCode, bridgeNumber, horizon, nhs, applied]);
+    axios.get<{ data_generation: number }>('/api/forecasts/v2/summary')
+      .then((response) => setGeneration(response.data.data_generation))
+      .catch(() => setError('Could not resolve the current published data generation.'));
+  }, []);
 
-  const p = data?.parameters;
-  const rec = data?.recommended;
-  const uc = data?.unit_costs;
-  const dirty = JSON.stringify(draft) !== JSON.stringify(applied);
-  const applyDraft = () => setApplied({ ...draft });
-  const resetAssumptions = () => { setDraft(EMPTY_DRAFT); setApplied(EMPTY_DRAFT); setNhs('blended'); };
+  const run = async () => {
+    if (generation == null) return;
+    setLoading(true); setError(null);
+    try {
+      const actionCosts = Object.fromEntries(Object.entries(costs).filter(([, value]) => value !== '').map(([key, value]) => [key, value]));
+      const response = await axios.post<LccaResponse>('/api/lcca/v2/bridge', {
+        state_code: Number(stateCode), bridge_number: bridgeNumber, as_of_year: dataYear || null,
+        expected_data_generation: generation, horizon_years: horizon, strategies,
+        economic_mode: 'constant_dollar', real_discount_rate: Number(discountRate) / 100,
+        condition_threshold: Number(conditionThreshold), action_costs: actionCosts,
+        explicit_actions: [], enable_research_effect_assumptions: enableResearchEffects,
+      });
+      setData(response.data);
+      setSelectedAlternative(response.data.alternatives[0]?.strategy_id || 'no_action');
+    } catch (requestError: any) {
+      setError(detailText(requestError));
+    } finally { setLoading(false); }
+  };
+
+  const toggleStrategy = (strategy: string) => setStrategies((current) => current.includes(strategy)
+    ? current.filter((item) => item !== strategy)
+    : [...current, strategy]);
+  const reset = () => {
+    setHorizon(50); setDiscountRate('2.5'); setConditionThreshold('4.5');
+    setStrategies(['no_action', 'njdot_preventive_cycles', 'condition_triggered_rehabilitation']);
+    setCosts({}); setEnableResearchEffects(false); setData(null); setError(null);
+  };
+
+  const chartRows = useMemo(() => {
+    if (!data) return [];
+    const rows = new Map<number, Record<string, number>>();
+    data.alternatives.forEach((alternative) => alternative.annual_ledger.forEach((entry) => {
+      const current = rows.get(entry.year) || { year: entry.year };
+      const ratings = entry.post_action_states.map((state) => state.expected_rating);
+      current[alternative.strategy_id] = ratings.length ? Math.min(...ratings) : 0;
+      rows.set(entry.year, current);
+    }));
+    return [...rows.values()].sort((a, b) => a.year - b.year);
+  }, [data]);
+  const active = data?.alternatives.find((item) => item.strategy_id === selectedAlternative);
+  const lowest = data?.alternatives.reduce<Alternative | null>((best, item) => !best || Number(item.total_present_value_cost) < Number(best.total_present_value_cost) ? item : best, null);
 
   return (
-    <Modal open onClose={onClose} inline={embedded} size="lg" title="Life-Cycle Cost Analysis" icon={<Coins className="w-5 h-5" />}>
-      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-1 mb-5">
-        {bridgeName || 'Bridge'} — {bridgeNumber}
-        {(p?.year_built || yearBuilt) ? ` · Built ${p?.year_built ?? yearBuilt}${p?.age != null ? ` · Age ${p.age} yrs` : ''}` : ''}
-      </p>
+    <Modal open onClose={onClose} inline={embedded} size="lg" title="Annual Forecast-Driven LCCA" icon={<Coins className="w-5 h-5" />}>
+      <p className="text-sm text-slate-500 -mt-1 mb-4">{bridgeName || 'Bridge'} — {bridgeNumber}{yearBuilt ? ` · Built ${yearBuilt}` : ''}</p>
+      <div className="rounded-2xl border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-4 text-sm text-amber-900 dark:text-amber-200 flex gap-3">
+        <ShieldAlert className="w-5 h-5 shrink-0" /><span>Planning/research comparison. Forecast qualification, treatment-effect evidence, costs, geometry, and source revision remain visible; “lowest cost” is not an engineering recommendation.</span>
+      </div>
 
-      {loading && (
-        <div className="py-16 text-center text-slate-500">
-          <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-brand-500" />
-          Running forecast-driven cost analysis…
-        </div>
-      )}
-      {error && !loading && <p className="text-red-500 text-center py-10">{error}</p>}
-
-      {data && !loading && p && (
-        <div className="space-y-6">
-          {/* Strategy comparison — the headline */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5 bg-white dark:bg-slate-900/40">
-              <div className="flex items-center gap-2 text-slate-500 text-xs uppercase tracking-wider mb-1">
-                <TrendingDown className="w-4 h-4" /> Do nothing (run to failure)
-              </div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-white">{usd(data.do_nothing.npv)}</div>
-              <div className="text-xs text-slate-400 mt-1">
-                {data.horizon_years}-yr NPV · {data.do_nothing.replacement_count} replacement(s)
-                {data.do_nothing.first_replacement_year ? ` · first ~${data.do_nothing.first_replacement_year}` : ''}
-              </div>
-            </div>
-            <div className={`rounded-2xl border p-5 ${rec ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-950/30' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/40'}`}>
-              <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 text-xs uppercase tracking-wider mb-1">
-                <Wrench className="w-4 h-4" /> {rec ? `Recommended — rehab ${rec.rehab_year}` : 'Recommendation'}
-              </div>
-              {rec ? (
-                <>
-                  <div className="text-3xl font-bold text-slate-900 dark:text-white">{usd(rec.npv)}</div>
-                  <div className="text-xs mt-1">
-                    <span className="font-semibold text-emerald-600 dark:text-emerald-400">Saves {usd(rec.savings)}</span>
-                    <span className="text-slate-400"> · {data.horizon_years}-yr NPV · replacement delayed to ~{rec.first_replacement_year ?? '—'}</span>
-                  </div>
-                </>
-              ) : (
-                <div className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                  No rehab beats do-nothing within {data.horizon_years} yrs.
-                </div>
-              )}
-            </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mt-5">
+        <section className="lg:col-span-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
+          <h3 className="font-semibold mb-3">Simulation strategies</h3>
+          <div className="grid md:grid-cols-2 gap-2">
+            {STRATEGIES.map(([id, title]) => <label key={id} className="flex gap-3 rounded-xl border p-3 cursor-pointer"><input type="checkbox" checked={strategies.includes(id)} onChange={() => toggleStrategy(id)} /><span className="text-sm">{title}</span></label>)}
           </div>
+          <label className="mt-4 flex gap-3 rounded-xl border border-indigo-200 bg-indigo-50 dark:bg-indigo-950/30 p-3 text-sm">
+            <input type="checkbox" checked={enableResearchEffects} onChange={(event) => setEnableResearchEffects(event.target.checked)} />
+            <span><strong>Enable illustrative treatment effects.</strong> This explicitly applies research sensitivity assumptions (preservation +0, rehabilitation +2, replacement reset). It is not learned or validated treatment performance.</span>
+          </label>
+        </section>
+        <section className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5 space-y-3">
+          <NumberField label="Annual simulation horizon" value={String(horizon)} suffix="years" onChange={(value) => setHorizon(Math.max(1, Math.min(100, Number(value) || 1)))} />
+          <NumberField label="Real discount rate" value={discountRate} suffix="%" step="0.1" onChange={setDiscountRate} />
+          <NumberField label="Rehabilitation trigger" value={conditionThreshold} suffix="rating" step="0.1" onChange={setConditionThreshold} />
+          <div className="flex gap-2"><Button onClick={run} disabled={loading || !strategies.length || generation == null}><Play className="w-4 h-4 mr-2" /> Run yearly simulation</Button><button onClick={reset} className="p-2 rounded-xl border" title="Reset"><RotateCcw className="w-4 h-4" /></button></div>
+        </section>
+      </div>
 
-          {/* Parameters + costs */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
-              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Condition inputs</h3>
-              <dl className="space-y-2 text-sm">
-                <Row k="Controlling rating now" v={`${p.current_controlling_rating}/9`} />
-                <Row k="Deterioration rate" v={`${p.annual_decline_rate} pts/yr`} cls="text-amber-600 dark:text-amber-400" />
-                <Row k="Years to Poor (≤4.9)" v={p.years_to_poor != null ? `${p.years_to_poor} yrs` : '—'} cls={p.years_to_poor != null && p.years_to_poor < 8 ? 'text-red-500' : ''} />
-                <Row k="Rehab recovery" v={`+${p.recovery_bump} pts`} />
-                <Row k="Deck area" v={p.deck_area > 0 ? `${p.deck_area.toLocaleString()} ft²` : 'N/A'} />
-              </dl>
-            </div>
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
-              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Cost assumptions (USD)</h3>
-              <dl className="space-y-2 text-sm">
-                <Row k="Annual maintenance (base)" v={usd(data.unit_costs.annual_base)} cls="text-amber-600 dark:text-amber-400" />
-                <Row k={`Major rehab (@$${data.unit_costs.per_sqft_rehab}/ft²)`} v={usd(data.unit_costs.rehab)} cls="text-orange-600 dark:text-orange-400" />
-                <Row k={`Replacement (@$${data.unit_costs.per_sqft_replace}/ft²)`} v={usd(data.unit_costs.replace)} cls="text-red-600 dark:text-red-400" />
-                <hr className="my-1 border-slate-200 dark:border-slate-700" />
-                <Row k="Discount rate" v={`${(data.discount_rate * 100).toFixed(0)}%`} />
-                <Row k="Do-nothing incl. user costs" v={usd(data.do_nothing.npv_with_user_costs)} cls="text-slate-500" />
-              </dl>
-            </div>
+      <section className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5 mt-5">
+        <h3 className="font-semibold mb-1">Action costs in base-year dollars</h3>
+        <p className="text-xs text-slate-500 mb-4">No hidden default cost is used. Blank actions cost $0 and are visibly retained in the ledger for condition-only experimentation.</p>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">{COST_FIELDS.map(([id, title]) => <NumberField key={id} label={title} value={costs[id] || ''} suffix="USD/event" onChange={(value) => setCosts((current) => ({ ...current, [id]: value }))} />)}</div>
+      </section>
+
+      {loading && <div className="py-14 text-center text-slate-500"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Advancing every component one year at a time…</div>}
+      {error && !loading && <div className="rounded-2xl bg-red-50 text-red-700 p-4 mt-5 text-sm">{error}</div>}
+
+      {data && !loading && <div className="space-y-5 mt-5">
+        <section className="rounded-2xl border p-5">
+          <div className="grid md:grid-cols-4 gap-3 text-sm">
+            <Fact title="Exact source" value={`${data.identity.data_year} · ${data.identity.snapshot_revision_id}`} />
+            <Fact title="Deck area" value={data.facts.deck_area ? `${data.facts.deck_area.toLocaleString()} · ${data.facts.deck_area_method}` : `Unavailable · ${data.facts.deck_area_method}`} />
+            <Fact title="NHS evidence" value={`${data.facts.nhs == null ? 'Unknown' : data.facts.nhs ? 'Yes' : 'No'} · ${data.facts.nhs_source}`} />
+            <Fact title="Forecast" value={`${data.forecast.qualification} · ${data.forecast.model_id.slice(0, 10)}…`} />
           </div>
+        </section>
 
-          {/* Editable assumptions — every cost is adjustable and source-linked */}
-          <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
-            <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-300">
-                <SlidersHorizontal className="w-4 h-4" /> Adjust assumptions
-              </h3>
-              <div className="flex items-center gap-2">
-                <button onClick={resetAssumptions} className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-200">
-                  <RotateCcw className="w-3.5 h-3.5" /> Reset
-                </button>
-                <Button onClick={applyDraft} disabled={!dirty || loading} className="!py-1.5 !px-3 text-xs">Apply</Button>
-              </div>
-            </div>
-            <p className="text-xs text-slate-400 mb-4">Leave a field blank to use the default shown. Click the source link to verify each figure.</p>
+        <section className="grid md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {data.alternatives.map((alternative) => <button key={alternative.strategy_id} onClick={() => setSelectedAlternative(alternative.strategy_id)} className={`text-left rounded-2xl border p-4 ${selectedAlternative === alternative.strategy_id ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-700'}`}><p className="text-xs uppercase text-slate-500">{label(alternative.strategy_id)}</p><p className="text-2xl font-bold mt-1">{money(alternative.total_present_value_cost)}</p><p className="text-xs text-slate-500">NPV · EAC {money(alternative.equivalent_annual_cost)} · {alternative.scheduled_actions.length} actions</p>{lowest?.strategy_id === alternative.strategy_id && <p className="text-xs text-emerald-700 mt-2">Lowest modeled planning cost</p>}</button>)}
+        </section>
 
-            {/* NHS selector → drives the FHWA NJ replacement unit cost */}
-            <div className="flex items-center gap-3 flex-wrap mb-4 text-sm">
-              <span className="font-medium text-slate-600 dark:text-slate-300">Highway system</span>
-              <div className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden">
-                {([['blended', 'Blended'], ['nhs', 'NHS'], ['non_nhs', 'Non-NHS']] as [NhsSel, string][]).map(([val, label]) => (
-                  <button
-                    key={val}
-                    onClick={() => setNhs(val)}
-                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${nhs === val ? 'bg-brand-600 text-white' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <SourceLink href={SOURCES.replace} label="FHWA NBI NJ unit costs" />
-            </div>
+        <section className="rounded-2xl border p-5"><h3 className="font-semibold mb-3">Expected controlling-component path</h3><ResponsiveContainer width="100%" height={310}><LineChart data={chartRows}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="year" /><YAxis domain={[0, 9]} ticks={[0,1,2,3,4,5,6,7,8,9]} /><Tooltip /><Legend />{data.alternatives.map((alternative) => <Line key={alternative.strategy_id} dataKey={alternative.strategy_id} name={label(alternative.strategy_id)} stroke={STRATEGY_COLORS[alternative.strategy_id] || '#64748b'} dot={false} connectNulls={false} />)}</LineChart></ResponsiveContainer></section>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
-              <CostInput label="Replacement" unit="$/ft²" value={draft.replace} placeholder={uc?.per_sqft_replace}
-                onChange={(v) => setDraft((d) => ({ ...d, replace: v }))} href={SOURCES.replace} note="FHWA NBI 2024, New Jersey" />
-              <CostInput label="Major rehab" unit="$/ft²" value={draft.rehab} placeholder={uc?.per_sqft_rehab}
-                onChange={(v) => setDraft((d) => ({ ...d, rehab: v }))} href={SOURCES.rehab} note="≈40% of replacement (WisDOT components)" />
-              <CostInput label="Annual maintenance" unit="$/ft²/yr" value={draft.maint} placeholder={uc?.per_sqft_annual_maint}
-                onChange={(v) => setDraft((d) => ({ ...d, maint: v }))} href={SOURCES.maint} note="cyclical preservation, FHWA guide" />
-              <CostInput label="Poor-condition penalty" unit="$/ft²/yr" value={draft.penalty} placeholder={uc?.per_sqft_poor_penalty}
-                onChange={(v) => setDraft((d) => ({ ...d, penalty: v }))} note="risk/user cost while Poor (escalates yearly)" />
-              <CostInput label="Discount rate" unit="%" value={draft.discount} placeholder={data ? data.discount_rate * 100 : undefined} step={0.1}
-                onChange={(v) => setDraft((d) => ({ ...d, discount: v }))} href={SOURCES.discount} note="NCHRP 483 LCCA guidance" />
-            </div>
-          </div>
+        {active && <section className="rounded-2xl border p-5"><h3 className="font-semibold mb-3">Year-by-year ledger · {label(active.strategy_id)}</h3><div className="overflow-auto max-h-[430px] rounded-xl border"><table className="min-w-full text-xs"><thead className="sticky top-0 bg-slate-50 dark:bg-slate-900"><tr><th className="text-left p-3">Year</th><th className="text-left p-3">Action</th><th className="text-left p-3">Pre-action condition</th><th className="text-left p-3">Post-action condition</th><th className="text-right p-3">Base cost</th><th className="text-right p-3">Future cost</th><th className="text-right p-3">Present value</th></tr></thead><tbody>{active.annual_ledger.map((row) => <tr key={row.year} className="border-t"><td className="p-3">{row.year}</td><td className="p-3">{row.selected_action_ids.map(label).join(', ') || 'None'}</td><td className="p-3">{row.pre_action_states.map((state) => `${label(state.component)} ${state.expected_rating.toFixed(2)}`).join(' · ')}</td><td className="p-3">{row.post_action_states.map((state) => `${label(state.component)} ${state.expected_rating.toFixed(2)}`).join(' · ')}</td><td className="p-3 text-right">{money(row.base_cost)}</td><td className="p-3 text-right">{money(row.future_cost)}</td><td className="p-3 text-right font-semibold">{money(row.present_value_cost)}</td></tr>)}</tbody></table></div></section>}
 
-          {/* Condition projection: do-nothing vs recommended intervention */}
-          <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
-            <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
-              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                {chartView === 'cost' ? 'Cumulative Cost & Strategy' : 'Condition Projection & Strategy'}
-              </h3>
-              <div className="flex items-center gap-3">
-                {/* Condition vs. money view */}
-                <div className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden text-xs">
-                  {(['condition', 'cost'] as const).map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => setChartView(v)}
-                      className={`px-2.5 py-1 ${chartView === v
-                        ? 'bg-brand-500 text-white'
-                        : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300'}`}
-                    >
-                      {v === 'condition' ? 'Condition' : 'Cost ($)'}
-                    </button>
-                  ))}
-                </div>
-                <label className="text-xs text-slate-500 flex items-center gap-2">
-                  Horizon
-                  <select
-                    value={horizon}
-                    onChange={(e) => setHorizon(Number(e.target.value))}
-                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-slate-800 dark:text-slate-100"
-                  >
-                    {[20, 30, 40, 50, 75, 100].map((y) => <option key={y} value={y}>{y} yrs</option>)}
-                  </select>
-                </label>
-              </div>
-            </div>
-            <ResponsiveContainer width="100%" height={300}>
-              {chartView === 'cost' ? (
-                <LineChart data={data.cost_chart || []} margin={{ top: 16, right: 12, left: 12, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
-                  <XAxis dataKey="year" tick={{ fontSize: 12, fill: '#94a3b8' }} interval="preserveStartEnd" />
-                  <YAxis tickFormatter={usdShort} width={64} tick={{ fontSize: 12, fill: '#94a3b8' }} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid rgba(148,163,184,0.3)' }} formatter={(v: any) => usd(Number(v))} />
-                  <Legend />
-                  {rec && (rec.rehab_years?.length ? rec.rehab_years : [rec.rehab_year]).map((ry, i) => (
-                    <ReferenceLine key={ry} x={ry} stroke="#10b981" strokeWidth={1.5} strokeDasharray="4 3" label={i === 0 ? { value: `rehab ${ry}`, position: 'insideTopLeft', fontSize: 10, fill: '#10b981' } : undefined} />
-                  ))}
-                  <Line type="stepAfter" dataKey="do_nothing" name="Do nothing (cumulative)" stroke="#ef4444" strokeWidth={2} dot={false} />
-                  {rec && <Line type="stepAfter" dataKey="intervention" name="With rehab (cumulative)" stroke="#10b981" strokeWidth={2} dot={false} connectNulls />}
-                </LineChart>
-              ) : (
-                <LineChart data={data.chart} margin={{ top: 16, right: 12, left: 4, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.25)" />
-                  <XAxis dataKey="year" tick={{ fontSize: 12, fill: '#94a3b8' }} interval="preserveStartEnd" />
-                  <YAxis domain={[0, 9]} ticks={[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]} interval={0} tick={{ fontSize: 12, fill: '#94a3b8' }} allowDecimals={false} />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid rgba(148,163,184,0.3)' }} />
-                  <Legend />
-                  {/* Threshold labels sit INSIDE the plot so they are never clipped at the right edge. */}
-                  <ReferenceLine y={4.9} stroke="#ef4444" strokeDasharray="5 5" label={{ value: 'Poor ≤4', position: 'insideTopRight', fontSize: 10, fill: '#ef4444' }} />
-                  <ReferenceLine y={3} stroke="#7f1d1d" strokeDasharray="2 4" label={{ value: 'Replace ≤3', position: 'insideBottomRight', fontSize: 10, fill: '#7f1d1d' }} />
-                  {rec && (rec.rehab_years?.length ? rec.rehab_years : [rec.rehab_year]).map((ry, i) => (
-                    <ReferenceLine key={ry} x={ry} stroke="#10b981" strokeWidth={1.5} strokeDasharray="4 3" label={i === 0 ? { value: `rehab ${ry}`, position: 'insideTopLeft', fontSize: 10, fill: '#10b981' } : undefined} />
-                  ))}
-                  <Line type="monotone" dataKey="do_nothing" name="Do nothing" stroke="#ef4444" strokeWidth={2} dot={false} />
-                  {rec && <Line type="monotone" dataKey="intervention" name="With rehab" stroke="#10b981" strokeWidth={2} dot={false} connectNulls />}
-                </LineChart>
-              )}
-            </ResponsiveContainer>
-            <p className="mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              {chartView === 'cost' ? (
-                <>The <span className="font-semibold">cumulative discounted spend</span> of each strategy over the horizon. Steps are capital events (rehab or replacement); the ending values are the present-value totals shown above (before the salvage credit). Where the red line ends higher than the green, acting is cheaper over the long run.</>
-              ) : (
-                <>The <span className="font-semibold text-emerald-600 dark:text-emerald-400">rehab timing is calculated from condition, not manual</span>: a rehab is scheduled whenever the bridge degrades into <span className="font-semibold">Poor (≤4.9)</span>
-                {rec ? <> — here, <span className="font-semibold">{(rec.rehab_years?.length ? rec.rehab_years : [rec.rehab_year]).join(', ')}</span></> : ' (doing nothing is cheaper here)'}. NPV includes an escalating risk/user-cost penalty for every year a bridge is left in Poor condition, so deferring is no longer &ldquo;free.&rdquo; Change the horizon above to see how the plan shifts.</>
-              )}
-            </p>
-          </div>
-        </div>
-      )}
+        <section className="rounded-2xl border p-5"><h3 className="font-semibold mb-3">Life since construction</h3>{data.life_history.unknown_history_interval && <p className="text-xs text-amber-700 mb-3">History unavailable from {data.life_history.unknown_history_interval[0]} through {data.life_history.unknown_history_interval[1]}; no maintenance was invented.</p>}<div className="space-y-2 max-h-56 overflow-auto">{data.life_history.events.map((event) => <div key={event.event_id} className="flex gap-3 text-sm"><span className="font-mono text-slate-500">{event.event_year}</span><span><strong>{label(event.evidence_class)}</strong> · {label(event.component)}{event.treatment_id ? ` · ${label(event.treatment_id)}` : ''}{event.before_rating != null ? ` · ${event.before_rating}→${event.after_rating}` : ''}</span></div>)}</div></section>
+
+        <section className="rounded-2xl border p-5 text-xs text-slate-500"><p>Scenario receipt: <span className="font-mono">{data.scenario_receipt_sha256}</span></p><p>Treatment library: {data.treatment_library.source_title} · <span className="font-mono">{data.treatment_library.sha256.slice(0, 16)}…</span></p><div className="flex gap-4 mt-2"><a href="https://www.nj.gov/transportation/about/asset/pdf/NJ_2019_TAMP_FHWA.pdf" target="_blank" rel="noreferrer" className="text-indigo-600 inline-flex gap-1">NJDOT TAMP <ExternalLink className="w-3 h-3" /></a><a href="https://www.fhwa.dot.gov/bridge/preservation/guide/guide.pdf" target="_blank" rel="noreferrer" className="text-indigo-600 inline-flex gap-1">FHWA preservation guide <ExternalLink className="w-3 h-3" /></a></div></section>
+      </div>}
     </Modal>
   );
 };
 
-const Row: React.FC<{ k: string; v: string; cls?: string }> = ({ k, v, cls }) => (
-  <div className="flex justify-between gap-3">
-    <dt className="text-slate-500 dark:text-slate-400">{k}</dt>
-    <dd className={`font-semibold text-slate-800 dark:text-slate-100 text-right ${cls || ''}`}>{v}</dd>
-  </div>
-);
-
-// Small "source ↗" link that opens the citation in the system browser.
-const SourceLink: React.FC<{ href: string; label?: string }> = ({ href, label }) => (
-  <a
-    href={href}
-    target="_blank"
-    rel="noreferrer noopener"
-    className="inline-flex items-center gap-1 text-xs text-brand-600 dark:text-brand-400 hover:underline"
-    title={`Open source: ${href}`}
-  >
-    {label || 'source'} <ExternalLink className="w-3 h-3" />
-  </a>
-);
-
-// One editable cost assumption: a number input whose placeholder shows the
-// current effective (default) value, plus an optional source link + note.
-const CostInput: React.FC<{
-  label: string; unit: string; value: string; placeholder?: number;
-  onChange: (v: string) => void; href?: string; note?: string; step?: number;
-}> = ({ label, unit, value, placeholder, onChange, href, note, step }) => (
-  <div>
-    <div className="flex items-center justify-between gap-2 mb-1">
-      <label className="text-sm font-medium text-slate-600 dark:text-slate-300">{label}</label>
-      {href && <SourceLink href={href} />}
-    </div>
-    <div className="flex items-center gap-2">
-      <input
-        type="number"
-        min={0}
-        step={step ?? 1}
-        value={value}
-        placeholder={placeholder != null ? String(Math.round(placeholder * 100) / 100) : ''}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-400"
-      />
-      <span className="text-xs text-slate-400 whitespace-nowrap">{unit}</span>
-    </div>
-    {note && <p className="text-[11px] text-slate-400 mt-1">{note}</p>}
-  </div>
-);
+const NumberField = ({ label: title, value, suffix, step = '1', onChange }: { label: string; value: string; suffix: string; step?: string; onChange: (value: string) => void }) => <label className="block"><span className="text-xs text-slate-500">{title}</span><div className="flex items-center gap-2 mt-1"><input type="number" min="0" step={step} value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-xl border px-3 py-2 bg-white dark:bg-slate-900" /><span className="text-xs text-slate-400 whitespace-nowrap">{suffix}</span></div></label>;
+const Fact = ({ title, value }: { title: string; value: string }) => <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-3"><p className="text-xs text-slate-500">{title}</p><p className="font-medium break-words">{value}</p></div>;
 
 export default BridgeLCCAModal;

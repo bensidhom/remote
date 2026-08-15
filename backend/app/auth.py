@@ -55,6 +55,15 @@ def _truthy(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _builtin_pilot_roles_enabled() -> bool:
+    """Keep pilot conveniences out of every dedicated/commercial data plane."""
+
+    mode = os.getenv("BRIDGEGUARD_DEPLOYMENT_MODE", "research_shared").strip().lower()
+    return mode != "dedicated_customer" and not _truthy(
+        "BRIDGEGUARD_REQUIRE_COMMERCIAL_READY"
+    )
+
+
 @dataclass(frozen=True)
 class AuthUser:
     email: str
@@ -98,18 +107,23 @@ def role_for_email(email: str) -> str | None:
     email = email.strip().lower()
     if not email or "@" not in email:
         return None
-    if (
-        email in BUILTIN_ADMIN_EMAILS
-        or email in _csv("BRIDGEGUARD_OWNER_EMAIL")
-        or email in _csv("BRIDGEGUARD_ADMIN_EMAILS")
+    configured_admins = _csv("BRIDGEGUARD_OWNER_EMAIL") | _csv(
+        "BRIDGEGUARD_ADMIN_EMAILS"
+    )
+    configured_editors = _csv("BRIDGEGUARD_EDITOR_EMAILS")
+    builtins_enabled = _builtin_pilot_roles_enabled()
+    if email in configured_admins or (
+        builtins_enabled and email in BUILTIN_ADMIN_EMAILS
     ):
         return "admin"
-    if email in BUILTIN_EDITOR_EMAILS or email in _csv("BRIDGEGUARD_EDITOR_EMAILS"):
+    if email in configured_editors or (
+        builtins_enabled and email in BUILTIN_EDITOR_EMAILS
+    ):
         return "editor"
     allowed_emails = _csv("BRIDGEGUARD_ALLOWED_EMAILS")
     allowed_domains = {domain.lstrip("@") for domain in _csv("BRIDGEGUARD_ALLOWED_DOMAINS")}
     domain = email.rsplit("@", 1)[1]
-    if email in allowed_emails or domain in allowed_domains:
+    if email in allowed_emails or (builtins_enabled and domain in allowed_domains):
         return "viewer"
     return None
 
@@ -199,8 +213,20 @@ def verify_cloudflare_request(request: Request) -> AuthUser | None:
             algorithms=["RS256"],
             audience=audience,
             issuer=f"https://{team_domain}",
-            options={"require": ["exp", "iat", "iss", "aud", "email"]},
+            options={
+                "require": [
+                    "exp", "iat", "nbf", "iss", "aud", "type",
+                    "email", "sub",
+                ]
+            },
         )
+        if claims.get("type") != "app":
+            return None
+        # Identity-based Access application tokens have a stable, non-empty
+        # subject. Service-token assertions deliberately do not impersonate a
+        # person and therefore cannot enter the interactive user surface.
+        if not str(claims.get("sub", "")).strip():
+            return None
         email = str(claims["email"]).strip().lower()
         role = role_for_email(email)
         return AuthUser(email, role) if role else None
@@ -222,6 +248,7 @@ def _required_role(method: str, path: str) -> str:
     Reads and AI queries are available to viewers. Data mutations require an
     editor. Raw database administration and runtime configuration require admin.
     """
+    path = path.rstrip("/") or "/"
     admin_prefixes: Iterable[str] = (
         "/api/table/",
         "/api/table-schema/",
@@ -236,23 +263,72 @@ def _required_role(method: str, path: str) -> str:
     }
     if path in admin_exact or any(path.startswith(prefix) for prefix in admin_prefixes):
         return "admin"
-    if method in {"PUT", "PATCH", "DELETE"}:
-        return "editor"
     path_parts = [part for part in path.split("/") if part]
     if (
         method == "POST"
-        and len(path_parts) == 5
-        and path_parts[:2] == ["api", "bridges"]
-        and path_parts[-1] == "point-cloud"
+        and len(path_parts) == 4
+        and path_parts[:2] == ["api", "imports"]
+        and path_parts[-1] == "rollback"
     ):
+        return "admin"
+    if (
+        method == "DELETE"
+        and len(path_parts) == 4
+        and path_parts[:3] == ["api", "ai", "sessions"]
+    ):
+        # Deleting one's own private conversation is a privacy/retention
+        # operation, not a shared-data mutation. The session service still
+        # enforces the authenticated owner and returns the same 404 for an
+        # absent or cross-owner ID.
+        return "viewer"
+    if method == "POST" and path == "/api/vision-reset":
+        # This now removes only the authenticated viewer's document-cache
+        # association; it no longer resets a process-global index.
+        return "viewer"
+    if method == "POST" and path == "/api/inspection-reports/extract":
+        # The request body controls save_to_history, which middleware cannot
+        # inspect safely.  Gate the whole endpoint because it can persist
+        # extracted report data.
         return "editor"
+    if method in {"PUT", "PATCH", "DELETE"}:
+        return "editor"
+    if method == "POST":
+        preview_only = {
+            "/api/point-cloud/preview",
+            "/api/point-cloud/preview-npz",
+        }
+        if path in preview_only:
+            return "viewer"
+        if path.startswith("/api/point-cloud/"):
+            return "editor"
+        if path_parts[:2] == ["api", "bridges"] and "point-cloud" in path_parts:
+            return "editor"
+    if (
+        method == "POST"
+        and len(path_parts) == 4
+        and path_parts[:2] == ["api", "revisions"]
+        and path_parts[-1] == "exports"
+    ):
+        # Export packages are immutable revision reads.  Keep this exact
+        # exception ahead of the revision mutation prefix below so viewers can
+        # download evidence without granting stage/publish permissions.
+        return "viewer"
     editor_posts = (
+        "/api/convert",
+        "/api/convert-v2",
+        "/api/reverse-convert",
         "/api/load-json",
         "/api/inspection-reports/apply",
         "/api/custom-tables",
         "/api/forecasts/build-training-db",
         "/api/forecasts/train",
+        "/api/forecast-jobs",
+        "/api/forecasts/v2/bridge",
+        "/api/analytics/kpis/program/import",
+        "/api/analytics/kpis/program/sources/",
         "/api/vision-reset",
+        "/api/revisions/",
+        "/api/imports",
     )
     if method == "POST" and (
         path.endswith("/reports") or any(path.startswith(prefix) for prefix in editor_posts)
@@ -357,7 +433,12 @@ def login(body: LoginBody, request: Request, response: Response):
 @router.get("/me")
 def me(request: Request):
     user: AuthUser = request.state.user
-    return {"email": user.email, "role": user.role}
+    workspace_id = os.getenv(
+        "BRIDGEGUARD_WORKSPACE_ID", "shared-research-workspace"
+    ).strip()
+    if not workspace_id:
+        raise HTTPException(status_code=503, detail="Workspace identity is not configured")
+    return {"email": user.email, "role": user.role, "workspace_id": workspace_id}
 
 
 @router.post("/logout")

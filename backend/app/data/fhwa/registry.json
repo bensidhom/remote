@@ -1,0 +1,480 @@
+{
+  "$schema": "./registry.schema.json",
+  "format_version": 1,
+  "registry_id": "fhwa_snbi_rule_bundles",
+  "observed_on": "2026-08-13",
+  "artifacts": [
+    {
+      "id": "ecfr_23_cfr_650_317",
+      "title": "23 CFR 650.317 - Incorporation by reference",
+      "role": "legal_reference",
+      "authority": "eCFR",
+      "legal_status": "regulatory_ibr",
+      "state": "remote_unverified",
+      "source_url": "https://www.ecfr.gov/current/title-23/chapter-I/subchapter-G/part-650/subpart-C/section-650.317",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": null,
+      "media_type": "text/html",
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "The live eCFR page is mutable metadata; it is not a pinned local rule artifact.",
+        "Section 650.317(b)(1) incorporates FHWA-HIF-22-017, March 2022."
+      ]
+    },
+    {
+      "id": "snbi_march_2022",
+      "title": "Specifications for the National Bridge Inventory, FHWA-HIF-22-017",
+      "role": "snbi_specification",
+      "authority": "FHWA",
+      "legal_status": "regulatory_ibr",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/snbi_march_2022_publication.pdf",
+      "published_on": null,
+      "published_label": "March 2022",
+      "updated_on": null,
+      "retrieved_on": "2026-08-13",
+      "reviewed_on": "2026-08-13",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "manual-pdf-layout-review-v1",
+      "compiler_version": null,
+      "supersedes": [],
+      "superseded_by": [],
+      "media_type": "application/pdf",
+      "local_path": "artifacts/SNBI.March.2022.FHWA-HIF-22-017.pdf",
+      "sha256": "2b55c855c0ed306dfd02b06a0533d48103c3aee7e1685aee5c5e35a671b96142",
+      "notes": [
+        "The exact FHWA PDF bytes were retrieved from source_url, locally vendored, SHA-256 verified, and visually reviewed against the expected March 2022 publication.",
+        "Byte/source identity and document layout were reviewed; this does not represent a compiled rule set, FHWA/NBTIS validation, or submission acceptance."
+      ]
+    },
+    {
+      "id": "implementation_memo_may_2022",
+      "title": "Implementation of the Specifications for the National Bridge Inventory",
+      "role": "implementation_memo",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "remote_unverified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/pubs/Memo-Implementation_Specifications_National_Bridge_Inventory_FINAL.pdf",
+      "published_on": "2022-05-25",
+      "published_label": null,
+      "updated_on": null,
+      "media_type": "application/pdf",
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "Describes the transition timeline and the distinct primary and detailed crosswalk spreadsheets."
+      ]
+    },
+    {
+      "id": "nbi_snbi_crosswalk_dec_2023",
+      "title": "Data Crosswalk for Over Records and Under Records",
+      "role": "transition_crosswalk",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/datacrosswalk.xlsx",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": "2023-12-05",
+      "retrieved_on": "2026-08-13",
+      "reviewed_on": "2026-08-13",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "manual-xlsx-layout-review-v1",
+      "compiler_version": null,
+      "supersedes": [],
+      "superseded_by": [],
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "local_path": "artifacts/NBI-SNBI.Data.Crosswalk.Dec.2023.xlsx",
+      "sha256": "9b81e0b7c9d808cbee65e8a5436f759e5d68b56665fb416ec51e69c40717d4fc",
+      "notes": [
+        "The exact XLSX bytes linked by the FHWA data-crosswalk page were locally vendored, SHA-256 verified, and visually reviewed.",
+        "Byte/source identity and workbook layout are verified; transition mappings were not changed or certified by this artifact-acceptance step."
+      ]
+    },
+    {
+      "id": "nbi_snbi_code_mapping",
+      "title": "Detailed Code Mapping for Individual Data Items",
+      "role": "detailed_code_mapping",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/codemapping.xlsx",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": null,
+      "retrieved_on": "2026-08-13",
+      "reviewed_on": "2026-08-13",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "manual-xlsx-layout-review-v1",
+      "compiler_version": null,
+      "supersedes": [],
+      "superseded_by": [],
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "local_path": "artifacts/NBI-SNBI.Detailed.Code.Mapping.xlsx",
+      "sha256": "63f120e71363138a33d8cf1344199d00e363633c22ccc959d9ab49f27b76a475",
+      "notes": [
+        "The exact codemapping.xlsx bytes linked by FHWA were locally vendored, SHA-256 verified, and visually reviewed.",
+        "Byte/source identity and workbook layout are verified; code mappings were not changed or certified by this artifact-acceptance step."
+      ]
+    },
+    {
+      "id": "snbi_errata1_march_2024",
+      "title": "Errata Number 1 - Specifications for the National Bridge Inventory",
+      "role": "informational_errata",
+      "authority": "FHWA",
+      "legal_status": "informational_pending_rulemaking",
+      "state": "remote_unverified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/errata1_to_snbi_march_2022_publication.pdf",
+      "published_on": null,
+      "published_label": "March 2024",
+      "updated_on": null,
+      "media_type": "application/pdf",
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "The redline is informational pending future rulemaking; operational submission artifacts may nevertheless accommodate it."
+      ]
+    },
+    {
+      "id": "snbi_schema_v04_july_2024",
+      "title": "NBI Submittal Schema v04",
+      "role": "submittal_schema",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/SNBI.Schema.v04.json",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": "2024-07-18",
+      "retrieved_on": "2026-08-13",
+      "reviewed_on": "2026-08-13",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "pinned-schema-loader-v1",
+      "compiler_version": null,
+      "supersedes": [],
+      "superseded_by": [],
+      "media_type": "application/json",
+      "local_path": "artifacts/SNBI.Schema.v04.json",
+      "sha256": "2555813afaab4701c11e3d41b49cb1f894dfcae772afbd1638d9d25348e383a0",
+      "notes": [
+        "The FHWA page links the JSON schema used for 2026 and later submissions and says a new schema will precede 2028.",
+        "The exact JSON bytes linked by the FHWA schema page are vendored and SHA-256 verified.",
+        "The artifact declares https://json-schema.org/draft/2024-07/schema, which BridgeGuard does not silently reinterpret as a supported dialect; execution remains fail-closed until FHWA or an authorized standards profile resolves the dialect."
+      ]
+    },
+    {
+      "id": "submission_updates_memo_sep_2024",
+      "title": "SNBI Updates for Data Submittal Schema, Data Validation Logic, and NBIS Bridge Length",
+      "role": "submission_policy_memo",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "remote_unverified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/pubs/Memo-SNBI_Updates_Schema_ValidationLogic_NBISBridgeLength.pdf",
+      "published_on": "2024-09-17",
+      "published_label": null,
+      "updated_on": null,
+      "media_type": "application/pdf",
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "Operational submission guidance is separate from the March 2022 legal incorporation baseline.",
+        "Its exact Item 49 value of 6.1 m to 20.1 ft treatment is a versioned 2026/2027 overlay; Item 112 remains an eligibility input and is never a BG01 value source."
+      ]
+    },
+    {
+      "id": "validation_logic_v1_1_dec_2025",
+      "title": "SNBI Data Submittal Validation Logic version 1.1",
+      "role": "validation_logic",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/SNBI_Data_Validation_Rules.xlsx",
+      "published_on": null,
+      "published_label": "Version 1.1",
+      "updated_on": "2025-12-30",
+      "retrieved_on": "2026-08-13",
+      "reviewed_on": "2026-08-13",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "official-rule-coverage-importer-v1",
+      "compiler_version": null,
+      "supersedes": [],
+      "superseded_by": [],
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "local_path": "artifacts/SNBI.Data.Validation.Rules.v1.1.xlsx",
+      "sha256": "765776e38facb1e42a528230342317b261ba47e64676ecde418f57ee7d0e2232",
+      "notes": [
+        "The source URL identifies the exact v1.1 XLSX bytes linked by the FHWA validation page, which describes distinct 2026/2027 and 2028 treatment.",
+        "The exact workbook bytes were locally vendored, SHA-256 verified, and its reviewed A:H rule-table layout was deterministically inventoried.",
+        "All 382 inventoried rule rows remain explicitly pending/unimplemented; no workbook prose was auto-compiled into executable validation and no FHWA/NBTIS validation claim is made."
+      ]
+    },
+    {
+      "id": "snbi_errata2_june_2026",
+      "title": "Errata Number 2 - Specifications for the National Bridge Inventory",
+      "role": "informational_errata",
+      "authority": "FHWA",
+      "legal_status": "informational_pending_rulemaking",
+      "state": "remote_unverified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/errata2_to_snbi_march_2022_publication.pdf",
+      "published_on": null,
+      "published_label": "June 2026",
+      "updated_on": null,
+      "media_type": "application/pdf",
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "FHWA listed this redline on the SNBI hub updated August 10, 2026.",
+        "The redline is informational pending future rulemaking and must not silently replace either the legal IBR baseline or an operational submission profile."
+      ]
+    },
+    {
+      "id": "legacy_nbi_record_format",
+      "title": "Legacy NBI record format",
+      "role": "legacy_record_format",
+      "authority": "FHWA",
+      "legal_status": "legacy_reference",
+      "state": "remote_unverified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/nbi/format.cfm",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": null,
+      "media_type": "text/html",
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "Reference metadata for historical research imports; it does not create a submission claim."
+      ]
+    },
+    {
+      "id": "legacy_element_xsd_v1_2013",
+      "title": "FHWA Element Data Schema Version 1.0",
+      "role": "legacy_element_schema",
+      "authority": "FHWA",
+      "legal_status": "legacy_reference",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/nbi/140725_a1.xsd",
+      "published_on": "2013-10-03",
+      "published_label": "Version 1.0 - 2013-10-03",
+      "updated_on": null,
+      "retrieved_on": "2026-08-13",
+      "reviewed_on": "2026-08-13",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "xmlschema-4.3.2",
+      "compiler_version": null,
+      "supersedes": [],
+      "superseded_by": [],
+      "media_type": "application/xml",
+      "local_path": "artifacts/FHWAElement.Schema.v1.0.2013-10-03.xsd",
+      "sha256": "193cda71b64933e2d5316e7d193d6f780c9479a875ea3ebcb21dcaee36f0a95f",
+      "notes": [
+        "The exact XSD bytes linked by the FHWA Recording and Coding Guide page were locally vendored and SHA-256 verified.",
+        "This is a legacy element-input schema; successful validation does not imply SNBI submission validation or FHWA acceptance."
+      ]
+    },
+    {
+      "id": "submission_2028_schema",
+      "title": "Future 2028 NBI submittal schema",
+      "role": "submittal_schema",
+      "authority": "FHWA",
+      "legal_status": "pending_publication",
+      "state": "unavailable",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/schema.cfm",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": null,
+      "media_type": null,
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "No 2028-specific schema was pinned as of the registry observation date."
+      ]
+    },
+    {
+      "id": "submission_2028_validation_logic",
+      "title": "Future 2028 NBI validation logic",
+      "role": "validation_logic",
+      "authority": "FHWA",
+      "legal_status": "pending_publication",
+      "state": "unavailable",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/data_validation_logic.cfm",
+      "published_on": null,
+      "published_label": null,
+      "updated_on": null,
+      "media_type": null,
+      "local_path": null,
+      "sha256": null,
+      "notes": [
+        "No complete, pinned 2028-specific validation artifact was registered as of the observation date."
+      ]
+    }
+  ],
+  "bundles": [
+    {
+      "id": "regulatory_ibr_2022",
+      "title": "March 2022 SNBI incorporated-by-reference baseline",
+      "profile_kind": "regulatory_baseline",
+      "legal_status": "regulatory_ibr",
+      "compliance_use": "regulatory_baseline_comparison",
+      "implementation_status": "registry_only",
+      "enabled": true,
+      "effective_submission_years": [],
+      "artifact_ids": [
+        "ecfr_23_cfr_650_317",
+        "snbi_march_2022"
+      ],
+      "inherits": [],
+      "disabled_reason": null,
+      "notes": [
+        "This is a historical legal-baseline comparison profile, not a claim about the current operational acceptance profile."
+      ]
+    },
+    {
+      "id": "submission_2026_v04_v1_1",
+      "title": "2026 SNBI transition submission-support profile",
+      "profile_kind": "submission",
+      "legal_status": "operational_submission",
+      "compliance_use": "submission_support_draft_external_verification_required",
+      "implementation_status": "registry_only",
+      "enabled": true,
+      "effective_submission_years": [
+        2026
+      ],
+      "artifact_ids": [
+        "implementation_memo_may_2022",
+        "nbi_snbi_crosswalk_dec_2023",
+        "nbi_snbi_code_mapping",
+        "snbi_errata1_march_2024",
+        "snbi_schema_v04_july_2024",
+        "submission_updates_memo_sep_2024",
+        "validation_logic_v1_1_dec_2025"
+      ],
+      "inherits": [
+        "regulatory_ibr_2022"
+      ],
+      "disabled_reason": null,
+      "notes": [
+        "Metadata only until every governing artifact is locally vendored, hashed, reviewed, and compiled into tested rules.",
+        "The validation workbook source bytes and row inventory are verified, but all 382 rules remain pending implementation and the registered schema declares an unsupported draft/2024-07 dialect; selection therefore remains fail-closed.",
+        "Retain the base crosswalk BG01 rule (Item 49 greater than 9.1 m); model the memo's exact 6.1 m to 20.1 ft treatment as a separate 2026/2027 operational overlay in a later PR.",
+        "Item 112 is an eligibility input only and must never supply the BG01 value."
+      ]
+    },
+    {
+      "id": "submission_2027_v04_v1_1",
+      "title": "2027 SNBI transition submission-support profile",
+      "profile_kind": "submission",
+      "legal_status": "operational_submission",
+      "compliance_use": "submission_support_draft_external_verification_required",
+      "implementation_status": "registry_only",
+      "enabled": true,
+      "effective_submission_years": [
+        2027
+      ],
+      "artifact_ids": [
+        "implementation_memo_may_2022",
+        "nbi_snbi_crosswalk_dec_2023",
+        "nbi_snbi_code_mapping",
+        "snbi_errata1_march_2024",
+        "snbi_schema_v04_july_2024",
+        "submission_updates_memo_sep_2024",
+        "validation_logic_v1_1_dec_2025"
+      ],
+      "inherits": [
+        "regulatory_ibr_2022"
+      ],
+      "disabled_reason": null,
+      "notes": [
+        "Metadata only until every governing artifact is locally vendored, hashed, reviewed, and compiled into tested rules.",
+        "The validation workbook source bytes and row inventory are verified, but all 382 rules remain pending implementation and the registered schema declares an unsupported draft/2024-07 dialect; selection therefore remains fail-closed.",
+        "Retain the base crosswalk BG01 rule (Item 49 greater than 9.1 m); model the memo's exact 6.1 m to 20.1 ft treatment as a separate 2026/2027 operational overlay in a later PR.",
+        "Item 112 is an eligibility input only and must never supply the BG01 value."
+      ]
+    },
+    {
+      "id": "errata2_2026_preview",
+      "title": "June 2026 SNBI Errata Number 2 preview",
+      "profile_kind": "informational_preview",
+      "legal_status": "informational_pending_rulemaking",
+      "compliance_use": "informational_only",
+      "implementation_status": "registry_only",
+      "enabled": true,
+      "effective_submission_years": [],
+      "artifact_ids": [
+        "snbi_errata2_june_2026"
+      ],
+      "inherits": [
+        "regulatory_ibr_2022"
+      ],
+      "disabled_reason": null,
+      "notes": [
+        "Explicit opt-in comparison only; this preview cannot change production mapping, validation, or submission behavior."
+      ]
+    },
+    {
+      "id": "research_historical_import",
+      "title": "BridgeGuard historical NBI research import",
+      "profile_kind": "research_import",
+      "legal_status": "internal_non_submission",
+      "compliance_use": "research_only_not_for_submission",
+      "implementation_status": "registry_only",
+      "enabled": true,
+      "effective_submission_years": [],
+      "artifact_ids": [
+        "legacy_nbi_record_format",
+        "legacy_element_xsd_v1_2013",
+        "nbi_snbi_crosswalk_dec_2023",
+        "nbi_snbi_code_mapping",
+        "snbi_schema_v04_july_2024"
+      ],
+      "inherits": [],
+      "disabled_reason": null,
+      "notes": [
+        "Preserves parseable historical records and records federal-transition eligibility separately; it is never a submission profile."
+      ]
+    },
+    {
+      "id": "native_snbi",
+      "title": "Agency-authored native SNBI ingestion",
+      "profile_kind": "native_ingestion",
+      "legal_status": "internal_non_submission",
+      "compliance_use": "native_ingestion_validation_only",
+      "implementation_status": "registry_only",
+      "enabled": true,
+      "effective_submission_years": [],
+      "artifact_ids": [
+        "snbi_march_2022",
+        "snbi_errata1_march_2024",
+        "snbi_schema_v04_july_2024",
+        "validation_logic_v1_1_dec_2025"
+      ],
+      "inherits": [],
+      "disabled_reason": null,
+      "notes": [
+        "No legacy transition defaults or eligibility calculation; the caller must choose the applicable validation context."
+      ]
+    },
+    {
+      "id": "submission_2028",
+      "title": "Future 2028 permanent-code submission profile",
+      "profile_kind": "submission",
+      "legal_status": "disabled_pending_publication",
+      "compliance_use": "disabled",
+      "implementation_status": "registry_only",
+      "enabled": false,
+      "effective_submission_years": [
+        2028
+      ],
+      "artifact_ids": [
+        "submission_2028_schema",
+        "submission_2028_validation_logic"
+      ],
+      "inherits": [],
+      "disabled_reason": "FHWA 2028 governing artifacts have not been locally pinned, reviewed, and tested.",
+      "notes": [
+        "Do not infer 2028 rules by removing temporary codes from the 2026/2027 profile."
+      ]
+    }
+  ]
+}

@@ -1,19 +1,35 @@
 // frontend/src/pages/Bridgette.tsx
 // Bridgette — natural-language Q&A over the New Jersey bridge database (text-to-SQL).
-import React, { useRef, useState } from 'react';
-import axios from 'axios';
-import { Bot, Send, Loader2, Database, User, Square } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Bot, Send, Loader2, User, Square } from 'lucide-react';
 import { SectionHeader, Button } from '../components/ui';
+import {
+  isMapRequest,
+  requestShowBridgeOnMap,
+  type ShowBridgeMatch,
+} from '../lib/mapBridgeEvents';
+import {
+  bridgetteStreamPath,
+  cancelBridgetteRequest,
+  newBridgetteRequestId,
+  readBridgetteStream,
+} from '../lib/bridgetteStream';
+import { useDataGenerationEpoch } from '../lib/dataGeneration';
+import { BridgetteQueryDetails } from '../components/BridgetteEvidence';
 
 interface Turn {
   question: string;
   answer?: string;
   sql?: string;
-  rows?: Record<string, unknown>[];
+  rows?: unknown[][];
   columns?: string[];
   count?: number;
+  evidence?: Record<string, unknown>;
+  decision?: 'clarification' | 'abstention';
   error?: string;
   loading?: boolean;
+  mapMatches?: ShowBridgeMatch[];
+  stale?: boolean;
 }
 
 const SUGGESTIONS = [
@@ -29,6 +45,24 @@ const Bridgette: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const dataGenerationEpoch = useDataGenerationEpoch();
+
+  useEffect(() => {
+    if (dataGenerationEpoch === 0) return;
+    const requestId = activeRequestIdRef.current;
+    if (requestId) void cancelBridgetteRequest(requestId).catch(() => { /* best-effort */ });
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeRequestIdRef.current = null;
+    setBusy(false);
+    setTurns((current) => current.map((turn) => ({
+      ...turn,
+      stale: true,
+      loading: false,
+      answer: turn.loading && !turn.answer ? 'Stopped because the published bridge inventory changed.' : turn.answer,
+    })));
+  }, [dataGenerationEpoch]);
 
   const ask = async (qRaw: string) => {
     const question = qRaw.trim();
@@ -38,57 +72,96 @@ const Bridgette: React.FC = () => {
     const idx = turns.length;
     setTurns((t) => [...t, { question, loading: true }]);
     const controller = new AbortController();
+    const requestId = newBridgetteRequestId();
     abortRef.current = controller;
-    const update = (patch: Partial<Turn>) =>
+    activeRequestIdRef.current = requestId;
+    const update = (patch: Partial<Turn>) => {
+      if (activeRequestIdRef.current !== requestId) return;
       setTurns((t) => t.map((turn, i) => (i === idx ? { ...turn, ...patch } : turn)));
+    };
     let answer = '';
     try {
-      // Stream the answer token-by-token (NDJSON events: meta → token… → done).
+      if (isMapRequest(question)) {
+        const result = await requestShowBridgeOnMap(question, { signal: controller.signal });
+        if (result.status === 'shown' || result.status === 'ambiguous') {
+          update({
+            loading: false,
+            answer: result.message,
+            mapMatches: result.matches,
+            evidence: result.resolution as unknown as Record<string, unknown> | undefined,
+          });
+        } else if (result.status === 'not_found' || result.status === 'stopped') {
+          update({ loading: false, answer: result.message });
+        } else {
+          update({ loading: false, error: result.message });
+        }
+        return;
+      }
       const fd = new FormData();
       fd.append('question', question);
-      const res = await fetch('/api/bridgette/stream', { method: 'POST', body: fd, signal: controller.signal });
-      if (!res.ok || !res.body) throw new Error(`Request failed (${res.status})`);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let evt: any;
-          try { evt = JSON.parse(line); } catch { continue; }
-          if (evt.type === 'meta') {
-            update({ loading: false, sql: evt.sql, rows: evt.rows, columns: evt.columns, count: evt.count });
-          } else if (evt.type === 'token') {
-            answer += evt.text;
+      const response = await fetch(bridgetteStreamPath('full'), {
+        method: 'POST',
+        body: fd,
+        signal: controller.signal,
+        headers: { 'X-Request-ID': requestId },
+      });
+      await readBridgetteStream(response, requestId, (event) => {
+        if (activeRequestIdRef.current !== requestId) return;
+        switch (event.type) {
+          case 'accepted':
+            update({ loading: true });
+            break;
+          case 'evidence':
+            update({
+              loading: false,
+              sql: typeof event.sql === 'string' ? event.sql : undefined,
+              rows: Array.isArray(event.rows) ? event.rows : undefined,
+              columns: Array.isArray(event.columns) ? event.columns : undefined,
+              count: typeof event.count === 'number' ? event.count : undefined,
+              evidence: event,
+            });
+            break;
+          case 'clarification':
+          case 'abstention':
+            answer = typeof event.message === 'string' ? event.message : 'More information is needed.';
+            update({ loading: false, answer, decision: event.type, evidence: event });
+            break;
+          case 'token':
+            if (typeof event.content === 'string') answer += event.content;
             update({ loading: false, answer });
-          } else if (evt.type === 'stopped') {
+            break;
+          case 'done':
+            update({
+              loading: false,
+              answer: answer || (typeof event.content === 'string' ? event.content : undefined),
+            });
+            break;
+          case 'stopped':
             update({ loading: false, answer: answer || 'Stopped.' });
-          } else if (evt.type === 'error') {
-            update({ loading: false, error: evt.detail || 'Request failed' });
-          }
+            break;
+          case 'error':
+            update({ loading: false, error: event.detail || 'Request failed' });
+            break;
         }
-      }
+      });
     } catch (err: any) {
       const stopped = err?.name === 'AbortError' || controller.signal.aborted;
       if (stopped) update({ loading: false, answer: answer || 'Stopped.' });
       else update({ loading: false, error: err?.message || 'Request failed' });
     } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      setBusy(false);
+      if (activeRequestIdRef.current === requestId) {
+        activeRequestIdRef.current = null;
+        abortRef.current = null;
+        setBusy(false);
+      }
       setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
     }
   };
 
-  // Stop both the client request AND the server-side LLM generation.
   const stop = () => {
+    const requestId = activeRequestIdRef.current;
+    if (requestId) cancelBridgetteRequest(requestId).catch(() => { /* best-effort */ });
     abortRef.current?.abort();
-    axios.post('/api/ask-cancel').catch(() => { /* best-effort */ });
   };
 
   return (
@@ -100,6 +173,11 @@ const Bridgette: React.FC = () => {
       />
 
       <div className="flex-1 overflow-auto ui-scroll space-y-5 pr-1">
+        {turns.some((turn) => turn.stale) && (
+          <div role="status" className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            The published inventory changed. Earlier answers are marked outdated; ask again for current evidence.
+          </div>
+        )}
         {turns.length === 0 && (
           <div className="space-y-3">
             <p className="text-sm text-slate-500 dark:text-slate-400">Try one of these:</p>
@@ -124,33 +202,42 @@ const Bridgette: React.FC = () => {
             <div className="flex items-start gap-2">
               <span className="grid place-items-center w-8 h-8 rounded-full bg-brand-500/15 text-brand-500 shrink-0"><Bot className="w-4 h-4" /></span>
               <div className="max-w-[85%] min-w-0 space-y-2">
+                {t.stale && <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-600">Outdated inventory answer</div>}
                 {t.loading && <div className="flex items-center gap-2 text-slate-500 text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Querying the database…</div>}
                 {t.error && <div className="rounded-2xl bg-red-500/10 text-red-500 px-4 py-2.5 text-sm">{t.error}</div>}
                 {t.answer && (
                   <div className="rounded-2xl rounded-tl-sm glass border border-slate-200/70 dark:border-slate-700/70 px-4 py-2.5 text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap">{t.answer}</div>
                 )}
-                {t.sql && (
-                  <details className="text-xs">
-                    <summary className="cursor-pointer text-slate-400 hover:text-brand-500 inline-flex items-center gap-1"><Database className="w-3.5 h-3.5" /> SQL{typeof t.count === 'number' ? ` · ${t.count} row(s)` : ''}</summary>
-                    <pre className="mt-1 p-3 rounded-xl bg-slate-900 text-slate-200 overflow-auto"><code>{t.sql}</code></pre>
-                    {t.rows && t.rows.length > 0 && t.columns && (
-                      <div className="mt-2 overflow-auto max-h-64 rounded-xl border border-slate-200/70 dark:border-slate-700/70">
-                        <table className="text-xs w-full">
-                          <thead className="bg-slate-100 dark:bg-slate-800 sticky top-0">
-                            <tr>{t.columns.map((c) => <th key={c} className="px-2.5 py-1.5 text-left font-semibold text-slate-600 dark:text-slate-300">{c}</th>)}</tr>
-                          </thead>
-                          <tbody>
-                            {t.rows.slice(0, 100).map((r, ri) => (
-                              <tr key={ri} className="border-t border-slate-200/60 dark:border-slate-700/60">
-                                {t.columns!.map((c) => <td key={c} className="px-2.5 py-1.5 text-slate-700 dark:text-slate-300">{String(r[c] ?? '')}</td>)}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </details>
+                {t.mapMatches && t.mapMatches.length > 0 && (
+                  <div className="grid gap-2" role="list" aria-label="Matching bridges">
+                    {t.mapMatches.map((match) => (
+                      <button
+                        key={match.snapshot_id}
+                        role="listitem"
+                        onClick={() => ask(`Show bridge ${match.bridge_number} on the map`)}
+                        className="rounded-xl border border-brand-300 px-3 py-2 text-left text-sm text-brand-700 hover:bg-brand-50 focus:outline-none focus:ring-2 focus:ring-brand-400"
+                        aria-label={`Show bridge ${match.bridge_number}, ${match.label}, inventory year ${match.snapshot_year}`}
+                      >
+                        <span className="block font-semibold">{match.bridge_number} · {match.label}</span>
+                        <span className="block text-xs text-slate-500">{match.county_name ? `${match.county_name} County · ` : ''}Inventory year {match.snapshot_year}</span>
+                      </button>
+                    ))}
+                  </div>
                 )}
+                {t.decision && Array.isArray(t.evidence?.options) && (
+                  <div className="flex flex-wrap gap-2">
+                    {(t.evidence.options as Array<{ id?: string; label?: string }>).map((option) => (
+                      <button
+                        key={String(option.id ?? option.label)}
+                        onClick={() => ask(`${t.question} — ${String(option.label ?? option.id)}`)}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-brand-300 text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-500/10"
+                      >
+                        {String(option.label ?? option.id)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <BridgetteQueryDetails evidence={t.evidence} sql={t.sql} rows={t.rows} columns={t.columns} stale={t.stale} />
               </div>
             </div>
           </div>

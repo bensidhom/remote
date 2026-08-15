@@ -7,6 +7,12 @@ dist/
 *.pyc
 .venv/
 venv/
+backend/.test-artifacts/
+backend/.fhwa-candidates/
+backend/tests/tmp*/
+backend/tests/pytest-*/
+backend/pytest-cache-files-*/
+pytest-cache-files-*/
 
 # ---- Environment / secrets ----
 .env
@@ -29,3 +35,11 @@ backend/static/
 
 # ---- OS ----
 .DS_Store
+
+# ---- Confidential university IP filing drafts ----
+# Keep invention disclosures local unless Rowan OTC or counsel approves sharing.
+/documentation/rowan-invention-disclosure-bridgeguard-confidential-draft.md
+/documentation/rowan-invention-disclosure-bridgeguard-confidential-draft.docx
+/documentation/rowan-invention-disclosure-bridgeguard-confidential-draft.pdf
+/documentation/rowan-official-disclosure-form-working-copy.docx
+/documentation/confidential-evidence/

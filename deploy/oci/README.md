@@ -1,5 +1,12 @@
 # BridgeGuard OCI E4 deployment
 
+> **Current deployment classification: research only.** The checked-in Compose
+> stack forces `BRIDGEGUARD_DEPLOYMENT_MODE=research_shared` and
+> `BRIDGEGUARD_REQUIRE_COMMERCIAL_READY=false`. It must not be represented as a
+> paid customer, official-validation, submission-ready, survey, or engineering
+> production service. Backup, authentication, data-integrity, and readiness
+> controls still apply to protect the research system.
+
 This deployment targets an x86_64 OCI `VM.Standard.E4.Flex` instance. The
 recommended configuration for the current budget is **1 OCPU (2 vCPUs), 12 GB
 RAM, and a 50 GB or larger boot volume**. At the OCI rates checked on
@@ -99,6 +106,110 @@ TEI_EMBED_BATCH=1
 BRIDGEGUARD_REINDEX_STALE_REPORTS=0
 ```
 
+The following contract is retained only as a reference for a future, separately
+authorized customer stack. The current research Compose file overrides its mode
+and commercial-ready flag, so adding these values does not convert this stack
+into a commercial deployment:
+
+```env
+BRIDGEGUARD_DEPLOYMENT_MODE=dedicated_customer
+BRIDGEGUARD_CUSTOMER_SLUG=customer
+BRIDGEGUARD_WORKSPACE_ID=customer-production
+BRIDGEGUARD_WORKER_COUNT=1
+BRIDGEGUARD_REQUIRE_COMMERCIAL_READY=true
+BRIDGEGUARD_PDF_ENGINE_DISPOSITION=commercial_license
+BRIDGEGUARD_PDF_ENGINE_RECEIPT_ID=replace-pdf-review-receipt
+BRIDGEGUARD_AI_PROVIDER_ID=cerebras
+BRIDGEGUARD_AI_MODEL_ID=gemma-4-31b
+BRIDGEGUARD_AI_PROVIDER_ENTITLEMENT_RECEIPT_ID=replace-ai-entitlement-receipt
+BRIDGEGUARD_AI_DPA_RECEIPT_ID=replace-ai-dpa-receipt
+BRIDGEGUARD_MAP_SERVICE_MODE=arcgis_sdk_keyless_osm
+BRIDGEGUARD_MAP_SERVICE_RECEIPT_ID=replace-map-policy-receipt
+BRIDGEGUARD_CLOUDFLARE_SERVICE_RECEIPT_ID=replace-cloudflare-service-receipt
+BRIDGEGUARD_OSS_NOTICES_RECEIPT_ID=replace-oss-notices-receipt
+BRIDGEGUARD_SBOM_RECEIPT_ID=replace-release-sbom-receipt
+BRIDGEGUARD_OWNER_EMAIL=owner@customer.example
+BRIDGEGUARD_ADMIN_EMAILS=
+BRIDGEGUARD_EDITOR_EMAILS=editor@customer.example
+BRIDGEGUARD_ALLOWED_EMAILS=viewer@customer.example
+BRIDGEGUARD_ALLOWED_DOMAINS=
+```
+
+Replace every example receipt with the opaque identifier of an actual record
+in the organization's controlled legal/procurement/privacy system. For the PDF
+engine, select only the disposition that was reviewed:
+`permissive_replacement`, `commercial_license`, or
+`approved_agpl_compliance`. The AI provider/model declaration must describe
+the active runtime and `BRIDGEGUARD_AI_MODEL_ID` must exactly equal
+`CEREBRAS_MODEL`. Keep these non-secret declarations in the authoritative
+customer environment file even when the API key is stored separately in
+`ai.env`.
+
+These settings are a fail-closed recordkeeping interlock, not a legal opinion
+or proof that an entitlement, DPA, or license is sufficient. The preflight and
+application validate only the presence/shape of opaque receipt references and
+the provider/model binding. Never put contract text, file paths, credentials,
+or API keys in a receipt ID. `/ready` exposes only booleans and the reviewed PDF
+disposition; it never returns receipt identifiers.
+
+The map record must match the frontend build. `arcgis_premium` requires the
+reviewed ArcGIS SDK/API-key/hosted-service/basemap entitlement, referrer rules,
+metering, and attribution. `arcgis_sdk_keyless_osm` still requires a reviewed
+ArcGIS SDK/CDN and provider-backed OSM tile acceptable-use, attribution,
+volume, and availability policy; “keyless” is not permission for unrestricted
+production traffic. The Cloudflare receipt must cover the applicable external
+customer Access/Zero Trust seat or service entitlement and Tunnel use. The OSS
+notices and SBOM receipts refer to the reviewed third-party notices and exact
+release inventory stored outside this environment file; they do not replace
+those artifacts.
+
+The Compose file deliberately does not restate those identity/gate/role keys
+under `services.app.environment`: that block would override the service
+`env_file`, including with host-shell interpolation defaults. It fixes only
+the container storage contract (`/data`, `/data/rag_storage`, `/data/temp`).
+The optional AI env file is loaded before the authoritative customer env file.
+The host-side `/data` mount is Compose interpolation and must be supplied
+separately (service `env_file` values do not drive interpolation). For example,
+create `/etc/bridgeguard/customer-compose.env` containing:
+
+```env
+BRIDGEGUARD_ENV_FILE=/etc/bridgeguard/customer.env
+BRIDGEGUARD_AI_ENV_FILE=/etc/bridgeguard/ai.env
+BRIDGEGUARD_DATA_DIR_HOST=/srv/bridgeguard-customers/customer/data
+BRIDGEGUARD_MODELS_DIR=/srv/bridgeguard/models
+CLOUDFLARE_ENV_FILE=/etc/bridgeguard/customer-cloudflare.env
+```
+
+Review the effective values and `/data` mount before starting a dedicated
+instance:
+
+```bash
+docker compose --env-file /etc/bridgeguard/customer-compose.env \
+  -f deploy/oci/compose.yaml config --format json
+```
+
+For a newly provisioned empty customer root, build the application and create
+its immutable database/customer binding exactly once before starting traffic:
+
+```bash
+docker compose --env-file /etc/bridgeguard/customer-compose.env \
+  -f deploy/oci/compose.yaml build app
+docker compose --env-file /etc/bridgeguard/customer-compose.env \
+  -f deploy/oci/compose.yaml run --rm --no-deps app \
+  python -m scripts.bootstrap_dedicated_customer --data-root /data
+```
+
+This command rejects populated, unbound, research, or cross-customer data. A
+successful repeat is a read-only identity check. Normal application startup
+and preflight require the marker UUID, customer/workspace, exact marker digest,
+database binding, workspace catalog, and every workspace-bearing row to agree;
+they never infer or backfill a dedicated customer's identity.
+
+Built-in research-pilot roles are disabled in dedicated/commercial mode. A
+pilot email receives no access unless it is present in this customer's
+explicit owner/admin/editor/viewer lists. Domain-wide viewer grants are not
+accepted for a dedicated customer; enumerate viewers explicitly.
+
 Keep the existing session secret when restoring the old server. Put only the
 Cloudflare Tunnel token in `/etc/bridgeguard/cloudflare.env`:
 
@@ -166,9 +277,15 @@ The manual deployment workflow:
 1. Runs frontend, backend, Compose, script, and container checks.
 2. Deploys exactly the Git commit that passed those checks.
 3. Runs the hardware and persistent-data preflight.
-4. Creates and checksum-verifies a backup when an old app container exists.
-5. Pulls pinned dependencies, rebuilds, stops the tunnel until `/ready` passes,
-   and verifies the app plus the exact Nomic model/runtime/dimension. The
+4. Pulls pinned dependencies and builds the exact candidate while the old app
+   remains live, then stops the tunnel and old app writer.
+5. Uses that candidate image in one-shot containers to create/verify the
+   current-format backup and restore drill. It rejects stopped/missing old apps,
+   legacy-format reuse, identity/schema mismatches, and missing/corrupt
+   attachments; on failure it restarts the captured old containers.
+6. Starts the candidate only after the drill passes, keeps the tunnel stopped
+   until `/ready` passes, and verifies the app plus the exact Nomic
+   model/runtime/dimension. The
    container's `/health` probe is liveness-only; production acceptance always
    uses `/ready`.
 
@@ -218,13 +335,17 @@ cd /opt/bridgeguard/deploy/oci
 sudo -n sh backup.sh
 ```
 
-Each backup contains online SQLite copies, persistent files, and a
-`manifest.json` with SHA-256 checksums and the embedding profile. Verify one
-with:
+The script requires a running old app, drains the tunnel, stops the app writer,
+and executes backup/restore validation with the already-built candidate image.
+Each current backup contains SQLite copies, persistent files, and a
+`manifest.json` binding payload checksums, the exact deployment marker/database
+receipt, database schemas, attachment catalog, and embedding profile. Verify a
+release-eligible backup with the same explicit Compose environment file:
 
 ```bash
-docker compose exec -T app python -m app.backup \
-  --verify /data/backups/BACKUP_TIMESTAMP
+docker compose --env-file "$BRIDGEGUARD_COMPOSE_ENV_FILE" \
+  -f deploy/oci/compose.yaml run --rm --no-deps -T app \
+  python -m app.backup --verify-current /data/backups/BACKUP_TIMESTAMP
 ```
 
 Copy backups off the VM and retain OCI boot-volume backups. A backup stored only

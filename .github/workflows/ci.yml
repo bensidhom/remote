@@ -65,10 +65,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -r backend/requirements.txt pytest
-      - run: python -m pytest backend/tests
+      - run: python -m pip install -r backend/requirements-dev.txt
+      - run: python -m pytest
+      - name: Bridgette executable runtime benchmark
+        env:
+          PYTHONPATH: backend
+        run: python backend/scripts/run_bridgette_runtime_benchmark.py
 
   container:
     name: Production container build
@@ -77,3 +83,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build --tag bridgeguard:${{ github.sha }} .
+      - name: Pinned SQLite concurrency and restore gate
+        run: >-
+          docker run --rm --entrypoint python
+          bridgeguard:${{ github.sha }}
+          -m scripts.run_sqlite_scale_gate

@@ -1,0 +1,109 @@
+{
+  "schema_version": "bridgeguard-point-cloud-evaluation-corpus-v1",
+  "corpus_id": "bridgeguard-point-cloud-safety-contract-v1",
+  "claim_level": "synthetic_safety_contract_only",
+  "description": "Synthetic contract cases for mandatory abstention and protected-region retention. This is not survey ground truth and cannot establish measurement accuracy.",
+  "cases": [
+    {
+      "case_id": "abstain-unverified-units",
+      "physical_structure_id": "synthetic-abstain-units",
+      "split": "safety",
+      "bridge_type": "multi_girder",
+      "material": "steel",
+      "under_feature": "highway",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": true,
+      "protected_restriction_ids": [],
+      "reason": "metric output is forbidden without verified units"
+    },
+    {
+      "case_id": "abstain-unverified-gravity",
+      "physical_structure_id": "synthetic-abstain-gravity",
+      "split": "safety",
+      "bridge_type": "slab",
+      "material": "concrete",
+      "under_feature": "highway",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": true,
+      "protected_restriction_ids": [],
+      "reason": "metric output is forbidden without reviewed gravity"
+    },
+    {
+      "case_id": "abstain-missing-soffit",
+      "physical_structure_id": "synthetic-abstain-soffit",
+      "split": "safety",
+      "bridge_type": "box_girder",
+      "material": "prestressed_concrete",
+      "under_feature": "highway",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": true,
+      "protected_restriction_ids": [],
+      "reason": "clearance is not measurable without overlapping lower and upper surfaces"
+    },
+    {
+      "case_id": "abstain-ambiguous-feature",
+      "physical_structure_id": "synthetic-abstain-feature",
+      "split": "safety",
+      "bridge_type": "multispan",
+      "material": "concrete",
+      "under_feature": "mixed_highway_ramp",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": true,
+      "protected_restriction_ids": [],
+      "reason": "an unresolved canonical feature binding cannot produce BH12 or BH13"
+    },
+    {
+      "case_id": "abstain-water-no-datum",
+      "physical_structure_id": "synthetic-abstain-water",
+      "split": "safety",
+      "bridge_type": "arch",
+      "material": "masonry",
+      "under_feature": "water",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": true,
+      "protected_restriction_ids": [],
+      "reason": "BN02 is unavailable without navigability, channel, datum, time, and survey contracts"
+    },
+    {
+      "case_id": "retain-attached-sign",
+      "physical_structure_id": "synthetic-protection-sign",
+      "split": "safety",
+      "bridge_type": "multi_girder",
+      "material": "steel",
+      "under_feature": "highway",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": false,
+      "protected_restriction_ids": ["restriction-sign-1"],
+      "reason": "an attached sign is a protected obstruction even when it is not structural"
+    },
+    {
+      "case_id": "retain-attached-utility",
+      "physical_structure_id": "synthetic-protection-utility",
+      "split": "safety",
+      "bridge_type": "truss",
+      "material": "steel",
+      "under_feature": "rail",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": false,
+      "protected_restriction_ids": ["restriction-utility-1"],
+      "reason": "a connected utility remains in the obstruction layer"
+    },
+    {
+      "case_id": "retain-parapet",
+      "physical_structure_id": "synthetic-protection-parapet",
+      "split": "safety",
+      "bridge_type": "slab",
+      "material": "concrete",
+      "under_feature": "pedestrian",
+      "ground_truth_kind": "synthetic_contract",
+      "require_no_numeric_output": false,
+      "protected_restriction_ids": ["parapet-1"],
+      "reason": "a safety-relevant parapet cannot be destructively removed"
+    }
+  ],
+  "limitations": [
+    "No case contains registered survey control.",
+    "No case can establish segmentation accuracy, clearance error, or uncertainty calibration.",
+    "Development, calibration, and untouched physical-bridge test splits remain externally required."
+  ]
+}

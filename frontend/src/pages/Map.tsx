@@ -11,8 +11,13 @@ import BridgeLCCAModal from '../components/BridgeLCCAModal';
 import BridgeDetailModal from '../components/BridgeDetailModal';
 import { openTool } from '../lib/tools';
 import {
+  CANCEL_SHOW_BRIDGE_ON_MAP_EVENT,
+  MAP_DATA_REVISION_EVENT,
   SHOW_BRIDGE_ON_MAP_EVENT,
   emitShowBridgeOnMapResult,
+  type MapResolveCandidate,
+  type MapResolveResponse,
+  type MapRevisionEvent,
   type ShowBridgeOnMapRequest,
 } from '../lib/mapBridgeEvents';
 
@@ -71,9 +76,13 @@ const MapPage: React.FC = () => {
   const [lccaModal, setLccaModal] = useState<PopupBridgeRef | null>(null);
   const [detailBridge, setDetailBridge] = useState<PopupBridgeRef | null>(null);
   const [focusBridge, setFocusBridge] = useState<MapBridgeFocus | null>(null);
-  const focusTargetRef = useRef<MapBridge | null>(null);
+  const [focusedBridgeCard, setFocusedBridgeCard] = useState<MapResolveCandidate | null>(null);
+  const [revisionEpoch, setRevisionEpoch] = useState(0);
+  const focusTargetRef = useRef<MapResolveCandidate | null>(null);
+  const focusResolutionRef = useRef<MapResolveResponse | null>(null);
+  const activeNavigationRef = useRef<string | null>(null);
+  const fallbackCardRef = useRef<HTMLElement | null>(null);
   const desiredCountyRef = useRef<string | null>(null);
-  const searchableBridgesRef = useRef<MapBridge[] | null>(null);
 
   const handleBridgeAction = (action: BridgeAction, bridge: PopupBridgeRef) => {
     const payload = { stateCode: bridge.state_code, bridgeNumber: bridge.bridge_number, bridgeName: bridge.bridge_name };
@@ -87,22 +96,24 @@ const MapPage: React.FC = () => {
   };
 
   useEffect(() => {
+    const controller = new AbortController();
     const fetchOptions = async () => {
       try {
         const [statesRes, yearsRes] = await Promise.all([
-          axios.get('/api/states'),
-          axios.get('/api/loaded-years'),
+          axios.get('/api/states', { signal: controller.signal }),
+          axios.get('/api/loaded-years', { signal: controller.signal }),
         ]);
         const states: StateOption[] = statesRes.data || [];
         setAvailableStates(states);
         const years = yearsRes.data?.years || [];
         setAvailableYears(years);
-        if (years.length) setSelectedYear(String(years[0]));
+        if (years.length && !activeNavigationRef.current) setSelectedYear(String(years[0]));
         // Default to New Jersey (FIPS 34) so the landing loads one real county
         // immediately instead of rendering the whole inventory at once.
         const nj = states.find((s) => s.state_code === 34 || /new jersey/i.test(s.state_name || ''));
-        if (nj) setSelectedState(String(nj.state_code));
+        if (nj && !activeNavigationRef.current) setSelectedState(String(nj.state_code));
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error(err);
         setError('Unable to load map filter options');
       } finally {
@@ -110,18 +121,20 @@ const MapPage: React.FC = () => {
       }
     };
     fetchOptions();
-  }, []);
+    return () => controller.abort();
+  }, [revisionEpoch]);
 
   useEffect(() => {
     if (!selectedState) {
       setAvailableCounties([]); setSelectedCounty(''); setAllBridges([]);
       return;
     }
+    const controller = new AbortController();
     const fetchCounties = async () => {
       try {
         const params = new URLSearchParams({ state_code: selectedState });
         if (selectedYear) params.set('year', selectedYear);
-        const res = await axios.get(`/api/map-counties?${params.toString()}`);
+        const res = await axios.get(`/api/map-counties?${params.toString()}`, { signal: controller.signal });
         const counties: CountyOption[] = res.data || [];
         setAvailableCounties(counties);
         // Auto-select the first county so exactly one county loads at a time.
@@ -130,103 +143,59 @@ const MapPage: React.FC = () => {
         setSelectedCounty(desiredExists ? desired : (counties.length ? String(counties[0].county_code) : ''));
         setAllBridges([]);
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error(err);
         setError('Unable to load county options');
       }
     };
     fetchCounties();
-  }, [selectedState, selectedYear]);
+    return () => controller.abort();
+  }, [selectedState, selectedYear, revisionEpoch]);
 
   useEffect(() => {
-    const normalize = (value: unknown) => String(value ?? '')
-      .toUpperCase()
-      .replace(/[^A-Z0-9]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const onShowBridge = async (event: Event) => {
+    const onShowBridge = (event: Event) => {
       const request = (event as CustomEvent<ShowBridgeOnMapRequest>).detail;
-      if (!request?.requestId || !request.searchText) return;
-      try {
-        if (!searchableBridgesRef.current) {
-          const response = await axios.get('/api/map-data?state_code=34');
-          const normalizedBridges = (response.data || [])
-            .map((bridge: MapBridge) => ({
-              ...bridge,
-              latitude: Number(bridge.latitude),
-              longitude: Number(bridge.longitude),
-            }))
-            .filter((bridge: MapBridge) => Number.isFinite(bridge.latitude) && Number.isFinite(bridge.longitude));
-          const uniqueBridges = new Map<string, MapBridge>();
-          normalizedBridges.forEach((bridge: MapBridge) => {
-            uniqueBridges.set(`${bridge.state_code ?? 34}|${bridge.bridge_number}`, bridge);
-          });
-          searchableBridgesRef.current = Array.from(uniqueBridges.values());
-        }
-
-        const needle = normalize(request.searchText);
-        const tokens = needle.split(' ').filter(Boolean);
-        const ranked = (searchableBridgesRef.current || []).map((bridge) => {
-          const number = normalize(bridge.bridge_number);
-          const name = normalize(bridge.bridge_name || bridge.display_name);
-          const location = normalize(bridge.bridge_location);
-          const combined = `${number} ${name} ${location}`.trim();
-          let score = 0;
-          if (number === needle) score = 100;
-          else if (number.includes(needle) && needle.length >= 3) score = 88;
-          else if (name === needle) score = 80;
-          else if (name.includes(needle) && needle.length >= 4) score = 70;
-          else if (location.includes(needle) && needle.length >= 4) score = 60;
-          else if (tokens.length && tokens.every((token) => combined.includes(token))) score = 50 + tokens.length;
-          return { bridge, score };
-        }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
-
-        if (!ranked.length) {
-          emitShowBridgeOnMapResult({
-            requestId: request.requestId,
-            status: 'not_found',
-            message: `I couldn't find a mapped New Jersey bridge matching “${request.searchText}”. Try its structure number.`,
-          });
-          return;
-        }
-
-        const bestScore = ranked[0].score;
-        const equallyRanked = ranked.filter((item) => item.score === bestScore);
-        if (bestScore < 88 && equallyRanked.length > 1) {
-          const matches = equallyRanked.slice(0, 4).map(({ bridge }) => ({
-            bridge_number: String(bridge.bridge_number),
-            label: bridge.bridge_name || bridge.display_name || bridge.bridge_location || `Bridge ${bridge.bridge_number}`,
-          }));
-          emitShowBridgeOnMapResult({
-            requestId: request.requestId,
-            status: 'ambiguous',
-            message: `I found multiple bridges: ${matches.map((match) => `${match.bridge_number} (${match.label})`).join(', ')}. Ask again with the structure number.`,
-            matches,
-          });
-          return;
-        }
-
-        const target = ranked[0].bridge;
-        const county = String(target.county_code ?? '');
-        const state = String(target.state_code ?? 34);
-        const year = target.data_year == null ? '' : String(target.data_year);
-        desiredCountyRef.current = county;
-        focusTargetRef.current = target;
-        setFocusBridge({
-          requestId: request.requestId,
-          state_code: state,
-          bridge_number: String(target.bridge_number),
-        });
-        setSelectedState(state);
-        if (year) setSelectedYear(year);
-        if (county) setSelectedCounty(county);
-      } catch (err: any) {
+      if (!request?.requestId || !request.bridge || request.resolution?.status !== 'exact') return;
+      const target = request.bridge;
+      if (!Number.isFinite(Number(target.latitude)) || !Number.isFinite(Number(target.longitude))) {
         emitShowBridgeOnMapResult({
           requestId: request.requestId,
           status: 'error',
-          message: err?.message || 'Could not search the bridge map.',
+          message: 'The bridge was resolved, but it has no valid map coordinates.',
+          bridge: target,
+          resolution: request.resolution,
+        });
+        return;
+      }
+      const previous = activeNavigationRef.current;
+      if (previous && previous !== request.requestId) {
+        emitShowBridgeOnMapResult({
+          requestId: previous,
+          status: 'stopped',
+          message: 'A newer map request replaced this one.',
         });
       }
+      const county = String(target.county_code ?? '');
+      const state = String(target.state_code);
+      const year = String(target.snapshot_year);
+      if (!county) {
+        emitShowBridgeOnMapResult({
+          requestId: request.requestId,
+          status: 'error',
+          message: 'The bridge was resolved, but it has no county assignment for the county-scoped map.',
+          bridge: target,
+          resolution: request.resolution,
+        });
+        return;
+      }
+      activeNavigationRef.current = request.requestId;
+      desiredCountyRef.current = county;
+      focusTargetRef.current = target;
+      focusResolutionRef.current = request.resolution;
+      setFocusBridge(request.focus);
+      setSelectedState(state);
+      setSelectedYear(year);
+      if (county) setSelectedCounty(county);
     };
 
     window.addEventListener(SHOW_BRIDGE_ON_MAP_EVENT, onShowBridge as EventListener);
@@ -234,15 +203,61 @@ const MapPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    const onCancel = (event: Event) => {
+      const requestId = (event as CustomEvent<{ requestId?: string }>).detail?.requestId;
+      if (!requestId || activeNavigationRef.current !== requestId) return;
+      activeNavigationRef.current = null;
+      desiredCountyRef.current = null;
+      focusTargetRef.current = null;
+      focusResolutionRef.current = null;
+      setFocusBridge(null);
+    };
+    window.addEventListener(CANCEL_SHOW_BRIDGE_ON_MAP_EVENT, onCancel as EventListener);
+    return () => window.removeEventListener(CANCEL_SHOW_BRIDGE_ON_MAP_EVENT, onCancel as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const onRevision = (event: Event) => {
+      const revision = (event as CustomEvent<MapRevisionEvent>).detail;
+      if (!Number.isSafeInteger(revision?.data_generation)) return;
+      const active = activeNavigationRef.current;
+      if (active) {
+        emitShowBridgeOnMapResult({
+          requestId: active,
+          status: 'stopped',
+          message: 'The bridge inventory changed while the map was navigating. Please try again.',
+        });
+      }
+      activeNavigationRef.current = null;
+      focusTargetRef.current = null;
+      focusResolutionRef.current = null;
+      desiredCountyRef.current = null;
+      setFocusBridge(null);
+      setFocusedBridgeCard(null);
+      setAllBridges([]);
+      setRevisionEpoch((value) => value + 1);
+    };
+    window.addEventListener(MAP_DATA_REVISION_EVENT, onRevision as EventListener);
+    return () => window.removeEventListener(MAP_DATA_REVISION_EVENT, onRevision as EventListener);
+  }, []);
+
+  useEffect(() => {
+    if (!focusedBridgeCard) return;
+    requestAnimationFrame(() => fallbackCardRef.current?.focus({ preventScroll: true }));
+  }, [focusedBridgeCard]);
+
+  useEffect(() => {
     if (!selectedState || !selectedCounty) { setAllBridges([]); return; }
+    const controller = new AbortController();
     const fetchBridgeFeatures = async () => {
       setLoadingBridges(true);
       try {
         const params = new URLSearchParams({ state_code: selectedState, county_code: selectedCounty });
         if (selectedYear) params.set('year', selectedYear);
-        const res = await axios.get(`/api/map-data?${params.toString()}`);
+        const res = await axios.get(`/api/map-data?${params.toString()}`, { signal: controller.signal });
         setAllBridges(res.data || []);
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error(err);
         setError('Unable to load bridge data for the selected county');
       } finally {
@@ -250,7 +265,8 @@ const MapPage: React.FC = () => {
       }
     };
     fetchBridgeFeatures();
-  }, [selectedState, selectedCounty, selectedYear]);
+    return () => controller.abort();
+  }, [selectedState, selectedCounty, selectedYear, revisionEpoch]);
 
   const validBridges = useMemo(() =>
     allBridges
@@ -339,27 +355,62 @@ const MapPage: React.FC = () => {
               onBridgeAction={handleBridgeAction}
               focusBridge={focusBridge}
               onFocusResult={(focus, success, focusError) => {
+                if (activeNavigationRef.current !== focus.requestId) return;
                 const target = focusTargetRef.current;
+                const resolution = focusResolutionRef.current;
                 if (success && target) {
                   const label = target.bridge_name || target.display_name || `Bridge ${target.bridge_number}`;
+                  const revisionLabel = target.identity_status === 'published'
+                    ? `${target.snapshot_year} published snapshot`
+                    : `${target.snapshot_year} legacy projection (unversioned)`;
+                  setFocusedBridgeCard(target);
                   emitShowBridgeOnMapResult({
                     requestId: focus.requestId,
                     status: 'shown',
-                    message: `Showing ${label} (Bridge ${target.bridge_number}) on the map.`,
+                    message: `Showing ${label} (Bridge ${target.bridge_number}), ${revisionLabel}, on the map.`,
                     bridge: target,
+                    resolution: resolution ?? undefined,
                   });
                 } else {
                   emitShowBridgeOnMapResult({
                     requestId: focus.requestId,
                     status: 'error',
                     message: focusError || 'The bridge was found, but its map card could not be opened.',
+                    bridge: target ?? undefined,
+                    resolution: resolution ?? undefined,
                   });
                 }
+                activeNavigationRef.current = null;
                 desiredCountyRef.current = null;
                 focusTargetRef.current = null;
+                focusResolutionRef.current = null;
                 setFocusBridge(null);
               }}
             />
+            {focusedBridgeCard && (
+              <aside
+                ref={fallbackCardRef}
+                tabIndex={-1}
+                role="status"
+                aria-live="polite"
+                aria-label={`Resolved bridge ${focusedBridgeCard.bridge_number}`}
+                className="absolute left-4 bottom-4 z-[620] max-w-sm rounded-2xl border border-slate-200 bg-white/95 px-4 py-3 shadow-xl focus:outline-none focus:ring-2 focus:ring-brand-500"
+              >
+                <div className="text-xs font-semibold uppercase tracking-wide text-brand-600">
+                  Resolved map target
+                </div>
+                <div className="mt-1 font-semibold text-slate-900">
+                  {focusedBridgeCard.label}
+                </div>
+                <div className="mt-0.5 text-sm text-slate-600">
+                  Bridge {focusedBridgeCard.bridge_number} · {focusedBridgeCard.snapshot_year}
+                  {focusedBridgeCard.identity_status === 'published' ? ' · Published' : ' · Legacy projection (unversioned)'}
+                </div>
+                {focusedBridgeCard.bridge_location && (
+                  <div className="mt-1 text-xs text-slate-500">{focusedBridgeCard.bridge_location}</div>
+                )}
+              </aside>
+            )}
             {loadingBridges && (
               <div className="absolute inset-0 flex items-center justify-center bg-white/50 dark:bg-slate-950/50 z-[650]">
                 <div className="flex items-center gap-3 rounded-2xl glass-strong px-5 py-3 shadow-lg">
@@ -381,7 +432,7 @@ const MapPage: React.FC = () => {
       </div>
 
       {historyModal && (
-        <BridgeHistoryModal stateCode={historyModal.state_code} bridgeNumber={historyModal.bridge_number} bridgeName={historyModal.bridge_name} onClose={() => setHistoryModal(null)} />
+        <BridgeHistoryModal stateCode={historyModal.state_code} bridgeNumber={historyModal.bridge_number} bridgeName={historyModal.bridge_name} dataYear={historyModal.data_year} onClose={() => setHistoryModal(null)} />
       )}
       {reportsModal && (
         <BridgeReportsModal stateCode={reportsModal.state_code} bridgeNumber={reportsModal.bridge_number} bridgeName={reportsModal.bridge_name} onClose={() => setReportsModal(null)} />
@@ -392,6 +443,7 @@ const MapPage: React.FC = () => {
           bridgeName={lccaModal.bridge_name}
           bridgeNumber={lccaModal.bridge_number}
           yearBuilt={lccaModal.year_built}
+          dataYear={lccaModal.data_year}
           onClose={() => setLccaModal(null)}
         />
       )}
