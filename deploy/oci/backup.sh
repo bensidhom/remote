@@ -19,19 +19,46 @@ candidate() {
 
 if command -v flock >/dev/null 2>&1; then
   exec 9>/tmp/bridgeguard-backup.lock
-  flock -n 9 || {
-    printf 'backup failed: another backup is already running\n' >&2
+  lock_wait="${BRIDGEGUARD_BACKUP_LOCK_WAIT_SECONDS:-1800}"
+  case "$lock_wait" in
+    ''|*[!0-9]*)
+      printf 'backup failed: BRIDGEGUARD_BACKUP_LOCK_WAIT_SECONDS must be a nonnegative integer\n' >&2
+      exit 1
+      ;;
+  esac
+  flock -w "$lock_wait" 9 || {
+    printf 'backup failed: another backup did not finish within %s seconds\n' "$lock_wait" >&2
     exit 1
   }
 fi
 
-app_container="$(compose ps -q app)"
-if [ -z "$app_container" ] || [ "$(docker inspect -f '{{.State.Running}}' "$app_container" 2>/dev/null || true)" != "true" ]; then
-  # Existing customer data with no live writer is not proof that a recoverable
-  # pre-release state exists.  Treat this as an operator error, never a
-  # successful/no-op backup (including a stopped app on the first rollout).
-  printf 'backup failed: the existing app container is not running\n' >&2
+app_container="$(compose ps --all -q app)"
+if [ -z "$app_container" ]; then
+  printf 'backup failed: no pre-release app container exists\n' >&2
   exit 1
+fi
+if [ "$(docker inspect -f '{{.State.Running}}' "$app_container" 2>/dev/null || true)" != "true" ]; then
+  # A disconnected prior deployment may have stopped the old container while
+  # its backup trap was unwinding.  Recover that exact existing container
+  # before beginning a new quiesced backup; never create/migrate a candidate
+  # container here.
+  printf 'backup recovery: restarting the stopped pre-release app container\n' >&2
+  docker start "$app_container" >/dev/null
+  attempts=0
+  recovered=false
+  while [ "$attempts" -lt 60 ]; do
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$app_container" 2>/dev/null || true)"
+    if [ "$health" = "healthy" ] || [ "$health" = "running" ]; then
+      recovered=true
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  if [ "$recovered" != true ]; then
+    printf 'backup failed: stopped pre-release app did not recover\n' >&2
+    exit 1
+  fi
 fi
 
 tunnel_container="$(compose ps -q cloudflared)"

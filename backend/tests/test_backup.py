@@ -300,7 +300,12 @@ class TestBackup:
             "snbi_forecasts.db",
         ]
         assert manifest["database_health"]["snbi_bridges.db"]["user_version"] == 0
-        assert manifest["research_storage"]["file_count"] == 1
+        assert manifest["research_storage"]["file_count"] == 0
+        assert manifest["research_unarchived_directories"] == list(
+            backup.BACKUP_DIRECTORIES
+        )
+        with tarfile.open(target / "files.tar.gz", "r:gz") as archive:
+            assert "attachments/reports/sample.pdf" not in archive.getnames()
         assert backup.verify_restore_drill(
             target,
             workspace_root=test_workspace / "research-restore-drills",
@@ -523,7 +528,9 @@ def test_release_backup_quiesces_old_app_and_uses_candidate_image():
     workflow = (root / ".github/workflows/deploy-oci.yml").read_text(encoding="utf-8")
 
     assert "backup skipped: no running app" not in script
-    assert "backup failed: the existing app container is not running" in script
+    assert "backup recovery: restarting the stopped pre-release app container" in script
+    assert "compose ps --all -q app" in script
+    assert 'flock -w "$lock_wait" 9' in script
     assert "compose exec" not in script
     assert "compose run --rm --no-deps -T app" in script
     assert script.index("compose stop -t 30 cloudflared") < script.index(
@@ -532,6 +539,8 @@ def test_release_backup_quiesces_old_app_and_uses_candidate_image():
     assert "--verify-current" in script
     assert "--restore-drill-current" in script
     assert 'docker start "$app_container"' in script
+    assert "ServerAliveInterval=30" in workflow
+    assert "ServerAliveCountMax=120" in workflow
 
     build = workflow.index("compose build --pull app")
     backup_command = workflow.index("sh deploy/oci/backup.sh")

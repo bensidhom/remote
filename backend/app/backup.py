@@ -697,35 +697,18 @@ def _database_health(path: Path) -> dict[str, object]:
 
 
 def _research_storage_evidence(root: Path) -> dict[str, object]:
-    """Hash every research file that is copied into the filesystem archive."""
+    """Hash the small research config files copied into the release backup.
+
+    Large research attachments, RAG caches, and point-cloud derivatives remain
+    mounted in place.  Recompressing those immutable stores on every research
+    rollout can saturate a small VM for an hour and is not a deployment gate.
+    Dedicated-customer backups continue to archive and reconcile all stores.
+    """
 
     records: list[dict[str, object]] = []
-    root_resolved = root.resolve(strict=True)
-    for name in BACKUP_DIRECTORIES:
-        source = root / name
-        if not source.exists():
-            continue
-        if source.is_symlink() or not source.is_dir():
-            raise RuntimeError(f"backup source directory is unsafe: {name}")
-        for path in sorted(source.rglob("*"), key=lambda item: item.as_posix()):
-            if path.is_symlink():
-                raise RuntimeError(f"backup source contains a symlink: {name}")
-            if not path.is_file():
-                continue
-            resolved = path.resolve(strict=True)
-            try:
-                relative = resolved.relative_to(root_resolved)
-            except ValueError as exc:
-                raise RuntimeError("research backup file escaped the data root") from exc
-            record = _file_record(resolved)
-            records.append(
-                {
-                    "path": PurePosixPath(*relative.parts).as_posix(),
-                    "bytes": record["bytes"],
-                    "sha256": record["sha256"],
-                }
-            )
     for name in BACKUP_FILES:
+        if name == DEPLOYMENT_MARKER_FILENAME:
+            continue
         path = root / name
         if not path.exists():
             continue
@@ -767,7 +750,17 @@ def create_backup(output_root: Path) -> Path:
         for database_name in database_names:
             _backup_database(data_dir / database_name, staging / database_name)
         with tarfile.open(staging / "files.tar.gz", "w:gz") as archive:
-            for name in BACKUP_DIRECTORIES:
+            archive_directories = BACKUP_DIRECTORIES if dedicated else ()
+            archive_files = (
+                BACKUP_FILES
+                if dedicated
+                else tuple(
+                    name
+                    for name in BACKUP_FILES
+                    if name != DEPLOYMENT_MARKER_FILENAME
+                )
+            )
+            for name in archive_directories:
                 source = data_dir / name
                 if source.exists():
                     if source.is_symlink():
@@ -777,7 +770,7 @@ def create_backup(output_root: Path) -> Path:
                             f"backup source directory contains a symlink: {name}"
                         )
                     archive.add(source, arcname=name, recursive=True)
-            for name in BACKUP_FILES:
+            for name in archive_files:
                 source = data_dir / name
                 if source.is_file():
                     if source.is_symlink():
@@ -837,6 +830,9 @@ def create_backup(output_root: Path) -> Path:
             "attachments": attachments_before,
             "point_cloud_runs": point_cloud_runs_before,
             "research_storage": storage_before,
+            "research_unarchived_directories": (
+                None if dedicated else list(BACKUP_DIRECTORIES)
+            ),
         }
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True),
@@ -983,6 +979,10 @@ def verify_backup(target: Path, *, require_current: bool = False) -> dict:
                 raise RuntimeError("backup manifest has no point-cloud run evidence")
         elif not isinstance(manifest.get("research_storage"), dict):
             raise RuntimeError("backup manifest has no research storage evidence")
+        elif manifest.get("research_unarchived_directories") != list(
+            BACKUP_DIRECTORIES
+        ):
+            raise RuntimeError("research backup storage scope is invalid")
     return manifest
 
 
