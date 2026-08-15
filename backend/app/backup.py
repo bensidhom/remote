@@ -33,13 +33,14 @@ from .routers.services.db_schema import (
 from .services.operations.jobs import JOB_SCHEMA_VERSION
 
 
-CURRENT_BACKUP_FORMAT = "bridgeguard-backup-v5"
+CURRENT_BACKUP_FORMAT = "bridgeguard-backup-v6"
 LEGACY_BACKUP_FORMATS = frozenset(
     {
         "bridgeguard-backup-v1",
         "bridgeguard-backup-v2",
         "bridgeguard-backup-v3",
         "bridgeguard-backup-v4",
+        "bridgeguard-backup-v5",
     }
 )
 DEPLOYMENT_MARKER_FORMAT = "bridgeguard-deployment-policy-v2"
@@ -1045,6 +1046,7 @@ def verify_restore_drill(
         elif manifest.get("format") in {
             "bridgeguard-backup-v3",
             "bridgeguard-backup-v4",
+            "bridgeguard-backup-v5",
         }:
             database_names = BACKUP_DATABASES
         else:

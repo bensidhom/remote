@@ -143,16 +143,19 @@ if candidates:
 PY
   )"
   if [ -n "$recent_backup" ]; then
-    # This deliberately rejects v1-v3.  They remain operator-restorable, but
-    # their weaker identity/catalog evidence is not reusable for a rollout.
-    candidate python -m app.backup \
-      --verify-current "$recent_backup" >/dev/null
-    candidate python -m app.backup \
-      --restore-drill-current "$recent_backup" >/dev/null
-    printf 'backup reused: %s (current format, verified, at most %s seconds old)\n' \
-      "$recent_backup" "$reuse_seconds"
-    recover_old_release=false
-    exit 0
+    # A recent backup from an earlier application format remains available to
+    # an operator, but is not reusable for this rollout.  Verification failure
+    # here means create a fresh current-format backup, not fail deployment.
+    if candidate python -m app.backup \
+        --verify-current "$recent_backup" >/dev/null 2>&1 \
+      && candidate python -m app.backup \
+        --restore-drill-current "$recent_backup" >/dev/null 2>&1; then
+      printf 'backup reused: %s (current format, verified, at most %s seconds old)\n' \
+        "$recent_backup" "$reuse_seconds"
+      recover_old_release=false
+      exit 0
+    fi
+    printf 'backup reuse skipped: recent backup is not current for this release\n' >&2
   fi
 fi
 

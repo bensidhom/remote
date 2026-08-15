@@ -538,6 +538,7 @@ def test_release_backup_quiesces_old_app_and_uses_candidate_image():
     ) < script.index("candidate python -m app.backup")
     assert "--verify-current" in script
     assert "--restore-drill-current" in script
+    assert "backup reuse skipped: recent backup is not current" in script
     assert 'docker start "$app_container"' in script
     assert "ServerAliveInterval=30" in workflow
     assert "ServerAliveCountMax=120" in workflow
