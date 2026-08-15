@@ -332,6 +332,7 @@ def test_tampered_preflight_is_rejected_before_database_write(harness: Harness):
         / digest[2:4]
         / digest
     )
+    object_path.chmod(0o600)
     object_path.write_bytes(b"tampered")
 
     response = harness.client.post(
@@ -366,6 +367,7 @@ def test_tampered_source_cannot_be_preflighted(harness: Harness):
         / digest[2:4]
         / digest
     )
+    object_path.chmod(0o600)
     object_path.write_bytes(b"tampered")
     job = claim_next_job(
         harness.database.parent / "operation_jobs.db",

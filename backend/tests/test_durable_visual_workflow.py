@@ -295,6 +295,7 @@ def test_visual_worker_persists_path_free_immutable_result_and_releases_quota(tm
     manifest = artifacts / "visual_investigation_results" / "manifests" / f"{artifact_id}.json"
     tampered = json.loads(manifest.read_text(encoding="utf-8"))
     tampered["sha256"] = "f" * 64
+    manifest.chmod(0o600)
     manifest.write_text(json.dumps(tampered), encoding="utf-8")
     with pytest.raises(VisualJobError, match="visual_result_receipt_mismatch"):
         load_visual_job_result(job=done, artifact_root=artifacts)

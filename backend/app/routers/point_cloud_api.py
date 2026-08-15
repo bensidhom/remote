@@ -2787,9 +2787,16 @@ def point_cloud_health():
         multimodal_error = "point_cloud_multimodal_capability_unavailable"
     try:
         import pye57  # type: ignore
+        from importlib.metadata import PackageNotFoundError, version
 
         e57_supported = True
-        pye57_version = getattr(pye57, "__version__", None)
+        try:
+            # Some pye57 releases expose ``__version__`` as a module rather
+            # than a JSON-safe scalar.  Read package metadata so readiness can
+            # never leak a module repr/path or fail response serialization.
+            pye57_version = version("pye57")
+        except PackageNotFoundError:
+            pye57_version = "installed"
     except Exception:
         e57_supported = False
         pye57_version = None
