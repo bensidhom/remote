@@ -82,61 +82,15 @@ run_data_python() {
 }
 
 run_data_python - "$data_dir" "${BRIDGEGUARD_MIN_BRIDGES:-1}" "$app_env" <<'PY'
-import hashlib
 import json
 import sqlite3
 import sys
-import uuid
 from pathlib import Path
 
 data_dir = Path(sys.argv[1]).resolve()
 minimum_bridges = int(sys.argv[2])
-app_env_path = Path(sys.argv[3])
 bridge_db = data_dir / "snbi_bridges.db"
 forecast_db = data_dir / "snbi_forecasts.db"
-marker_path = data_dir / "bridgeguard-deployment.json"
-
-def dotenv(path):
-    values = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
-app_values = dotenv(app_env_path)
-expected_workspace = app_values.get("BRIDGEGUARD_WORKSPACE_ID", "")
-expected_customer = app_values.get("BRIDGEGUARD_CUSTOMER_SLUG", "")
-if not expected_workspace or not expected_customer:
-    raise SystemExit(
-        "preflight failed: app environment must declare customer and workspace identity"
-    )
-if marker_path.is_symlink() or not marker_path.is_file():
-    raise SystemExit("preflight failed: dedicated deployment marker is missing or linked")
-marker_raw = marker_path.read_bytes()
-try:
-    marker = json.loads(marker_raw.decode("utf-8"))
-except (UnicodeDecodeError, json.JSONDecodeError):
-    raise SystemExit("preflight failed: dedicated deployment marker is invalid")
-expected_marker_keys = {
-    "format", "mode", "workspace_id", "customer_slug", "deployment_id"
-}
-try:
-    canonical_deployment_id = str(uuid.UUID(str(marker.get("deployment_id", ""))))
-except ValueError:
-    canonical_deployment_id = ""
-if (
-    set(marker) != expected_marker_keys
-    or marker.get("format") != "bridgeguard-deployment-policy-v2"
-    or marker.get("mode") != "dedicated_customer"
-    or marker.get("workspace_id") != expected_workspace
-    or marker.get("customer_slug") != expected_customer
-    or canonical_deployment_id != marker.get("deployment_id")
-):
-    raise SystemExit("preflight failed: dedicated deployment marker identity mismatch")
-marker_sha256 = hashlib.sha256(marker_raw).hexdigest()
 
 if not bridge_db.is_file() or bridge_db.stat().st_size < 10 * 1024 * 1024:
     raise SystemExit("preflight failed: the bridge database is missing or unexpectedly small")
@@ -150,44 +104,18 @@ with sqlite3.connect(f"file:{bridge_db.as_posix()}?mode=ro", uri=True) as connec
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    required = {
-        "bridges", "bridge_attachments", "deployment_bindings", "workspaces",
-        "schema_migrations",
-    }
+    # Research deployments may upgrade an older projection database in place.
+    # Dedicated-customer marker/binding and current-migration checks belong to
+    # a separately provisioned commercial stack, not this research rollout.
+    required = {"bridges"}
     missing_tables = sorted(required - tables)
     if missing_tables:
         raise SystemExit(
             "preflight failed: missing database tables: " + ", ".join(missing_tables)
         )
-    user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    migration_history = connection.execute(
-        "SELECT version,checksum FROM schema_migrations ORDER BY version"
-    ).fetchall()
-    if user_version != 8 or [row[0] for row in migration_history] != list(range(1, 9)):
-        raise SystemExit("preflight failed: database migration generation mismatch")
-    if any(
-        len(str(checksum)) != 64
-        or any(character not in "0123456789abcdef" for character in str(checksum))
-        for _version, checksum in migration_history
-    ):
-        raise SystemExit("preflight failed: database migration receipt is invalid")
-    bindings = connection.execute(
-        "SELECT deployment_id, customer_slug, workspace_id, marker_sha256 "
-        "FROM deployment_bindings ORDER BY deployment_id"
-    ).fetchall()
-    expected_binding = (
-        marker["deployment_id"],
-        expected_customer,
-        expected_workspace,
-        marker_sha256,
-    )
-    if len(bindings) != 1 or tuple(bindings[0]) != expected_binding:
-        raise SystemExit("preflight failed: database/customer binding mismatch")
-    workspace_catalog = tuple(
-        row[0] for row in connection.execute("SELECT id FROM workspaces ORDER BY id")
-    )
-    if workspace_catalog != (expected_workspace,):
-        raise SystemExit("preflight failed: database workspace catalog mismatch")
+    quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
+    if not quick_check or str(quick_check[0]) != "ok":
+        raise SystemExit("preflight failed: bridge database integrity check failed")
     inspected_workspace_tables = 0
     for table_name in sorted(tables):
         if not table_name.replace("_", "a").isalnum():
@@ -196,27 +124,9 @@ with sqlite3.connect(f"file:{bridge_db.as_posix()}?mode=ro", uri=True) as connec
         table_columns = {
             row[1] for row in connection.execute(f"PRAGMA table_info({quoted})")
         }
-        if table_name == "bridge_attachments" and "workspace_id" not in table_columns:
-            raise SystemExit("preflight failed: attachment workspace identity is missing")
         if "workspace_id" not in table_columns:
             continue
         inspected_workspace_tables += 1
-        null_rows = int(
-            connection.execute(
-                f"SELECT COUNT(*) FROM {quoted} WHERE workspace_id IS NULL"
-            ).fetchone()[0]
-        )
-        foreign_rows = int(
-            connection.execute(
-                f"SELECT COUNT(*) FROM {quoted} WHERE workspace_id IS NOT NULL "
-                "AND (typeof(workspace_id) <> 'text' OR workspace_id <> ?)",
-                (expected_workspace,),
-            ).fetchone()[0]
-        )
-        if null_rows or foreign_rows:
-            raise SystemExit(
-                f"preflight failed: workspace contamination in table {table_name}"
-            )
     bridge_count = int(connection.execute("SELECT COUNT(*) FROM bridges").fetchone()[0])
     if bridge_count < minimum_bridges:
         raise SystemExit(
@@ -236,13 +146,17 @@ with sqlite3.connect(f"file:{bridge_db.as_posix()}?mode=ro", uri=True) as connec
         if "data_year" in columns
         else 0
     )
-    attachment_rows = connection.execute(
-        """
-        SELECT attachment_type, filepath
-        FROM bridge_attachments
-        WHERE attachment_type IN ('inspection_report', 'point_cloud')
-        """
-    ).fetchall()
+    attachment_rows = (
+        connection.execute(
+            """
+            SELECT attachment_type, filepath
+            FROM bridge_attachments
+            WHERE attachment_type IN ('inspection_report', 'point_cloud')
+            """
+        ).fetchall()
+        if "bridge_attachments" in tables
+        else []
+    )
 
 missing_files = []
 attachment_counts = {"inspection_report": 0, "point_cloud": 0}

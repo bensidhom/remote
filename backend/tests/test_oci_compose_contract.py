@@ -48,6 +48,10 @@ def test_preflight_labels_research_and_does_not_require_commercial_receipts():
     script = PREFLIGHT_FILE.read_text(encoding="utf-8")
     assert "check_commercial_entitlements.py" not in script
     assert "research deployment; commercial entitlement gate not applicable" in script
+    assert "app environment must declare customer and workspace identity" not in script
+    assert "dedicated deployment marker" not in script
+    assert "database/customer binding mismatch" not in script
+    assert "database migration generation mismatch" not in script
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker Compose is unavailable")
