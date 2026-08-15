@@ -260,6 +260,53 @@ def _add_accepted_point_cloud_run(root: Path) -> tuple[str, Path]:
 
 
 class TestBackup:
+    def test_research_backup_needs_no_customer_marker_or_current_schema(
+        self, test_workspace: Path
+    ):
+        data = test_workspace / "research-data"
+        data.mkdir()
+        with closing(sqlite3.connect(data / "snbi_bridges.db")) as connection:
+            connection.execute(
+                "CREATE TABLE bridges (state_code TEXT, bridge_number TEXT, data_year INTEGER)"
+            )
+            connection.execute("INSERT INTO bridges VALUES ('34','0101150',2024)")
+            connection.commit()
+        init_forecast_db(str(data / "snbi_forecasts.db"))
+        report = data / "attachments" / "reports" / "sample.pdf"
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b"%PDF-1.7\nresearch fixture\n")
+        environment = {
+            "BRIDGEGUARD_DEPLOYMENT_MODE": "research_shared",
+            "BRIDGEGUARD_WORKSPACE_ID": "shared-research-workspace",
+        }
+        with (
+            patch.object(backup, "DATA_DIR", data),
+            patch.dict(backup.os.environ, environment, clear=False),
+        ):
+            target = backup.create_backup(test_workspace / "research-backups")
+
+        manifest = backup.verify_backup(target, require_current=True)
+        assert manifest["deployment"] == {
+            "format": "bridgeguard-research-backup-identity-v1",
+            "mode": "research_shared",
+            "deployment_id": "unbound-research",
+            "customer_slug": "",
+            "workspace_id": "shared-research-workspace",
+            "marker_sha256": "",
+        }
+        assert backup.DEPLOYMENT_MARKER_FILENAME not in manifest["files"]
+        assert manifest["database_payloads"] == [
+            "snbi_bridges.db",
+            "snbi_forecasts.db",
+        ]
+        assert manifest["database_health"]["snbi_bridges.db"]["user_version"] == 0
+        assert manifest["research_storage"]["file_count"] == 1
+        assert backup.verify_restore_drill(
+            target,
+            workspace_root=test_workspace / "research-restore-drills",
+            require_current=True,
+        )["verified"] is True
+
     def test_backup_reconciles_accepted_point_cloud_run_and_rejects_tamper(
         self, test_workspace: Path
     ):

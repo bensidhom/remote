@@ -249,12 +249,45 @@ def _deployment_identity(marker_path: Path) -> dict[str, str]:
     return identity
 
 
+def _research_identity() -> dict[str, str]:
+    """Return the deliberately unbound identity used by research deployments.
+
+    Research deployments share an operator-managed data root and are not
+    customer installations.  They therefore must not require or fabricate a
+    dedicated-customer marker/database binding merely to take a safe backup.
+    """
+
+    workspace_id = str(
+        os.getenv("BRIDGEGUARD_WORKSPACE_ID", "shared-research-workspace")
+    ).strip()
+    if not workspace_id:
+        raise RuntimeError("research backup requires a workspace identifier")
+    return {
+        "format": "bridgeguard-research-backup-identity-v1",
+        "mode": "research_shared",
+        "deployment_id": "unbound-research",
+        "customer_slug": "",
+        "workspace_id": workspace_id,
+        "marker_sha256": "",
+    }
+
+
+def _backup_identity(data_dir: Path) -> dict[str, str]:
+    mode = str(os.getenv("BRIDGEGUARD_DEPLOYMENT_MODE", "research_shared")).strip()
+    if mode == "research_shared":
+        return _research_identity()
+    if mode == "dedicated_customer":
+        return _deployment_identity(data_dir / DEPLOYMENT_MARKER_FILENAME)
+    raise RuntimeError("unsupported backup deployment mode")
+
+
 def _assert_environment_identity(identity: dict[str, str]) -> None:
     expected = {
         "BRIDGEGUARD_DEPLOYMENT_MODE": identity["mode"],
-        "BRIDGEGUARD_CUSTOMER_SLUG": identity["customer_slug"],
         "BRIDGEGUARD_WORKSPACE_ID": identity["workspace_id"],
     }
+    if identity["mode"] == "dedicated_customer":
+        expected["BRIDGEGUARD_CUSTOMER_SLUG"] = identity["customer_slug"]
     for key, marker_value in expected.items():
         configured = str(os.getenv(key, "")).strip()
         if configured and configured != marker_value:
@@ -408,6 +441,45 @@ def _current_database_health(
         connection.close()
     health["operation_jobs.db"] = evidence
     return health
+
+
+def _research_database_health(
+    root: Path, database_names: tuple[str, ...]
+) -> dict[str, dict[str, object]]:
+    """Capture integrity evidence without requiring a migrated customer DB."""
+
+    health: dict[str, dict[str, object]] = {}
+    for name in database_names:
+        connection, evidence = _basic_database_health(root / name)
+        try:
+            evidence["tables"] = sorted(_tables(connection))
+        finally:
+            connection.close()
+        health[name] = evidence
+    return health
+
+
+def _database_names_for_backup(
+    root: Path, identity: dict[str, str]
+) -> tuple[str, ...]:
+    if identity["mode"] == "dedicated_customer":
+        return BACKUP_DATABASES
+    required = BACKUP_DATABASES[:2]
+    for name in required:
+        if not (root / name).is_file():
+            raise RuntimeError(f"required research backup database is missing: {name}")
+    optional = tuple(name for name in BACKUP_DATABASES[2:] if (root / name).is_file())
+    return (*required, *optional)
+
+
+def _backup_database_health(
+    root: Path,
+    identity: dict[str, str],
+    database_names: tuple[str, ...],
+) -> dict[str, dict[str, object]]:
+    if identity["mode"] == "dedicated_customer":
+        return _current_database_health(root, identity)
+    return _research_database_health(root, database_names)
 
 
 def _safe_attachment_path(root: Path, stored: object) -> tuple[Path, str]:
@@ -624,13 +696,67 @@ def _database_health(path: Path) -> dict[str, object]:
     return evidence
 
 
+def _research_storage_evidence(root: Path) -> dict[str, object]:
+    """Hash every research file that is copied into the filesystem archive."""
+
+    records: list[dict[str, object]] = []
+    root_resolved = root.resolve(strict=True)
+    for name in BACKUP_DIRECTORIES:
+        source = root / name
+        if not source.exists():
+            continue
+        if source.is_symlink() or not source.is_dir():
+            raise RuntimeError(f"backup source directory is unsafe: {name}")
+        for path in sorted(source.rglob("*"), key=lambda item: item.as_posix()):
+            if path.is_symlink():
+                raise RuntimeError(f"backup source contains a symlink: {name}")
+            if not path.is_file():
+                continue
+            resolved = path.resolve(strict=True)
+            try:
+                relative = resolved.relative_to(root_resolved)
+            except ValueError as exc:
+                raise RuntimeError("research backup file escaped the data root") from exc
+            record = _file_record(resolved)
+            records.append(
+                {
+                    "path": PurePosixPath(*relative.parts).as_posix(),
+                    "bytes": record["bytes"],
+                    "sha256": record["sha256"],
+                }
+            )
+    for name in BACKUP_FILES:
+        path = root / name
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"backup source file is unsafe: {name}")
+        record = _file_record(path)
+        records.append(
+            {"path": name, "bytes": record["bytes"], "sha256": record["sha256"]}
+        )
+    canonical = json.dumps(records, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return {
+        "file_count": len(records),
+        "total_bytes": sum(int(record["bytes"]) for record in records),
+        "catalog_sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
 def create_backup(output_root: Path) -> Path:
     data_dir = Path(DATA_DIR).resolve(strict=True)
-    identity = _deployment_identity(data_dir / DEPLOYMENT_MARKER_FILENAME)
+    identity = _backup_identity(data_dir)
     _assert_environment_identity(identity)
-    database_health = _current_database_health(data_dir, identity)
-    attachments_before = _attachment_evidence(data_dir, identity)
-    point_cloud_runs_before = _point_cloud_run_evidence(data_dir, identity)
+    dedicated = identity["mode"] == "dedicated_customer"
+    database_names = _database_names_for_backup(data_dir, identity)
+    database_health = _backup_database_health(data_dir, identity, database_names)
+    attachments_before = _attachment_evidence(data_dir, identity) if dedicated else None
+    point_cloud_runs_before = (
+        _point_cloud_run_evidence(data_dir, identity) if dedicated else None
+    )
+    storage_before = None if dedicated else _research_storage_evidence(data_dir)
 
     output_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -638,7 +764,7 @@ def create_backup(output_root: Path) -> Path:
     staging = output_root / f".{stamp}.incomplete-{uuid4().hex}"
     staging.mkdir(parents=False, exist_ok=False)
     try:
-        for database_name in BACKUP_DATABASES:
+        for database_name in database_names:
             _backup_database(data_dir / database_name, staging / database_name)
         with tarfile.open(staging / "files.tar.gz", "w:gz") as archive:
             for name in BACKUP_DIRECTORIES:
@@ -657,21 +783,25 @@ def create_backup(output_root: Path) -> Path:
                     if source.is_symlink():
                         raise RuntimeError(f"backup source file is a symlink: {name}")
                     archive.add(source, arcname=name, recursive=False)
-        shutil.copy2(
-            data_dir / DEPLOYMENT_MARKER_FILENAME,
-            staging / DEPLOYMENT_MARKER_FILENAME,
+        if dedicated:
+            shutil.copy2(
+                data_dir / DEPLOYMENT_MARKER_FILENAME,
+                staging / DEPLOYMENT_MARKER_FILENAME,
+            )
+            if _attachment_evidence(data_dir, identity) != attachments_before:
+                raise RuntimeError("attachment catalog changed during the backup")
+            if _point_cloud_run_evidence(data_dir, identity) != point_cloud_runs_before:
+                raise RuntimeError("point-cloud run evidence changed during the backup")
+            copied_identity = _deployment_identity(
+                staging / DEPLOYMENT_MARKER_FILENAME
+            )
+            if copied_identity != identity:
+                raise RuntimeError("copied deployment marker identity changed")
+        elif _research_storage_evidence(data_dir) != storage_before:
+            raise RuntimeError("research filesystem changed during the backup")
+        copied_health = _backup_database_health(
+            staging, identity, database_names
         )
-        if _attachment_evidence(data_dir, identity) != attachments_before:
-            raise RuntimeError("attachment catalog changed during the backup")
-        if _point_cloud_run_evidence(data_dir, identity) != point_cloud_runs_before:
-            raise RuntimeError("point-cloud run evidence changed during the backup")
-
-        copied_identity = _deployment_identity(
-            staging / DEPLOYMENT_MARKER_FILENAME
-        )
-        if copied_identity != identity:
-            raise RuntimeError("copied deployment marker identity changed")
-        copied_health = _current_database_health(staging, copied_identity)
         if copied_health != database_health:
             raise RuntimeError("copied database health evidence changed")
 
@@ -680,13 +810,16 @@ def create_backup(output_root: Path) -> Path:
             for path in staging.iterdir()
             if path.is_file() and path.name != "manifest.json"
         }
-        required_payloads = {*BACKUP_DATABASES, "files.tar.gz", DEPLOYMENT_MARKER_FILENAME}
+        required_payloads = {*database_names, "files.tar.gz"}
+        if dedicated:
+            required_payloads.add(DEPLOYMENT_MARKER_FILENAME)
         if not required_payloads.issubset(payload_files):
             raise RuntimeError("current backup is missing a required payload")
         manifest = {
             "format": CURRENT_BACKUP_FORMAT,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "deployment": identity,
+            "database_payloads": list(database_names),
             "embedding_profile": {
                 "provider": "tei",
                 "model": os.getenv(
@@ -703,6 +836,7 @@ def create_backup(output_root: Path) -> Path:
             "database_health": copied_health,
             "attachments": attachments_before,
             "point_cloud_runs": point_cloud_runs_before,
+            "research_storage": storage_before,
         }
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True),
@@ -790,23 +924,65 @@ def verify_backup(target: Path, *, require_current: bool = False) -> dict:
                 raise RuntimeError("dedicated backup has no deployment marker")
 
     if backup_format == CURRENT_BACKUP_FORMAT:
-        required_payloads = {*BACKUP_DATABASES, "files.tar.gz", DEPLOYMENT_MARKER_FILENAME}
+        deployment = manifest.get("deployment")
+        if not isinstance(deployment, dict):
+            raise RuntimeError("backup manifest has no deployment scope")
+        mode = deployment.get("mode")
+        raw_database_names = manifest.get("database_payloads")
+        if (
+            not isinstance(raw_database_names, list)
+            or not raw_database_names
+            or any(name not in BACKUP_DATABASES for name in raw_database_names)
+            or len(set(raw_database_names)) != len(raw_database_names)
+            or not set(BACKUP_DATABASES[:2]).issubset(raw_database_names)
+        ):
+            raise RuntimeError("backup manifest database payload list is invalid")
+        database_names = tuple(str(name) for name in raw_database_names)
+        required_payloads = {*database_names, "files.tar.gz"}
+        if mode == "dedicated_customer":
+            required_payloads.add(DEPLOYMENT_MARKER_FILENAME)
         if not required_payloads.issubset(files):
             raise RuntimeError("current backup is missing a required payload")
-        marker_identity = _deployment_identity(
-            target / DEPLOYMENT_MARKER_FILENAME
-        )
-        if manifest.get("deployment") != marker_identity:
-            raise RuntimeError("backup manifest deployment identity does not match its marker")
-        health = _current_database_health(target, marker_identity)
+        if mode == "dedicated_customer":
+            identity = _deployment_identity(target / DEPLOYMENT_MARKER_FILENAME)
+            if deployment != identity:
+                raise RuntimeError(
+                    "backup manifest deployment identity does not match its marker"
+                )
+        elif mode == "research_shared":
+            expected_keys = {
+                "format",
+                "mode",
+                "deployment_id",
+                "customer_slug",
+                "workspace_id",
+                "marker_sha256",
+            }
+            if (
+                set(deployment) != expected_keys
+                or deployment.get("format")
+                != "bridgeguard-research-backup-identity-v1"
+                or deployment.get("deployment_id") != "unbound-research"
+                or deployment.get("customer_slug") != ""
+                or not str(deployment.get("workspace_id") or "").strip()
+                or deployment.get("marker_sha256") != ""
+            ):
+                raise RuntimeError("research backup identity is invalid")
+            identity = {str(key): str(value) for key, value in deployment.items()}
+        else:
+            raise RuntimeError("backup deployment mode is unsupported")
+        health = _backup_database_health(target, identity, database_names)
         if manifest.get("database_health") != health:
             raise RuntimeError("backup database health/schema evidence mismatch")
-        attachment_manifest = manifest.get("attachments")
-        if not isinstance(attachment_manifest, dict):
-            raise RuntimeError("backup manifest has no attachment evidence")
-        point_cloud_manifest = manifest.get("point_cloud_runs")
-        if not isinstance(point_cloud_manifest, dict):
-            raise RuntimeError("backup manifest has no point-cloud run evidence")
+        if mode == "dedicated_customer":
+            attachment_manifest = manifest.get("attachments")
+            if not isinstance(attachment_manifest, dict):
+                raise RuntimeError("backup manifest has no attachment evidence")
+            point_cloud_manifest = manifest.get("point_cloud_runs")
+            if not isinstance(point_cloud_manifest, dict):
+                raise RuntimeError("backup manifest has no point-cloud run evidence")
+        elif not isinstance(manifest.get("research_storage"), dict):
+            raise RuntimeError("backup manifest has no research storage evidence")
     return manifest
 
 
@@ -864,15 +1040,15 @@ def verify_restore_drill(
     root.mkdir(parents=False, exist_ok=False)
     try:
         current = manifest.get("format") == CURRENT_BACKUP_FORMAT
-        database_names = (
-            BACKUP_DATABASES
-            if manifest.get("format") in {
-                CURRENT_BACKUP_FORMAT,
-                "bridgeguard-backup-v3",
-                "bridgeguard-backup-v4",
-            }
-            else ("snbi_bridges.db", "snbi_forecasts.db")
-        )
+        if current:
+            database_names = tuple(manifest["database_payloads"])
+        elif manifest.get("format") in {
+            "bridgeguard-backup-v3",
+            "bridgeguard-backup-v4",
+        }:
+            database_names = BACKUP_DATABASES
+        else:
+            database_names = ("snbi_bridges.db", "snbi_forecasts.db")
         for database_name in database_names:
             source = target / database_name
             if current and not source.is_file():
@@ -880,7 +1056,11 @@ def verify_restore_drill(
             if source.is_file():
                 shutil.copy2(source, root / database_name)
         marker_source = target / DEPLOYMENT_MARKER_FILENAME
-        if current and not marker_source.is_file():
+        dedicated = (
+            current
+            and manifest.get("deployment", {}).get("mode") == "dedicated_customer"
+        )
+        if dedicated and not marker_source.is_file():
             raise RuntimeError("restore drill is missing the deployment marker")
         if marker_source.is_file():
             shutil.copy2(marker_source, root / marker_source.name)
@@ -895,20 +1075,30 @@ def verify_restore_drill(
                 extracted_files = sum(1 for item in members if item.isfile())
 
         if current:
-            restored_identity = _deployment_identity(
-                root / DEPLOYMENT_MARKER_FILENAME
+            if dedicated:
+                restored_identity = _deployment_identity(
+                    root / DEPLOYMENT_MARKER_FILENAME
+                )
+                if restored_identity != manifest["deployment"]:
+                    raise RuntimeError(
+                        "restored deployment identity does not match the manifest"
+                    )
+            else:
+                restored_identity = manifest["deployment"]
+            database_health = _backup_database_health(
+                root, restored_identity, database_names
             )
-            if restored_identity != manifest["deployment"]:
-                raise RuntimeError("restored deployment identity does not match the manifest")
-            database_health = _current_database_health(root, restored_identity)
             if database_health != manifest["database_health"]:
                 raise RuntimeError("restored database health/schema evidence mismatch")
-            attachment_evidence = _attachment_evidence(root, restored_identity)
-            if attachment_evidence != manifest["attachments"]:
-                raise RuntimeError("restored attachments do not match the manifest")
-            point_cloud_evidence = _point_cloud_run_evidence(root, restored_identity)
-            if point_cloud_evidence != manifest["point_cloud_runs"]:
-                raise RuntimeError("restored point-cloud runs do not match the manifest")
+            if dedicated:
+                attachment_evidence = _attachment_evidence(root, restored_identity)
+                if attachment_evidence != manifest["attachments"]:
+                    raise RuntimeError("restored attachments do not match the manifest")
+                point_cloud_evidence = _point_cloud_run_evidence(root, restored_identity)
+                if point_cloud_evidence != manifest["point_cloud_runs"]:
+                    raise RuntimeError("restored point-cloud runs do not match the manifest")
+            elif _research_storage_evidence(root) != manifest["research_storage"]:
+                raise RuntimeError("restored research files do not match the manifest")
         else:
             database_health = {
                 name: _database_health(root / name) for name in database_names
