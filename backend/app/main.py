@@ -1911,6 +1911,7 @@ async def convert_v2(
 
         csv_dialect = None
         if selected_format in {
+            StrictNBIFormat.FHWA_DOWNLOAD_CSV,
             StrictNBIFormat.NAMED_CSV,
             StrictNBIFormat.LEGACY_POSITIONAL_CSV,
         }:
@@ -2087,6 +2088,7 @@ async def convert_inspection_history_v2(
 
         csv_dialect = None
         if parsed_manifest.input_format in {
+            StrictNBIFormat.FHWA_DOWNLOAD_CSV,
             StrictNBIFormat.NAMED_CSV,
             StrictNBIFormat.LEGACY_POSITIONAL_CSV,
         }:

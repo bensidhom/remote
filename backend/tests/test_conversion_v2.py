@@ -104,6 +104,28 @@ def test_multipart_http_contract_requires_and_accepts_explicit_parser_metadata()
     assert response.json()["parser"]["format"] == "fhwa_fixed_445"
 
 
+def test_multipart_http_contract_accepts_fhwa_download_csv_profile():
+    source = (
+        b"STATE_CODE_001,STRUCTURE_NUMBER_008,RECORD_TYPE_005A,"
+        b"YEAR_BUILT_027,SERVICE_ON_042A,STRUCTURE_LEN_MT_049,"
+        b"BRIDGE_LEN_IND_112,DATE_LAST_UPDATE\n"
+        b"34,0101150,1,1955,1,10.0,Y,20250331\n"
+    )
+    result = _run(
+        source,
+        input_format="fhwa_download_csv",
+        csv_delimiter=",",
+        csv_quotechar='"',
+    )
+
+    assert result["parser"]["format"] == "fhwa_download_csv"
+    assert result["converted"] == 1
+    bridge = result["bridges"][0]
+    assert bridge["BL01"] == 34
+    assert bridge["BID01"] == "0101150"
+    assert bridge["_SourceData"]["over_record"]["raw_item_001"] == "34"
+
+
 def test_multipart_http_contract_does_not_default_conversion_profile():
     http_app = FastAPI()
     http_app.post("/api/convert-v2")(convert_v2)

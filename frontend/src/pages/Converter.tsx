@@ -521,6 +521,7 @@ const Converter: React.FC = () => {
                 Declared layout
                 <select value={inputFormat} onChange={(event) => setInputFormat(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
                   <option value="fhwa_fixed_445">FHWA fixed width (445 bytes)</option>
+                  <option value="fhwa_download_csv">FHWA NBI download CSV (two-digit state)</option>
                   <option value="named_csv">CSV with named header</option>
                   <option value="legacy_positional_csv">Legacy positional CSV</option>
                 </select>

@@ -246,13 +246,33 @@ class StrictFixedWidthParserTests(unittest.TestCase):
         self.assertEqual(accepted.records[0].byte_offset, 3)
         self.assertEqual(accepted.records[0].raw_item_001, "342")
 
+    def test_all_official_alphabetic_under_types_are_preserved(self):
+        result = parse_fixed(
+            fixed_record(record_type="1")
+            + b"\n"
+            + fixed_record(record_type="A")
+            + b"\n"
+            + fixed_record(record_type="B")
+            + b"\n"
+            + fixed_record(record_type="Z")
+        )
+        group = next(iter(result.bridges.values()))
+        self.assertEqual(
+            [record.record_type.value for record in group.unders], ["A", "B", "Z"]
+        )
+        self.assertEqual(group.primary_under.record_type.value, "A")
+        self.assertEqual(
+            [record.record_type.value for record in group.secondary_unders],
+            ["B", "Z"],
+        )
+
     def test_unknown_record_type_is_rejected_or_quarantined(self):
         with self.assertRaises(NBIParseError) as rejected:
-            parse_fixed(fixed_record(record_type="B"))
+            parse_fixed(fixed_record(record_type="!"))
         self.assertEqual(rejected.exception.issue.code, "unknown_record_type")
 
         result = parse_fixed(
-            fixed_record(record_type="B"),
+            fixed_record(record_type="!"),
             issue_policy=IssuePolicy.QUARANTINE,
         )
         self.assertFalse(result.records)
@@ -411,6 +431,47 @@ class StrictCsvParserTests(unittest.TestCase):
                 csv_dialect=CSV,
             )
         self.assertEqual(rejected.exception.issue.code, "invalid_state_code")
+
+    def test_fhwa_download_csv_preserves_two_digit_state_and_source_columns(self):
+        data = (
+            b"STATE_CODE_001,STRUCTURE_NUMBER_008,RECORD_TYPE_005A,"
+            b"DATE_LAST_UPDATE,SUFFICIENCY_RATING,CAT10\n"
+            b"34,0101150,1,20250331,87.4,Y\n"
+        )
+        result = parse_nbi(
+            data,
+            source_agency_context="NJDOT",
+            encoding="ascii",
+            input_format=NBIFormat.FHWA_DOWNLOAD_CSV,
+            csv_dialect=CSV,
+        )
+
+        self.assertEqual(result.input_format, NBIFormat.FHWA_DOWNLOAD_CSV)
+        self.assertEqual(len(result.records), 1)
+        record = result.records[0]
+        self.assertEqual(record.bridge_key.normalized_state, "34")
+        self.assertEqual(record.raw_item_001, "34")
+        self.assertEqual(record.fields["STATE_CODE_001"], "34")
+        self.assertEqual(record.fields["DATE_LAST_UPDATE"], "20250331")
+        self.assertEqual(record.fields["SUFFICIENCY_RATING"], "87.4")
+        self.assertEqual(record.fields["CAT10"], "Y")
+        self.assertTrue(record.conformant)
+        self.assertFalse(result.issues)
+
+    def test_fhwa_download_csv_rejects_unreviewed_source_column(self):
+        data = (
+            b"STATE_CODE_001,STRUCTURE_NUMBER_008,RECORD_TYPE_005A,"
+            b"UNREVIEWED_EXPORT_FIELD\n34,0101150,1,value\n"
+        )
+        with self.assertRaises(NBIParseError) as rejected:
+            parse_nbi(
+                data,
+                source_agency_context="NJDOT",
+                encoding="ascii",
+                input_format=NBIFormat.FHWA_DOWNLOAD_CSV,
+                csv_dialect=CSV,
+            )
+        self.assertEqual(rejected.exception.issue.code, "unknown_header_columns")
 
 
 class ParserLimitTests(unittest.TestCase):

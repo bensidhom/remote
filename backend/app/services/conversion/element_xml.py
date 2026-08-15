@@ -76,7 +76,10 @@ class ElementXmlLimits:
     # The transport/source limit also bounds a compressed gzip input.
     max_source_bytes: int = 32 * 1024 * 1024
     max_expanded_bytes: int = 64 * 1024 * 1024
-    max_nodes: int = 500_000
+    # Current public state element extracts contain about 55k-62k FHWAED
+    # records and exceed 500k XML nodes.  Source/expanded-byte, text, record,
+    # depth, and issue ceilings remain independent hard bounds.
+    max_nodes: int = 1_000_000
     max_depth: int = 64
     max_text_chars: int = 16 * 1024 * 1024
     max_field_text_chars: int = 64 * 1024
@@ -1355,11 +1358,6 @@ def _validate_record_set(
         ],
         ElementRecord,
     ] = {}
-    parents_by_element: DefaultDict[
-        Tuple[Tuple[Optional[str], Optional[str], Optional[str]], Decimal],
-        set,
-    ] = defaultdict(set)
-
     for record in records:
         _validate_condition_quantities(record, limits, issues)
         group = _record_group(record)
@@ -1388,26 +1386,6 @@ def _validate_record_set(
             )
         else:
             key_first_seen[key] = record
-        parents_by_element[(group, element_number)].add(parent_number)
-
-    for (group, element_number), parent_values in parents_by_element.items():
-        if len(parent_values) > 1:
-            records_for_element = by_group_and_element[group][element_number]
-            record = records_for_element[-1]
-            issues.add(
-                ElementParseIssue(
-                    code="element_parent_conflict",
-                    severity=IssueSeverity.ERROR,
-                    message=(
-                        f"element {element_number} has multiple parent values "
-                        "within one bridge"
-                    ),
-                    record_index=record.record_index,
-                    record_path=record.record_path,
-                    field_name="EPN",
-                    raw_text=record.fields["EPN"].raw_text,
-                )
-            )
 
     for record in records:
         group = _record_group(record)

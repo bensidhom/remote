@@ -385,7 +385,11 @@ def parse_inspection_history_manifest(raw: str) -> InspectionHistoryManifest:
 
     delimiter = quotechar = escapechar = None
     csv_dialect = value.get("csv_dialect")
-    csv_formats = {NBIFormat.NAMED_CSV, NBIFormat.LEGACY_POSITIONAL_CSV}
+    csv_formats = {
+        NBIFormat.FHWA_DOWNLOAD_CSV,
+        NBIFormat.NAMED_CSV,
+        NBIFormat.LEGACY_POSITIONAL_CSV,
+    }
     if input_format in csv_formats:
         if not isinstance(csv_dialect, dict) or set(csv_dialect).difference(
             {"delimiter", "quotechar", "escapechar"}

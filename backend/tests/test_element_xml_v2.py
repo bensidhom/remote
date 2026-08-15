@@ -181,6 +181,22 @@ def test_duplicate_element_key_and_parent_relationships_are_issues():
     assert "element_parent_cycle" in _codes(result)
 
 
+def test_same_element_number_may_have_distinct_valid_parents():
+    parent_deck = _record(en="12", epn="0")
+    parent_girder = _record(en="107", epn="0")
+    deck_protection = _record(en="515", epn="12")
+    girder_protection = _record(en="515", epn="107")
+
+    result = parse_element_xml(
+        _document(parent_deck, parent_girder, deck_protection, girder_protection)
+    )
+
+    assert result.element_file_parsed is True
+    assert result.element_records == 4
+    assert "duplicate_element_key" not in _codes(result)
+    assert "element_parent_missing" not in _codes(result)
+
+
 def test_finite_nonnegative_field_rules_and_condition_total_checks():
     invalid = _record(
         en="1.5",

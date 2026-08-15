@@ -34,11 +34,39 @@ UTF8_BOM = codecs.BOM_UTF8
 _REQUIRED_CSV_HEADERS = frozenset(
     {"STATE_CODE_001", "STRUCTURE_NUMBER_008", "RECORD_TYPE_005A"}
 )
+# Historical FHWA NBI download extracts include analysis/publication columns
+# that are not fields in the 445-byte submission record.  They remain part of
+# the immutable source record for evidence and replay, but are not projected as
+# NBI items by the converter.  Keep this list explicit so a misspelled or new
+# column still fails closed instead of being silently ignored.
+_FHWA_DOWNLOAD_SOURCE_COLUMNS = frozenset(
+    {
+        "DATE_LAST_UPDATE",
+        "TYPE_LAST_UPDATE",
+        "DEDUCT_CODE",
+        "REMARKS",
+        "PROGRAM_CODE",
+        "PROJ_NO",
+        "PROJ_SUFFIX",
+        "NBI_TYPE_OF_IMP",
+        "DTL_TYPE_OF_IMP",
+        "SPECIAL_CODE",
+        "STEP_CODE",
+        "STATUS_WITH_10YR_RULE",
+        "SUFFICIENCY_ASTERC",
+        "SUFFICIENCY_RATING",
+        "STATUS_NO_10YR_RULE",
+        "CAT10",
+        "CAT23",
+        "CAT29",
+    }
+)
 _SUPPORTED_ENCODINGS = frozenset({"ascii", "utf-8", "utf-8-sig", "iso8859-1", "cp1252"})
 
 
 class NBIFormat(str, Enum):
     FHWA_FIXED_445 = "fhwa_fixed_445"
+    FHWA_DOWNLOAD_CSV = "fhwa_download_csv"
     NAMED_CSV = "named_csv"
     LEGACY_POSITIONAL_CSV = "legacy_positional_csv"
 
@@ -59,6 +87,31 @@ class RecordType(str, Enum):
     OVER = "1"
     UNDER = "2"
     UNDER_ALTERNATE = "A"
+    UNDER_ALTERNATE_B = "B"
+    UNDER_ALTERNATE_C = "C"
+    UNDER_ALTERNATE_D = "D"
+    UNDER_ALTERNATE_E = "E"
+    UNDER_ALTERNATE_F = "F"
+    UNDER_ALTERNATE_G = "G"
+    UNDER_ALTERNATE_H = "H"
+    UNDER_ALTERNATE_I = "I"
+    UNDER_ALTERNATE_J = "J"
+    UNDER_ALTERNATE_K = "K"
+    UNDER_ALTERNATE_L = "L"
+    UNDER_ALTERNATE_M = "M"
+    UNDER_ALTERNATE_N = "N"
+    UNDER_ALTERNATE_O = "O"
+    UNDER_ALTERNATE_P = "P"
+    UNDER_ALTERNATE_Q = "Q"
+    UNDER_ALTERNATE_R = "R"
+    UNDER_ALTERNATE_S = "S"
+    UNDER_ALTERNATE_T = "T"
+    UNDER_ALTERNATE_U = "U"
+    UNDER_ALTERNATE_V = "V"
+    UNDER_ALTERNATE_W = "W"
+    UNDER_ALTERNATE_X = "X"
+    UNDER_ALTERNATE_Y = "Y"
+    UNDER_ALTERNATE_Z = "Z"
 
 
 class NBIParseError(ValueError):
@@ -849,7 +902,7 @@ def _parse_csv_records(
     header: Tuple[str, ...] = ()
     physical_cursor = 0
 
-    if input_format is NBIFormat.NAMED_CSV:
+    if input_format in {NBIFormat.FHWA_DOWNLOAD_CSV, NBIFormat.NAMED_CSV}:
         try:
             header_row = next(reader)
         except StopIteration as exc:
@@ -907,7 +960,17 @@ def _parse_csv_records(
                     byte_offset=raw_lines[0].byte_offset if raw_lines else 0,
                 )
             )
-        unknown = tuple(name for name in header if name not in LEGACY_POSITIONAL_COLUMNS)
+        allowed_source_columns = (
+            _FHWA_DOWNLOAD_SOURCE_COLUMNS
+            if input_format is NBIFormat.FHWA_DOWNLOAD_CSV
+            else frozenset()
+        )
+        unknown = tuple(
+            name
+            for name in header
+            if name not in LEGACY_POSITIONAL_COLUMNS
+            and name not in allowed_source_columns
+        )
         if unknown:
             issue = ParseIssue(
                 code="unknown_header_columns",
@@ -1015,6 +1078,7 @@ def _parse_csv_records(
             issue_codes=issue_codes,
             conformant=conformant,
             csv_extra_values=extras,
+            allow_two_digit_state=(input_format is NBIFormat.FHWA_DOWNLOAD_CSV),
         )
         if built is not None:
             records.append(built)
@@ -1038,11 +1102,14 @@ def _build_source_record(
     issue_codes: List[str],
     conformant: bool = True,
     csv_extra_values: Tuple[str, ...] = (),
+    allow_two_digit_state: bool = False,
 ) -> Optional[SourceRecord]:
     raw_digest = hashlib.sha256(raw).hexdigest()
     source_record_id = _source_record_id(raw_line, raw)
     try:
-        normalized_state = _normalize_state(raw_item_001)
+        normalized_state = _normalize_state(
+            raw_item_001, allow_two_digit=allow_two_digit_state
+        )
     except ValueError as exc:
         issue = ParseIssue(
             code="invalid_state_code",
@@ -1090,8 +1157,8 @@ def _build_source_record(
         issue = ParseIssue(
             code="unknown_record_type",
             message=(
-                f"record type {raw_record_type!r} is unsupported; only 1, 2, and A "
-                "are recognized"
+                f"record type {raw_record_type!r} is unsupported; only 1, 2, and "
+                "A through Z are recognized"
             ),
             severity=IssueSeverity.ERROR,
             line_number=raw_line.line_number,
@@ -1196,10 +1263,10 @@ def _group_records(
         type_twos = [
             record for record in unders if record.record_type is RecordType.UNDER
         ]
-        type_as = [
+        alphabetic_unders = [
             record
             for record in unders
-            if record.record_type is RecordType.UNDER_ALTERNATE
+            if record.record_type.value.isalpha()
         ]
         primary_under: Optional[SourceRecord] = None
         if type_twos:
@@ -1220,7 +1287,10 @@ def _group_records(
                         bridge_key=key,
                     )
                 )
-            if type_as and type_as[0].source_order < primary_under.source_order:
+            if (
+                alphabetic_unders
+                and alphabetic_unders[0].source_order < primary_under.source_order
+            ):
                 issues.append(
                     ParseIssue(
                         code="type2_preferred_over_earlier_type_a",
@@ -1236,14 +1306,18 @@ def _group_records(
                         bridge_key=key,
                     )
                 )
-        elif type_as:
-            primary_under = type_as[0]
+        elif alphabetic_unders:
+            primary_under = alphabetic_unders[0]
             issues.append(
                 ParseIssue(
-                    code="type_a_primary_under_fallback",
+                    code=(
+                        "type_a_primary_under_fallback"
+                        if primary_under.record_type is RecordType.UNDER_ALTERNATE
+                        else "alphabetic_primary_under_fallback"
+                    ),
                     message=(
-                        "no Type 2 under record exists; earliest Type A is selected and "
-                        "requires review"
+                        "no Type 2 under record exists; the earliest alphabetic "
+                        "under record is selected and requires review"
                     ),
                     severity=IssueSeverity.REVIEW,
                     line_number=primary_under.line_number,
@@ -1276,14 +1350,22 @@ def _group_records(
     return groups, accepted, quarantined, issues
 
 
-def _normalize_state(raw_state: str) -> str:
+def _normalize_state(raw_state: str, *, allow_two_digit: bool = False) -> str:
     value = raw_state.strip()
-    if len(value) != 3 or not value.isdigit():
-        raise ValueError(
-            f"legacy Item 1 {raw_state!r} must contain exactly three decimal digits"
+    required_lengths = {2, 3} if allow_two_digit else {3}
+    if len(value) not in required_lengths or not value.isdigit():
+        representation = (
+            "two-digit State FIPS or three-digit legacy Item 1"
+            if allow_two_digit
+            else "three-digit legacy Item 1"
         )
-    # Legacy Item 1 is SSF: two-digit State FIPS plus a one-digit FHWA region.
-    # BL01 transition drops the region digit and removes any leading zero.
+        raise ValueError(
+            f"state value {raw_state!r} must contain exactly the {representation}"
+        )
+    # Fixed-width legacy Item 1 is SSF: two-digit State FIPS plus a one-digit
+    # FHWA region.  FHWA download CSVs expose only the two-digit State FIPS.
+    # Both representations normalize to the same state identity while their
+    # exact source text remains in raw_item_001 and fields.
     state_fips = int(value[:2])
     if state_fips < 1 or state_fips > 99:
         raise ValueError(
