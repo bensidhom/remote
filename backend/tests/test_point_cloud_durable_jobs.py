@@ -119,23 +119,31 @@ class FakeApi:
             ],
             "clearance": {
                 "feature_measurement": {
-                    "status": "review_required",
-                    "reason": "lane_shoulder_and_station_review_required",
+                    "status": "success",
+                    "reason": None,
                     "feature_binding_version": "feature-v1",
                     "clearance_profile_version": "clearance-v1",
                     "bindings": [{"detected_id": "h02-1", "feature_id": "feature:H02:2", "status": "bound"}],
+                    "measurements": [
+                        {
+                            "detected_id": "h02-1",
+                            "feature_id": "feature:H02:2",
+                            "bh12_raw_m": 5.2,
+                            "bh13_raw_m": 4.9,
+                        }
+                    ],
                 }
             },
         }
 
     def _save_processed(self, *args, **kwargs):
         self.save_calls += 1
-        assert kwargs["publish_pointer"] is False
+        assert kwargs["publish_pointer"] is True
         return {
             "source_generation": "pcv2-7-" + "a" * 32 + "-" + "b" * 12,
             "manifest_sha256": MANIFEST_SHA,
             "artifact_sha256": {"npz": "4" * 64, "ply": "5" * 64},
-            "published_to_legacy_pointer": False,
+            "published_to_legacy_pointer": True,
         }
 
 
@@ -250,7 +258,7 @@ def test_enqueue_is_idempotent_and_changed_payload_conflicts(durable_fixture):
     assert getattr(exc.value, "code", "") == "idempotency_payload_conflict"
 
 
-def test_worker_persists_candidate_and_evidence_but_does_not_publish(durable_fixture):
+def test_worker_persists_and_saves_automatic_result_without_manual_review(durable_fixture):
     database, jobs, fake = durable_fixture
     queued, run, _ = _enqueue(database, jobs)
     claimed = claim_next_job(jobs, worker_id="worker-1", allowed_operations=(point_cloud_jobs.POINT_CLOUD_JOB_OPERATION,), lease_seconds=60)
@@ -265,6 +273,9 @@ def test_worker_persists_candidate_and_evidence_but_does_not_publish(durable_fix
     assert stored.measurement_count == 1
     assert stored.source_count == 2
     assert stored.published_review_id is None
+    assert result["review_required"] is False
+    assert result["saved"] is True
+    assert stored.progress["publication_status"] == "saved_automatic_result"
     assert fake.analyze_calls == 1 and fake.save_calls == 1
 
 

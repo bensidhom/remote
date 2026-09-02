@@ -24,6 +24,7 @@ from app.services.point_cloud.features import (
 from app.services.point_cloud.snbi_projection import (
     SnbiClearanceProjectionError,
     project_accepted_highway_clearance,
+    project_calculated_highway_clearance,
     round_down_metres_to_tenth_foot,
 )
 
@@ -250,7 +251,7 @@ def test_railroad_and_navigation_use_separate_fail_closed_products():
         timestamp_confirmed=False,
     )
 
-    assert rail.product == "BRR02" and rail.status == "review_required"
+    assert rail.product == "BRR02" and rail.status == "not_measurable"
     assert water.product == "BN02" and water.status == "not_measurable"
     assert "controlling_datum_required" in water.reason
 
@@ -274,23 +275,83 @@ def test_snbi_projection_is_explicit_and_rounds_down_only_at_acceptance():
     assert projection.bh12 == "16.4"
     assert projection.bh13 == "12.1"
     assert projection.submission_ready is False
+    calculated = project_calculated_highway_clearance(result)
+    assert calculated.bh12 == "16.4"
+    assert calculated.bh13 == "12.1"
+    assert calculated.official is False
     assert str(round_down_metres_to_tenth_foot(30.48)) == "99.9"
 
 
-def test_active_geometry_requires_lane_and_station_review_before_bh_values():
+def test_active_geometry_automatically_materializes_bh12_and_bh13():
+    def plane(plane_id, station, edge, adjustment=0.0):
+        samples = []
+        for index, offset in enumerate((0.0, 1.0, 2.0, 3.0, 4.0), start=1):
+            clearance = 4.5 + 0.1 * offset + adjustment
+            samples.append(
+                {
+                    "sample_id": f"cell-{plane_id}-{index}",
+                    "offset": offset,
+                    "road_z": 0.0,
+                    "soffit_z": clearance,
+                    "clearance": clearance,
+                }
+            )
+        return {
+            "plane_id": plane_id,
+            "station_offset": station,
+            "station_edge": edge,
+            "samples": samples,
+        }
+
+    geometry_result = {
+        "roadways": [
+            {
+                "road_point_count": 400,
+                "soffit_point_count": 350,
+                "measurement_planes": [
+                    plane("plane-leading", 0.0, "leading"),
+                    plane("plane-trailing", 20.0, "trailing", -0.2),
+                ],
+            }
+        ]
+    }
     workflow = build_feature_measurement_workflow(
         feature_rows=_document()["Features"],
-        geometry_result={
-            "roadways": [
-                {"road_point_count": 400, "soffit_point_count": 350}
-            ]
-        },
+        geometry_result=geometry_result,
         under_feature="highway",
     )
 
-    assert workflow["status"] == "review_required"
-    assert workflow["reason"] == "lane_shoulder_and_station_review_required"
+    assert workflow["status"] == "success"
+    assert workflow["reason"] is None
     assert workflow["bindings"][0]["feature_id"] == "H02"
-    assert workflow["brm_graph_ready"] is False
-    assert workflow["bh12_ready"] is False
-    assert workflow["bh13_ready"] is False
+    assert workflow["brm_graph_ready"] is True
+    assert workflow["bh12_ready"] is True
+    assert workflow["bh13_ready"] is True
+    measurement = workflow["primary_measurement"]
+    assert measurement["bh13_raw_m"] == pytest.approx(4.3)
+    assert measurement["bh12_raw_m"] >= measurement["bh13_raw_m"]
+    assert measurement["snbi_formatted"]["official"] is False
+    assert measurement["automatic_resolution"]["lane_count"] == 1
+    assert measurement["brm_graph"]["stations"][0]["station_edge"] == "leading"
+    assert measurement["brm_graph"]["stations"][-1]["station_edge"] == "trailing"
+    assert measurement["retained_plane_roles"]["plane-leading"] == ["leading"]
+    assert "trailing" in measurement["retained_plane_roles"]["plane-trailing"]
+    assert all(
+        sample["used_by_result"]
+        for plane in geometry_result["roadways"][0]["measurement_planes"]
+        for sample in plane["samples"]
+    )
+
+
+def test_automatic_workflow_omits_numeric_result_for_ambiguous_features():
+    document = _document()
+    document["Features"].append({"BF01": "H03", "BF02": "B", "BF03": "Ramp"})
+    workflow = build_feature_measurement_workflow(
+        feature_rows=document["Features"],
+        geometry_result={"roadways": [{"road_point_count": 10, "soffit_point_count": 10}]},
+        under_feature="highway",
+    )
+
+    assert workflow["status"] == "not_measurable"
+    assert workflow["measurements"] == []
+    assert workflow["automatic"] is True

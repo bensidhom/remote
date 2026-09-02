@@ -267,8 +267,10 @@ def _inventory_sql(
     else:
         inventory = f"""
             SELECT {bridge_projection},
-                   NULL AS snapshot_revision_id, NULL AS revision_number,
-                   NULL AS canonical_sha256, 'legacy_projection' AS identity_source
+                   'loaded-inventory:' || CAST(b.state_code AS TEXT) || ':' ||
+                   b.bridge_number || ':' || CAST(b.data_year AS TEXT) AS snapshot_revision_id,
+                   1 AS revision_number,
+                   NULL AS canonical_sha256, 'loaded_inventory' AS identity_source
             FROM bridges b WHERE b.state_code=?
         """
 
@@ -299,10 +301,9 @@ def _load_inventory_rows(
     state_code: int,
     year: int | None,
 ) -> tuple[Mapping[str, Any], ...]:
-    has_revisions = all(
-        _table_exists(connection, table)
-        for table in ("published_snapshots", "snapshot_revisions")
-    )
+    # Exact yearly inventory rows are authoritative. Publication pointers are
+    # deliberately outside the active map-resolution path.
+    has_revisions = False
     sql = _inventory_sql(connection, has_revisions=has_revisions)
     prefix: list[Any]
     if has_revisions:
@@ -446,10 +447,7 @@ def _candidate_payload(
                 "published_identity_schema_mismatch",
                 "The published bridge identity schema changed during map resolution.",
             )
-    published_revision = (
-        str(identity_payload["snapshot_revision_id"]) if identity_payload is not None else None
-    )
-    inventory_revision = published_revision
+    inventory_revision = str(row.get("snapshot_revision_id") or "") or None
     carried = _normal_form(row.get("carried_name"))
     below = _normal_form(row.get("below_name"))
     display_name = _normal_form(row.get("bridge_name"))
@@ -462,12 +460,10 @@ def _candidate_payload(
     return {
         "bridge_id": bridge_id,
         "snapshot_id": snapshot_id,
-        "snapshot_revision_id": published_revision,
+        "snapshot_revision_id": inventory_revision,
         "inventory_revision": inventory_revision,
-        "identity_source": "published" if identity_payload is not None else "legacy_projection",
-        "identity_status": (
-            "published" if identity_payload is not None else "legacy_projection_unversioned"
-        ),
+        "identity_source": "loaded_inventory",
+        "identity_status": "exact_year_loaded_inventory",
         "revision_number": (
             int(identity_payload["revision_number"]) if identity_payload is not None else None
         ),

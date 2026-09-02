@@ -200,7 +200,7 @@ def test_success_is_server_scoped_audited_and_never_uses_legacy_executor(
     assert "Bridge A" not in serialized
 
 
-def test_latest_scope_is_per_bridge_not_global_year(query_database):
+def test_latest_scope_is_one_global_inventory_year(query_database):
     request = _request(
         QueryScope(
             workspace_id=WORKSPACE,
@@ -216,8 +216,7 @@ def test_latest_scope_is_per_bridge_not_global_year(query_database):
             "FROM v_published_bridge_snapshots ORDER BY bridge_number"
         ),
     )
-    assert evidence.rows == (("A", 2025), ("B", 2023))
-    assert all(row[0] != "PRIVATE" for row in evidence.rows)
+    assert evidence.rows == (("PRIVATE", 2026),)
 
 
 def test_one_typed_retry_receives_safe_feedback_and_succeeds(query_database):
@@ -484,7 +483,7 @@ def test_typed_plan_is_primary_scope_safe_and_audited(query_database, monkeypatc
     assert request.question not in repr(events)
 
 
-def test_typed_plan_latest_is_per_bridge_and_hides_other_workspace(query_database):
+def test_typed_plan_latest_is_the_global_loaded_inventory_year(query_database):
     request = _request(
         QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest")
     )
@@ -500,8 +499,7 @@ def test_typed_plan_latest_is_per_bridge_and_hides_other_workspace(query_databas
             "limit": 20,
         },
     )
-    assert evidence.rows == (("A", 2025), ("B", 2023))
-    assert all(row[0] != "PRIVATE" for row in evidence.rows)
+    assert evidence.rows == (("PRIVATE", 2026),)
 
 
 def test_typed_plan_retries_only_with_code_only_feedback(query_database):
@@ -615,8 +613,39 @@ def test_plan_context_has_all_snbi_fields_metrics_and_no_executable_sql():
     assert payload["fhwa_informational_enrichment"]["runtime_network_required"] is False
     assert "snbi_informational_enrichment" not in payload
     assert payload["plan_contract"]["time_scope"]["shape"] == {"mode": "latest"}
-    assert "workspace_id" in payload["plan_contract"]["forbidden_fields"]
-    assert "sql" in payload["plan_contract"]["forbidden_fields"]
+    county_mapping = payload["reference_mappings"]["new_jersey_counties"]
+    assert {row["county_code"]: row["county_name"] for row in county_mapping} == {
+        0: "Unknown",
+        1: "Atlantic",
+        3: "Bergen",
+        5: "Burlington",
+        7: "Camden",
+        9: "Cape May",
+        11: "Cumberland",
+        13: "Essex",
+        15: "Gloucester",
+        17: "Hudson",
+        19: "Hunterdon",
+        21: "Mercer",
+        23: "Middlesex",
+        25: "Monmouth",
+        27: "Morris",
+        29: "Ocean",
+        31: "Passaic",
+        33: "Salem",
+        35: "Somerset",
+        37: "Sussex",
+        39: "Union",
+        41: "Warren",
+    }
+    assert "v_current_county_bridge_inventory" in payload["reference_mappings"][
+        "planning_rule"
+    ]
+    assert "county_name" in payload["reference_mappings"]["planning_rule"]
+    assert "workspace_id" in payload["plan_contract"]["forbidden_root_fields"]
+    assert "sql" in payload["plan_contract"]["forbidden_root_fields"]
+    assert "bridge_number" in payload["plan_contract"]["server_scope_filter_fields"]
+    assert "may be selected" in payload["plan_contract"]["selection_rule"]
     assert "physical_table" not in context
     assert "physical_column" not in context
     column_format = payload["semantic_catalog"]["column_format"]

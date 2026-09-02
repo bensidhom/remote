@@ -417,6 +417,18 @@ class TestFailFastAtomicBehavior:
 
 
 class TestDeterministicVisibleExport:
+    def test_export_restores_integer_like_code_values_from_real_columns(self, projection_db):
+        bridge = _complete_bridge("PR4-CODE-NORMALIZATION")
+        bridge.update({"BC01": "6", "BC02": "5", "BC03": "7", "BC04": "N"})
+        _load_one(projection_db, bridge)
+
+        exported = _export_one(projection_db, "PR4-CODE-NORMALIZATION")
+
+        assert exported["BC01"] == "6"
+        assert exported["BC02"] == "5"
+        assert exported["BC03"] == "7"
+        assert exported["BC04"] == "N"
+
     def test_export_is_stably_ordered_and_byte_deterministic(self, projection_db):
         later = _complete_bridge("PR4-0002")
         earlier = _complete_bridge("PR4-0001")

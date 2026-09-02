@@ -34,20 +34,26 @@ class InterpretationDecision(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class InterpretationOption:
-    """One stable, user-selectable clarification choice."""
+    """One stable, user-selectable recovery or clarification choice."""
 
     option_id: str
     label: str
     value: str
+    suggested_question: str | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", self.option_id):
             raise ValueError("option_id must be a stable lowercase identifier")
         if not self.label.strip() or not self.value.strip():
             raise ValueError("option label and value are required")
+        if self.suggested_question is not None and not self.suggested_question.strip():
+            raise ValueError("suggested_question must be non-blank when supplied")
 
     def to_dict(self) -> dict[str, str]:
-        return {"id": self.option_id, "label": self.label, "value": self.value}
+        payload = {"id": self.option_id, "label": self.label, "value": self.value}
+        if self.suggested_question is not None:
+            payload["suggested_question"] = self.suggested_question
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +122,8 @@ class QueryInterpretation:
             raise ValueError("a proceed result cannot contain clarification options")
         if self.decision is InterpretationDecision.CLARIFICATION and len(self.options) < 2:
             raise ValueError("a clarification result needs at least two choices")
-        if self.decision is InterpretationDecision.ABSTENTION and self.options:
-            raise ValueError("an abstention result cannot contain clarification options")
+        if self.decision is InterpretationDecision.ABSTENTION and len(self.options) == 1:
+            raise ValueError("an abstention should offer zero or at least two next steps")
 
     @property
     def should_query(self) -> bool:
@@ -284,12 +290,19 @@ _CONDITION_QUALIFIED_RE = re.compile(
     r"\b(?:deck|superstructure|substructure|culvert|bearing|joint|railing|"
     r"channel|scour|NSTM|underwater|element|component)\b|"
     r"\bBC(?:0[1-9]|1[0-5])\b|\b(?:controlling|lowest|operational)\b|"
-    r"\b(?:Good|Fair|Poor)\b|\bcondition\s+(?:class|classification)\b",
+    r"\b(?:Good|Fair|Poor)\b|\bcondition\s+(?:class|classification)\b|"
+    r"\bfederal\s+(?:bridge[- ]condition|condition)\s+(?:performance\s+)?measure\b",
     re.IGNORECASE,
 )
 _GREETING_RE = re.compile(
     r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))"
     r"(?:\s+(?:bridgette|there))?[!.?]*$",
+    re.IGNORECASE,
+)
+_MULTIPLE_COUNTY_RESOLUTION_RE = re.compile(
+    r"\b(?:separate county groups?|group(?: the)? results? by county|"
+    r"compare(?: them)? separately|combined set|combine(?: the)? counties|"
+    r"treat(?: them)? as (?:one )?combined)\b",
     re.IGNORECASE,
 )
 
@@ -366,7 +379,20 @@ def _county_matches(question: str) -> tuple[CountyReference, ...]:
                 positions.append(plain.start())
         if positions:
             matches.append((min(positions), county))
-    return tuple(county for _, county in sorted(matches, key=lambda item: (item[0], item[1].county_fips)))
+    ordered = tuple(
+        county
+        for _, county in sorted(matches, key=lambda item: (item[0], item[1].county_fips))
+    )
+    explicit_only = tuple(
+        county
+        for county in ordered
+        if re.search(
+            rf"\b{re.escape(county.name)}\s+County\s+only\b",
+            question,
+            re.IGNORECASE,
+        )
+    )
+    return explicit_only if len(explicit_only) == 1 else ordered
 
 
 def _unknown_county(question: str, known: tuple[CountyReference, ...]) -> str | None:
@@ -415,7 +441,25 @@ def _bridge_reference(question: str) -> str | None:
         re.IGNORECASE,
     )
     if identifier is not None:
-        return identifier.group("identifier")[:80]
+        candidate = identifier.group("identifier")
+        # Natural phrases such as "including bridge number and owner" are not
+        # bridge identities. The identifier regex is intentionally permissive
+        # for agency IDs, so reject common continuation words after matching.
+        if candidate.casefold() not in {
+            "and",
+            "by",
+            "for",
+            "from",
+            "in",
+            "name",
+            "of",
+            "owner",
+            "status",
+            "to",
+            "with",
+            "year",
+        }:
+            return candidate[:80]
 
     named = re.search(
         r"\b(?:bridge|structure)\s+(?:named|called)\s+"
@@ -483,6 +527,7 @@ def interpret_bridge_query(
     *,
     bridge_number: str | None = None,
     state_code: int | str = 34,
+    time_mode: str | object | None = None,
     dictionary: SnbiDictionary = DEFAULT_SNBI_DICTIONARY,
     catalog: SemanticCatalog | None = None,
     metrics: MetricRegistry = DEFAULT_METRIC_REGISTRY,
@@ -522,13 +567,19 @@ def interpret_bridge_query(
     counties = _county_matches(text) if is_new_jersey else ()
     unknown_county = _unknown_county(text, counties) if is_new_jersey else None
     unresolved_bridge = None if str(bridge_number or "").strip() else _bridge_reference(text)
+    multiple_counties_ambiguous = bool(
+        len(counties) > 1 and not _MULTIPLE_COUNTY_RESOLUTION_RE.search(text)
+    )
 
     unsupported = next(
         (rule for rule in _UNSUPPORTED_RULES if rule.pattern.search(text)),
         None,
     )
+    selected_time_mode = str(getattr(time_mode, "value", time_mode) or "").casefold()
     current_ambiguous = bool(
-        _CURRENT_RE.search(text) and not _CURRENT_QUALIFIED_RE.search(text)
+        selected_time_mode != "latest"
+        and _CURRENT_RE.search(text)
+        and not _CURRENT_QUALIFIED_RE.search(text)
     )
     nhs_ambiguous = bool(_NHS_RE.search(text) and not _NHS_QUALIFIED_RE.search(text))
     condition_ambiguous = bool(
@@ -541,7 +592,7 @@ def interpret_bridge_query(
         issue_codes.append("unsupported_fact")
     if unknown_county is not None:
         issue_codes.append("unknown_nj_county")
-    if len(counties) > 1:
+    if multiple_counties_ambiguous:
         issue_codes.append("multiple_nj_counties")
     if unresolved_bridge is not None:
         issue_codes.append("unresolved_bridge_identity")
@@ -567,7 +618,30 @@ def interpret_bridge_query(
             message=(
                 "The reviewed SNBI dictionary and semantic query surface do not "
                 f"represent the requested {unsupported.requested_fact}. Nearby "
-                "fields are listed only for orientation and were not substituted."
+                "fields are listed only for orientation and were not substituted. "
+                "Choose a supported SNBI alternative below, or use a trusted "
+                "external source for the original fact."
+            ),
+            options=(
+                InterpretationOption(
+                    "use_supported_snbi_fields",
+                    "Try a supported inventory example",
+                    "use_nearby_supported_fields",
+                    (
+                        "List 10 bridge numbers with owner, county code, and data "
+                        "year from the latest published inventory."
+                    ),
+                ),
+                InterpretationOption(
+                    "ask_supported_inventory_question",
+                    "Review nearby SNBI fields",
+                    "ask_supported_inventory_question",
+                    (
+                        "Show the latest published values for these reviewed SNBI "
+                        "fields without treating them as a proxy for the original "
+                        f"request: {', '.join(field.field_id for field in nearby)}."
+                    ),
+                ),
             ),
             normalized_counties=counties,
             unresolved_bridge_reference=unresolved_bridge,
@@ -589,11 +663,16 @@ def interpret_bridge_query(
                     "choose_nj_county",
                     "Choose a New Jersey county",
                     "provide_nj_county_name",
+                    (
+                        f"{text}\n\nAdditional context: Replace the unknown county "
+                        "with [type one of New Jersey's 21 county names]."
+                    ),
                 ),
                 InterpretationOption(
                     "remove_county_filter",
                     "Do not filter by county",
                     "remove_county_filter",
+                    "Count bridges in the latest published New Jersey inventory.",
                 ),
             ),
             counties=counties,
@@ -602,12 +681,13 @@ def interpret_bridge_query(
             unresolved_bridge_reference=unresolved_bridge,
         )
 
-    if len(counties) > 1:
+    if multiple_counties_ambiguous:
         county_options = tuple(
             InterpretationOption(
                 f"county_{county.county_fips}_only",
                 f"{county.name} County only",
                 f"county_fips={county.county_fips}",
+                f"{text}\n\nAdditional context: Use {county.name} County only.",
             )
             for county in counties
         )
@@ -623,11 +703,13 @@ def interpret_bridge_query(
                     "counties_separate",
                     "Compare as separate county groups",
                     "group_by_county",
+                    f"{text}\n\nAdditional context: Group the results by county.",
                 ),
                 InterpretationOption(
                     "counties_combined",
                     "Treat as one combined set",
                     "combine_counties",
+                    f"{text}\n\nAdditional context: Treat them as one combined set.",
                 ),
             ),
             counties=counties,
@@ -647,11 +729,13 @@ def interpret_bridge_query(
                     "provide_bridge_number",
                     "Provide the exact agency bridge number",
                     "provide_bridge_number",
+                    "Show bridge [type the exact agency bridge number] on the map.",
                 ),
                 InterpretationOption(
                     "select_bridge_match",
                     "Search and select a bridge by name and location",
                     "resolve_bridge_name",
+                    f"Show {unresolved_bridge} on the map.",
                 ),
             ),
             counties=counties,
@@ -671,11 +755,16 @@ def interpret_bridge_query(
                     "latest_published_inventory",
                     "Latest published inventory per bridge",
                     "latest_published_inventory",
+                    (
+                        f"{text}\n\nAdditional context: Use the latest published "
+                        "inventory snapshot selected independently for each bridge."
+                    ),
                 ),
                 InterpretationOption(
                     "current_calendar_time",
                     "Current calendar date or year",
                     "current_calendar_time",
+                    f"{text}\n\nAdditional context: Use the current calendar date or year.",
                 ),
             ),
             counties=counties,
@@ -695,16 +784,19 @@ def interpret_bridge_query(
                     "bridge_inventory_nhs",
                     "Bridge-level inventory NHS designation",
                     "bridge_inventory_nhs",
+                    f"{text}\n\nAdditional context: Use the bridge-level inventory designation for NHS.",
                 ),
                 InterpretationOption(
                     "carried_feature_nhs",
                     "Carried-highway feature NHS (SNBI BH03)",
                     "carried_feature_nhs",
+                    f"{text}\n\nAdditional context: Use carried-highway feature NHS (SNBI BH03).",
                 ),
                 InterpretationOption(
                     "federal_performance_nhs",
                     "Federal performance-measure population",
                     "federal_performance_nhs",
+                    f"{text}\n\nAdditional context: Use the federal performance NHS population.",
                 ),
             ),
             counties=counties,
@@ -724,16 +816,28 @@ def interpret_bridge_query(
                     "controlling_operational_condition",
                     "Controlling operational Good/Fair/Poor class",
                     "controlling_operational_condition",
+                    (
+                        f"{text}\n\nAdditional context: Use the controlling operational "
+                        "Good/Fair/Poor condition class."
+                    ),
                 ),
                 InterpretationOption(
                     "component_condition",
                     "A specific component rating",
                     "specify_condition_component",
+                    (
+                        f"{text}\n\nAdditional context: Use the [deck, superstructure, "
+                        "substructure, or culvert] component rating."
+                    ),
                 ),
                 InterpretationOption(
                     "federal_condition_measure",
                     "Federal bridge-condition performance measure",
                     "federal_condition_measure",
+                    (
+                        f"{text}\n\nAdditional context: Use the federal bridge-condition "
+                        "performance measure."
+                    ),
                 ),
             ),
             counties=counties,

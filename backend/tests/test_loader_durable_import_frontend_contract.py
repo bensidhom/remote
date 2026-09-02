@@ -8,7 +8,7 @@ def _loader() -> str:
     return (ROOT / "frontend/src/pages/Loader.tsx").read_text(encoding="utf-8")
 
 
-def test_loader_uses_owner_scoped_durable_two_phase_import_contract():
+def test_loader_uses_owner_scoped_validate_then_import_contract():
     source = _loader()
 
     assert "/api/revisions/stage-upload" not in source
@@ -37,8 +37,11 @@ def test_loader_uses_owner_scoped_durable_two_phase_import_contract():
     assert "'Idempotency-Key': idempotencyKey" in source
     assert "'X-Request-ID': newOperationId()" in source
     assert "expected_data_generation: preflight.data_generation" in source
-    assert "Commit to staging only" in source
-    assert "It does not publish or activate bridge data." in source
+    assert "Validate file" in source
+    assert "Import ${(importJob.preflight.bridges?.length ?? 0).toLocaleString()} record(s)" in source
+    assert "Publish revision" not in source
+    assert "Published data years" not in source
+    assert "Advanced options" in source
 
 
 def test_loader_polls_cancellably_resumes_and_invalidates_stale_preflight():
@@ -60,18 +63,18 @@ def test_loader_renders_authoritative_inventory_evidence_before_commit():
     source = _loader()
 
     for label in (
-        "Server-authoritative preflight",
-        "Field-loss check:",
+        "File is ready to import",
+        "Field compatibility:",
         "Per-bridge review",
         "action:",
         "eligibility:",
         "Validation issues",
         "Field diff",
         "Embedded manifest conflicts",
+        "Advanced validation details",
     ):
         assert label in source
     assert "importJob.preflight.valid" in source
     assert "preflightStale" in source
     assert "The untouched file goes to the" in source
     assert "formData.append('file', jsonFile, jsonFile.name)" in source
-

@@ -1,8 +1,9 @@
-"""Read-only, publication-scoped bridge analytical projection.
+"""Read-only analytical projection over exact yearly inventory snapshots.
 
-The repository deliberately joins every relational row through
-``published_snapshots``.  An unversioned projection row is never sufficient
-evidence for forecasting, LCCA, or KPIs.
+The authoritative identity is ``(state_code, bridge_number, data_year)`` in
+``snbi_bridges.db``.  Forecasting, LCCA, history, and KPI consumers therefore
+read the same rows as the rest of the application and do not require a second
+publication-pointer table.
 """
 
 from __future__ import annotations
@@ -176,6 +177,24 @@ def _revision_set_sha256(revision_id: str, canonical_sha256: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _loaded_snapshot_revision_id(state_code: int, bridge_number: str, year: int) -> str:
+    return f"loaded-inventory:{int(state_code)}:{str(bridge_number)}:{int(year)}"
+
+
+def _loaded_snapshot_sha256(row: sqlite3.Row) -> str:
+    excluded = {"data_generation", "schema_generation"}
+    payload = {key: row[key] for key in row.keys() if key not in excluded}
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _condition(row: sqlite3.Row) -> ConditionEvidence:
     result = compute_controlling_condition(
         bc01=row["deck_condition_rating"],
@@ -219,48 +238,38 @@ def _load_children(
     dict[int, list[sqlite3.Row]],
     dict[int, list[sqlite3.Row]],
 ]:
-    year_clause = " AND ps.data_year<=?" if through_year is not None else ""
+    del workspace_id  # Workspace authorization is verified by the parent query.
+    year_clause = " AND data_year<=?" if through_year is not None else ""
     common_params: tuple[object, ...] = (
-        workspace_id,
         state_code,
         bridge_number,
         *((through_year,) if through_year is not None else ()),
     )
     features = connection.execute(
-        "SELECT f.* FROM published_snapshots ps JOIN features f "
-        "ON f.state_code=ps.state_code AND f.bridge_number=ps.bridge_number "
-        "AND f.data_year=ps.data_year "
-        "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.bridge_number=?"
+        "SELECT * FROM features WHERE state_code=? AND bridge_number=?"
         + year_clause
-        + " AND f.feature_type LIKE 'H%' AND f.feature_location='C' "
-        "ORDER BY f.data_year, f.feature_type, f.id",
+        + " AND feature_type LIKE 'H%' AND feature_location='C' "
+        "ORDER BY data_year, feature_type, id",
         common_params,
     ).fetchall()
     spans = connection.execute(
-        "SELECT child.* FROM published_snapshots ps JOIN span_sets child "
-        "ON child.state_code=ps.state_code AND child.bridge_number=ps.bridge_number "
-        "AND child.data_year=ps.data_year "
-        "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.bridge_number=?"
+        "SELECT * FROM span_sets WHERE state_code=? AND bridge_number=?"
         + year_clause
-        + " ORDER BY child.data_year, child.span_configuration_designation, child.id",
+        + " ORDER BY data_year, span_configuration_designation, id",
         common_params,
     ).fetchall()
     substructures = connection.execute(
-        "SELECT child.* FROM published_snapshots ps JOIN substructure_sets child "
-        "ON child.state_code=ps.state_code AND child.bridge_number=ps.bridge_number "
-        "AND child.data_year=ps.data_year "
-        "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.bridge_number=?"
+        "SELECT * FROM substructure_sets WHERE state_code=? AND bridge_number=?"
         + year_clause
-        + " ORDER BY child.data_year, child.substructure_configuration_designation, child.id",
+        + " ORDER BY data_year, substructure_configuration_designation, id",
         common_params,
     ).fetchall()
     works = connection.execute(
-        "SELECT child.*, ps.snapshot_revision_id FROM published_snapshots ps "
-        "JOIN works child ON child.state_code=ps.state_code "
-        "AND child.bridge_number=ps.bridge_number AND child.data_year=ps.data_year "
-        "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.bridge_number=?"
+        "SELECT *, 'loaded-inventory:' || CAST(state_code AS TEXT) || ':' || "
+        "bridge_number || ':' || CAST(data_year AS TEXT) AS snapshot_revision_id "
+        "FROM works WHERE state_code=? AND bridge_number=?"
         + year_clause
-        + " ORDER BY child.data_year, child.year_work_performed, child.work_performed, child.id",
+        + " ORDER BY data_year, year_work_performed, work_performed, id",
         common_params,
     ).fetchall()
     return (
@@ -372,7 +381,7 @@ def load_bridge_analysis_history(
     bridge_number: str,
     through_year: int | None = None,
 ) -> BridgeAnalysisHistory:
-    """Load one bridge's exact published annual history without mutating SQLite."""
+    """Load one bridge's exact annual inventory history without mutating SQLite."""
 
     workspace = str(workspace_id).strip()
     bridge = str(bridge_number).strip()
@@ -382,7 +391,7 @@ def load_bridge_analysis_history(
     cutoff = int(through_year) if through_year is not None else None
     connection = _readonly_connection(database_path)
     try:
-        year_clause = " AND ps.data_year<=?" if cutoff is not None else ""
+        year_clause = " AND b.data_year<=?" if cutoff is not None else ""
         params: tuple[object, ...] = (
             workspace,
             state,
@@ -390,22 +399,15 @@ def load_bridge_analysis_history(
             *((cutoff,) if cutoff is not None else ()),
         )
         rows = connection.execute(
-            "SELECT ps.snapshot_revision_id, ps.published_at, "
-            "sr.canonical_sha256, ws.data_generation, ws.schema_generation, b.* "
-            "FROM published_snapshots ps "
-            "JOIN snapshot_revisions sr ON sr.workspace_id=ps.workspace_id "
-            "AND sr.id=ps.snapshot_revision_id AND sr.state_code=ps.state_code "
-            "AND sr.bridge_number=ps.bridge_number AND sr.data_year=ps.data_year "
-            "JOIN workspace_state ws ON ws.workspace_id=ps.workspace_id "
-            "JOIN bridges b ON b.state_code=ps.state_code "
-            "AND b.bridge_number=ps.bridge_number AND b.data_year=ps.data_year "
-            "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.bridge_number=?"
+            "SELECT ws.data_generation, ws.schema_generation, b.* "
+            "FROM workspace_state ws CROSS JOIN bridges b "
+            "WHERE ws.workspace_id=? AND b.state_code=? AND b.bridge_number=?"
             + year_clause
-            + " ORDER BY ps.data_year, ps.snapshot_revision_id",
+            + " ORDER BY b.data_year",
             params,
         ).fetchall()
         if not rows:
-            raise AnalyticalProjectionError("published bridge history was not found")
+            raise AnalyticalProjectionError("loaded bridge history was not found")
         features_by_year, spans_by_year, subs_by_year, works_by_year = _load_children(
             connection,
             workspace_id=workspace,
@@ -423,8 +425,8 @@ def load_bridge_analysis_history(
     snapshots: list[BridgeAnalysisSnapshot] = []
     for row in rows:
         year = int(row["data_year"])
-        revision_id = str(row["snapshot_revision_id"])
-        canonical_sha = str(row["canonical_sha256"]).lower()
+        revision_id = _loaded_snapshot_revision_id(state, bridge, year)
+        canonical_sha = _loaded_snapshot_sha256(row)
         year_built = _optional_int(row["year_built"])
         snapshots.append(
             BridgeAnalysisSnapshot(
@@ -439,7 +441,7 @@ def load_bridge_analysis_history(
                 ),
                 snapshot_revision_id=revision_id,
                 canonical_sha256=canonical_sha,
-                published_at=str(row["published_at"]),
+                published_at="loaded-inventory",
                 state_code=state,
                 bridge_number=bridge,
                 data_year=year,
@@ -497,7 +499,7 @@ def load_bridge_analysis_history(
     )
 
 
-def list_published_bridge_keys(
+def list_loaded_bridge_keys(
     *,
     database_path: str | os.PathLike[str],
     workspace_id: str,
@@ -506,7 +508,7 @@ def list_published_bridge_keys(
     minimum_observation_years: int = 2,
     limit: int = 50_000,
 ) -> tuple[str, ...]:
-    """List bounded bridge IDs that have enough exact published observations."""
+    """List bounded bridge IDs that have enough exact inventory observations."""
 
     workspace = str(workspace_id).strip()
     state = int(state_code)
@@ -514,31 +516,35 @@ def list_published_bridge_keys(
     minimum = int(minimum_observation_years)
     maximum = int(limit)
     if not workspace or minimum < 1 or maximum < 1 or maximum > 50_000:
-        raise AnalyticalProjectionError("published bridge-key request is invalid")
+        raise AnalyticalProjectionError("loaded bridge-key request is invalid")
     connection = _readonly_connection(database_path)
     try:
         year_clause = " AND data_year<=?" if cutoff is not None else ""
         parameters: tuple[object, ...] = (
-            workspace,
             state,
             *((cutoff,) if cutoff is not None else ()),
             minimum,
             maximum + 1,
         )
+        workspace_exists = connection.execute(
+            "SELECT 1 FROM workspace_state WHERE workspace_id=?", (workspace,)
+        ).fetchone()
+        if workspace_exists is None:
+            raise AnalyticalProjectionError("workspace state was not found")
         rows = connection.execute(
             "SELECT bridge_number,COUNT(DISTINCT data_year) AS observation_years "
-            "FROM published_snapshots WHERE workspace_id=? AND state_code=?"
+            "FROM bridges WHERE state_code=?"
             + year_clause
             + " GROUP BY bridge_number HAVING COUNT(DISTINCT data_year)>=? "
             "ORDER BY bridge_number LIMIT ?",
             parameters,
         ).fetchall()
     except sqlite3.Error as exc:
-        raise AnalyticalProjectionError("published bridge keys could not be read") from exc
+        raise AnalyticalProjectionError("loaded bridge keys could not be read") from exc
     finally:
         connection.close()
     if len(rows) > maximum:
-        raise AnalyticalProjectionError("published forecast population exceeds the configured bound")
+        raise AnalyticalProjectionError("loaded forecast population exceeds the configured bound")
     return tuple(str(row["bridge_number"]) for row in rows)
 
 
@@ -557,7 +563,7 @@ def load_state_analysis_histories(
     every child row and revision uses the same audited projection rules.
     """
 
-    keys = list_published_bridge_keys(
+    keys = list_loaded_bridge_keys(
         database_path=database_path,
         workspace_id=workspace_id,
         state_code=state_code,
@@ -566,7 +572,7 @@ def load_state_analysis_histories(
         limit=limit,
     )
     if not keys:
-        raise AnalyticalProjectionError("no published forecast training population was found")
+        raise AnalyticalProjectionError("no loaded forecast training population was found")
     return tuple(
         load_bridge_analysis_history(
             database_path=database_path,

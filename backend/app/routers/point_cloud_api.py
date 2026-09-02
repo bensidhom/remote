@@ -33,6 +33,7 @@ from .services.datapaths import (
     TEMP_DIR,
     USER_DB,
 )
+from .services.database import get_loaded_bridge_snbi_snapshot
 from ..services.operations.storage_paths import (
     StoragePathError,
     portable_confined_path,
@@ -83,6 +84,7 @@ from ..services.point_cloud.context import (
 from ..services.point_cloud.knowledge_pack import (
     PointCloudKnowledgePack,
     PointCloudKnowledgePackError,
+    build_loaded_inventory_prompt_context,
     build_point_cloud_knowledge_pack,
 )
 from ..point_cloud_jobs import (
@@ -718,7 +720,7 @@ def _public_source_receipt(receipt: dict[str, Any] | None) -> dict[str, Any] | N
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temp_path = path.with_name(f".{uuid4().hex[:12]}.tmp")
     try:
         with temp_path.open("xb") as handle:
             handle.write(payload)
@@ -1151,8 +1153,11 @@ def _save_processed(
     )
     processed_root = _resolve_data_path(root.parent)
     processed_root.mkdir(parents=True, exist_ok=True)
+    # Keep the temporary directory name independent of the already-long
+    # immutable generation key.  Repeating that key here pushed normal Windows
+    # workspaces beyond MAX_PATH before any artifacts could be written.
     staging_root = _resolve_data_path(
-        processed_root / f".{generation}.{uuid4().hex}.staging"
+        processed_root / f".{uuid4().hex[:12]}.staging"
     )
     staging_npz = staging_root / npz_path.name
     staging_ply = staging_root / ply_path.name
@@ -1232,8 +1237,8 @@ def _save_processed(
         manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
 
         # The generation is never mutated after this same-filesystem rename.
-        # Durable research runs leave it undiscoverable to legacy readers until
-        # the separate human-review publication boundary accepts the run.
+        # The pointer is written only for an automatically selected saved result;
+        # the immutable generation remains independently addressable by its hash.
         _atomic_replace_path(staging_root, root)
         pointer = {
             "format": _PROCESSED_POINTER_FORMAT,
@@ -1332,7 +1337,7 @@ async def _stream_upload(file: UploadFile, destination: Path) -> tuple[int, str]
     if destination.exists():
         raise ValueError("Point-cloud object destination already exists.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = destination.with_name(f".{destination.name}.{uuid4().hex}.uploading")
+    temp_path = destination.with_name(f".{uuid4().hex[:12]}.uploading")
     size = 0
     digest = hashlib.sha256()
     try:
@@ -2113,6 +2118,32 @@ def download_processed(state_code: str, bridge_number: str, format: str = "ply")
     )
 
 
+@router.get("/api/bridges/{state_code}/{bridge_number}/point-cloud/saved-result")
+def saved_session_analysis(state_code: str, bridge_number: str):
+    """Load a saved session result without representing it as reviewed output."""
+
+    result = _load_processed(state_code, bridge_number)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No saved point-cloud result exists.")
+    return JSONResponse(
+        result,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/api/bridges/{state_code}/{bridge_number}/point-cloud/saved-result/preview")
+def saved_session_preview(state_code: str, bridge_number: str, binary: int = 0):
+    """Load the points associated with a saved, unreviewed session result."""
+
+    payload = _processed_preview(state_code, bridge_number, as_arrays=bool(binary))
+    if payload is None:
+        raise HTTPException(status_code=404, detail="No saved processed point cloud exists.")
+    response = _frame_cloud_response(payload) if binary else JSONResponse(_json_safe(payload))
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 @router.delete("/api/bridges/{state_code}/{bridge_number}/point-cloud")
 async def delete_point_cloud(
     state_code: str,
@@ -2611,7 +2642,7 @@ async def durable_point_cloud_run_result(run_id: str, request: Request):
     if isinstance(public, dict) and isinstance(public.get("persistence"), dict):
         public["persistence"].pop("point_cloud_file", None)
         public["persistence"]["publication_status"] = (
-            "accepted" if run.published_review_id else "candidate_review_required"
+            "accepted" if run.published_review_id else "saved_automatic_result"
         )
         public["persistence"]["run_id"] = run.run_id
     return JSONResponse(public, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
@@ -2631,7 +2662,7 @@ async def durable_point_cloud_run_preview(run_id: str, request: Request, binary:
         mins, maxs = world.min(axis=0), world.max(axis=0)
         payload = {
             "status": "success",
-            "source": "durable_review_candidate",
+            "source": "durable_automatic_result",
             "original_point_count": int(world.shape[0]),
             "rendered_point_count": int(world.shape[0]),
             "downsampled": False,
@@ -2639,7 +2670,7 @@ async def durable_point_cloud_run_preview(run_id: str, request: Request, binary:
             "points": (world - center).astype(np.float32) if binary else (world - center).round(5).tolist(),
             "colors": colors if binary else (colors.round(4).tolist() if colors is not None else None),
             "run_id": run.run_id,
-            "publication_status": "accepted" if run.published_review_id else "candidate_review_required",
+            "publication_status": "accepted" if run.published_review_id else "saved_automatic_result",
         }
     except (OSError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=500, detail={"code": "point_cloud_result_integrity_failed", "message": "Point-cloud candidate failed integrity validation."}) from exc
@@ -2901,7 +2932,9 @@ async def _run_analysis(
     captured_snapshot = None
     canonical_context: PointCloudCanonicalContext | None = None
     knowledge_pack: PointCloudKnowledgePack | None = None
+    loaded_knowledge_pack_json: str | None = None
     persistence_source_row = None
+    ad_hoc_persistence: tuple[str, str, tuple[int, str], Any] | None = None
     if state_code is not None and bridge_number is not None:
         if raw_points is not None:
             raise HTTPException(
@@ -2971,6 +3004,112 @@ async def _run_analysis(
         points = _require_points(raw_points, params, to_world=True)
         under_feature = params.get("under_feature") or None
         context = None
+        context_state = params.get("bridge_context_state_code")
+        context_bridge = str(params.get("bridge_context_bridge_number") or "").strip()
+        if context_state not in (None, "") and context_bridge:
+            try:
+                context_state_code = int(context_state)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "invalid_bridge_context",
+                        "message": "bridge_context_state_code must be an integer.",
+                    },
+                ) from exc
+            if not 0 <= context_state_code <= 99 or len(context_bridge) > 40:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "invalid_bridge_context",
+                        "message": "The requested bridge context is invalid.",
+                    },
+                )
+            requested_year = _requested_data_year(params)
+            loaded_snapshot = await asyncio.to_thread(
+                get_loaded_bridge_snbi_snapshot,
+                USER_DB,
+                context_state_code,
+                context_bridge,
+                requested_year,
+            )
+            if loaded_snapshot is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "code": "bridge_context_not_found",
+                        "message": "The selected bridge was not found in the loaded yearly inventory.",
+                    },
+                )
+            canonical_document = loaded_snapshot["document"]
+            context = build_loaded_inventory_prompt_context(
+                canonical_document,
+                state_code=context_state_code,
+                bridge_number=context_bridge,
+                data_year=int(loaded_snapshot["data_year"]),
+            )
+            expected_loaded_pack_sha256 = str(
+                context.get("knowledge_pack_sha256") or ""
+            ).lower()
+            if expected_loaded_pack_sha256:
+                loaded_pack_payload = {
+                    key: value
+                    for key, value in context.items()
+                    if key != "knowledge_pack_sha256"
+                }
+                loaded_knowledge_pack_json = json.dumps(
+                    loaded_pack_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if (
+                    hashlib.sha256(
+                        loaded_knowledge_pack_json.encode("utf-8")
+                    ).hexdigest()
+                    != expected_loaded_pack_sha256
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "point_cloud_context_integrity_error",
+                            "message": "The loaded bridge context failed integrity validation.",
+                        },
+                    )
+            context["_measurement_features"] = [
+                dict(row)
+                for row in canonical_document.get("Features", [])
+                if isinstance(row, Mapping)
+            ]
+            under_feature = _canonical_under_feature_kind(canonical_document)
+            if _param_bool(params, "save_result", False):
+                source_row = _raw_cloud_row(str(context_state_code), context_bridge)
+                supplied_sha256 = str(params.get("source_sha256") or "").strip().lower()
+                try:
+                    source_identity = _source_identity(source_row)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "point_cloud_source_evidence_unavailable",
+                            "message": "Reload the bridge point cloud before saving this result.",
+                        },
+                    ) from exc
+                if supplied_sha256 != source_identity[1]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "point_cloud_source_changed",
+                            "message": "The bridge point-cloud source changed; reload it before analysis.",
+                        },
+                    )
+                ad_hoc_persistence = (
+                    str(context_state_code),
+                    context_bridge,
+                    source_identity,
+                    source_row,
+                )
     analysis_profile = {
         "analysis_version": 2,
         "algorithm": "hosted-bridge-analysis",
@@ -2988,11 +3127,20 @@ async def _run_analysis(
         ),
         "model_mode": params.get("model_mode") or "clearance",
         "use_local_sam": _param_bool(params, "use_local_sam", False),
-        "knowledge_pack_sha256": knowledge_pack.sha256 if knowledge_pack else None,
+        "knowledge_pack_sha256": (
+            knowledge_pack.sha256
+            if knowledge_pack
+            else (context or {}).get("knowledge_pack_sha256")
+        ),
         "knowledge_pack_version": (
-            knowledge_pack.payload.get("schema_version") if knowledge_pack else None
+            knowledge_pack.payload.get("schema_version")
+            if knowledge_pack
+            else (context or {}).get("schema_version")
         ),
     }
+    if ad_hoc_persistence is not None:
+        analysis_profile["persistence_mode"] = "saved_session_preview"
+        analysis_profile["input_source_sha256"] = ad_hoc_persistence[2][1]
     try:
         result = await asyncio.to_thread(
             analyze_bridge,
@@ -3094,6 +3242,42 @@ async def _run_analysis(
             result["persistence"] = {
                 "saved": False,
                 "error_code": "point_cloud_publication_failed",
+            }
+    elif ad_hoc_persistence is not None and result.get("status") == "success":
+        save_state_code, save_bridge_number, captured_source_identity, source_row = ad_hoc_persistence
+        try:
+            async with _bridge_write_lock(save_state_code, save_bridge_number):
+                current_row = _raw_cloud_row(save_state_code, save_bridge_number)
+                if _source_identity(current_row) != captured_source_identity:
+                    raise _StalePointCloudSource
+                result["result_kind"] = "saved_session_preview"
+                result["persistence"] = await asyncio.to_thread(
+                    _save_processed,
+                    save_state_code,
+                    save_bridge_number,
+                    points,
+                    result,
+                    source_row=source_row,
+                    analysis_profile=analysis_profile,
+                    snapshot_identity=None,
+                    knowledge_pack_json=loaded_knowledge_pack_json,
+                    publish_pointer=True,
+                )
+        except _StalePointCloudSource:
+            result.setdefault("warnings", []).append(
+                "The saved point-cloud source changed during analysis; reload and run it again."
+            )
+            result["persistence"] = {
+                "saved": False,
+                "error_code": "point_cloud_source_changed",
+            }
+        except Exception:
+            result.setdefault("warnings", []).append(
+                "The processed session result could not be saved."
+            )
+            result["persistence"] = {
+                "saved": False,
+                "error_code": "point_cloud_save_failed",
             }
     return _json_safe(result)
 
@@ -3373,20 +3557,22 @@ async def _run_clearance(
             geometry_result=result,
             under_feature=under_feature,
         )
-        if result.get("status") == "success":
-            result = {
-                "status": workflow["status"],
-                "reason": workflow["reason"],
-                "under_feature": under_feature,
-                "feature_measurement": workflow,
-                "raw_geometry_candidate": result,
-                "note": (
-                    "Raw local surface evidence is retained, but BH12/BH13 require "
-                    "reviewed feature, lane/shoulder, station, and obstruction inputs."
-                ),
-            }
-        else:
-            result["feature_measurement"] = workflow
+        result["feature_measurement"] = workflow
+        primary_measurement = workflow.get("primary_measurement")
+        if result.get("status") == "success" and isinstance(primary_measurement, Mapping):
+            result["bh12_raw_m"] = primary_measurement.get("bh12_raw_m")
+            result["bh13_raw_m"] = primary_measurement.get("bh13_raw_m")
+            result["snbi_formatted"] = primary_measurement.get("snbi_formatted")
+            roadway_rows = result.get("roadways")
+            if isinstance(roadway_rows, list) and roadway_rows and isinstance(roadway_rows[0], dict):
+                roadway_rows[0]["clearance_regions"] = primary_measurement.get("regions", [])
+                roadway_rows[0]["bh12_candidates"] = primary_measurement.get("bh12_candidates", [])
+                roadway_rows[0]["selected_bh12_candidate_id"] = primary_measurement.get(
+                    "selected_bh12_candidate_id"
+                )
+                roadway_rows[0]["bh13_controlling_sample_id"] = primary_measurement.get(
+                    "bh13_controlling_sample_id"
+                )
         return _json_safe(
             _annotate_legacy_result(
                 result,

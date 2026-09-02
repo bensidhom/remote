@@ -159,7 +159,7 @@ def _create_fixture(path: str) -> None:
     connection.close()
 
 
-def test_projection_reads_only_exact_workspace_publications(tmp_path):
+def test_projection_reads_all_exact_yearly_inventory_rows(tmp_path):
     database = tmp_path / "analytics.db"
     _create_fixture(str(database))
     result = load_bridge_analysis_history(
@@ -168,11 +168,12 @@ def test_projection_reads_only_exact_workspace_publications(tmp_path):
         state_code=34,
         bridge_number="0101150",
     )
-    assert [snapshot.data_year for snapshot in result.snapshots] == [2020, 2022, 2024]
+    assert [snapshot.data_year for snapshot in result.snapshots] == [2020, 2022, 2024, 2025]
     assert all(snapshot.identity.workspace_id == "workspace-a" for snapshot in result.snapshots)
     assert all(snapshot.bridge_number == "0101150" for snapshot in result.snapshots)
     assert result.snapshots[-1].identity.data_generation == 7
-    assert result.snapshots[-1].bridge_name == "Test Bridge"
+    assert result.snapshots[-1].bridge_name == "Unpublished"
+    assert result.snapshots[-1].snapshot_revision_id == "loaded-inventory:34:0101150:2025"
 
 
 def test_projection_uses_snapshot_age_and_exact_feature_evidence(tmp_path):
@@ -183,6 +184,7 @@ def test_projection_uses_snapshot_age_and_exact_feature_evidence(tmp_path):
         workspace_id="workspace-a",
         state_code=34,
         bridge_number="0101150",
+        through_year=2024,
     )
     assert [snapshot.age_at_snapshot for snapshot in result.snapshots] == [40, 42, 44]
     assert result.snapshots[1].carried_features.status is FeatureSelectionStatus.SELECTED
@@ -201,6 +203,7 @@ def test_projection_retains_materials_condition_and_life_history_provenance(tmp_
         workspace_id="workspace-a",
         state_code=34,
         bridge_number="0101150",
+        through_year=2024,
     )
     latest = result.snapshots[-1]
     assert latest.span_materials[0].deck_material_code == "CR-T"
@@ -215,7 +218,7 @@ def test_projection_retains_materials_condition_and_life_history_provenance(tmp_
     )
     assert len(work_events) == 1
     assert work_events[0].event_year == 2023
-    assert work_events[0].source_record_ids == ("revision-2024",)
+    assert work_events[0].source_record_ids == ("loaded-inventory:34:0101150:2024",)
     candidates = result.life_history.condition_change_candidates
     assert len(candidates) == 1
     assert candidates[0].component == "deck"
@@ -277,7 +280,7 @@ def test_lcca_facts_use_exact_snapshot_geometry_and_carried_feature(tmp_path):
         through_year=2022,
     )
     facts = bridge_lcca_facts(history.snapshots[-1])
-    assert facts.snapshot_revision_id == "revision-2022"
+    assert facts.snapshot_revision_id == "loaded-inventory:34:0101150:2022"
     assert facts.data_year == 2022
     assert facts.geometry.deck_area == 3000.0
     assert facts.geometry.method == "reported_calculated_deck_area"

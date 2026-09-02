@@ -22,6 +22,11 @@ done
 compose exec -T app python -c \
   "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=15).read().decode())"
 
+# Bridgette production contract: the deployed service uses hybrid planning and
+# the exact yearly rows in snbi_bridges.db are the authoritative snapshots.
+compose exec -T app python -c \
+  "import json, os, sqlite3; from app.routers.services.datapaths import USER_DB; mode=os.environ.get('BRIDGEGUARD_QUERY_MODE','').strip().lower(); assert mode == 'hybrid', mode; c=sqlite3.connect('file:'+USER_DB+'?mode=ro', uri=True); loaded=int(c.execute('SELECT COUNT(*) FROM bridges').fetchone()[0]); latest=c.execute('SELECT MAX(data_year) FROM bridges').fetchone()[0]; current_years=[row[0] for row in c.execute('SELECT DISTINCT data_year FROM v_current_bridge_snapshots ORDER BY data_year')]; current_count=int(c.execute('SELECT COUNT(*) FROM v_current_bridge_snapshots').fetchone()[0]); semantic_count=int(c.execute('SELECT COUNT(*) FROM v_published_bridge_snapshots').fetchone()[0]); c.close(); assert loaded > 0, loaded; assert semantic_count == loaded, (semantic_count,loaded); assert latest is not None and current_years == [latest], (latest,current_years); assert current_count > 0, current_count; print(json.dumps({'query_mode':mode,'database':'snbi_bridges.db','loaded_rows':loaded,'latest_year':latest,'current_rows':current_count},sort_keys=True))"
+
 # Release-critical storage exercise. The command cannot target customer data;
 # it creates and removes its own UUID-named temporary WAL database.
 compose exec -T app python -m scripts.run_sqlite_scale_gate

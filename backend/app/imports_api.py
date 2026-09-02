@@ -476,6 +476,17 @@ def _latest_hashes(database_path: str) -> dict[tuple[int, str, int], str]:
     return {(int(row[0]), str(row[1]), int(row[2])): str(row[3]) for row in rows}
 
 
+def _existing_inventory_keys(database_path: str) -> set[tuple[int, str, int]]:
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT state_code,bridge_number,data_year FROM bridges"
+        ).fetchall()
+    finally:
+        connection.close()
+    return {(int(row[0]), str(row[1]), int(row[2])) for row in rows}
+
+
 def _latest_document(
     connection: sqlite3.Connection,
     key: tuple[int, str, int],
@@ -597,6 +608,7 @@ def _preflight_document(
     source: Mapping[str, Any],
     seen: set[tuple[int, str, int]],
     latest: Mapping[tuple[int, str, int], str],
+    existing_inventory: set[tuple[int, str, int]],
     latest_connection: sqlite3.Connection,
     artifact_store: SourceArtifactStore,
     artifact_receipts: dict[str, dict[str, Any]],
@@ -763,7 +775,15 @@ def _preflight_document(
     )
     content_hash = canonical_sha256(document)
     current = latest.get(key)
-    projected = "insert" if current is None else "no_op" if current == content_hash else "new_revision"
+    projected = (
+        "replace_inventory"
+        if current is None and key in existing_inventory
+        else "insert"
+        if current is None
+        else "no_op"
+        if current == content_hash
+        else "new_revision"
+    )
     difference = {"change_count": 0, "changes": [], "truncated": False}
     if projected == "new_revision" and current is not None:
         before_document = _latest_document(latest_connection, key, current)
@@ -889,6 +909,7 @@ def _build_preflight(job: OperationJob, raw: bytes) -> dict[str, Any]:
             data_generation=data_generation,
         )
     latest = _latest_hashes(_database_path())
+    existing_inventory = _existing_inventory_keys(_database_path())
     seen: set[tuple[int, str, int]] = set()
     summaries: list[dict[str, Any]] = []
     items: list[dict[str, Any]] = []
@@ -913,6 +934,7 @@ def _build_preflight(job: OperationJob, raw: bytes) -> dict[str, Any]:
                 source=source,
                 seen=seen,
                 latest=latest,
+                existing_inventory=existing_inventory,
                 latest_connection=latest_connection,
                 artifact_store=artifact_store,
                 artifact_receipts=artifact_receipts,
@@ -944,6 +966,7 @@ def _build_preflight(job: OperationJob, raw: bytes) -> dict[str, Any]:
         "invalid": sum(not bool(item.get("valid")) for item in summaries),
         "insert": sum(item.get("projected_action") == "insert" for item in summaries),
         "new_revision": sum(item.get("projected_action") == "new_revision" for item in summaries),
+        "replace_inventory": sum(item.get("projected_action") == "replace_inventory" for item in summaries),
         "no_op": sum(item.get("projected_action") == "no_op" for item in summaries),
         "conflict": len(manifest_conflicts),
     }
@@ -968,9 +991,10 @@ def _build_preflight(job: OperationJob, raw: bytes) -> dict[str, Any]:
         "summary": counts,
         "field_loss_check": field_loss_check,
         "proposed_actions": {
-            "stage_only": True,
+            "import_to_inventory": True,
+            "stage_only": False,
             "publish": False,
-            "replace_snapshot_count": counts["new_revision"],
+            "replace_snapshot_count": counts["new_revision"] + counts["replace_inventory"],
         },
         "estimated_growth": {
             "canonical_bytes": canonical_bytes,
@@ -1242,13 +1266,14 @@ def commit_import(
             artifact_receipts=tuple(trusted_receipts),
             write_mode=body.action,
             request_metadata={
-                "operation": "two_phase_import_commit",
+                "operation": "reviewed_inventory_import",
                 "import_id": job.id,
                 "preflight_digest": body.preflight_digest.lower(),
                 "validation_policy": body.validation_policy,
                 "override_reason": str(body.override_reason or "").strip() or None,
             },
             expected_latest_by_key=expected_latest_by_key,
+            project_to_inventory=True,
         )
         payload = revision_api._public_stage_result(
             database_path, result, source=source_receipt.to_public_dict()
@@ -1257,6 +1282,8 @@ def commit_import(
             {
                 "import_id": job.id,
                 "preflight_digest": body.preflight_digest.lower(),
+                "status": "imported",
+                "imported": True,
                 "published": False,
                 "action": body.action,
                 "validation_policy": body.validation_policy,

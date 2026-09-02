@@ -120,6 +120,7 @@ class StageCanonicalBatchRequest:
     revisions: tuple[CanonicalRevisionInput, ...]
     write_mode: str = "replace_snapshot"
     request_metadata: Mapping[str, Any] | None = None
+    project_to_inventory: bool = False
 
 
 @dataclass(frozen=True)
@@ -438,6 +439,7 @@ def _request_payload(
         "expected_data_generation": request.expected_data_generation,
         "atomic_mode": request.atomic_mode,
         "write_mode": request.write_mode,
+        "project_to_inventory": request.project_to_inventory,
         "request_metadata": dict(request.request_metadata or {}),
         "rule_bundle_id": rule_bundle.bundle_id,
         "rule_bundle_sha256": rule_bundle.sha256,
@@ -1098,6 +1100,16 @@ def stage_canonical_batch(
                     value["data_year"],
                 ),
             ).fetchone()
+            inventory_exists = None
+            if request.project_to_inventory:
+                inventory_exists = connection.execute(
+                    "SELECT 1 FROM bridges WHERE state_code=? AND bridge_number=? AND data_year=?",
+                    (
+                        value["state_code"],
+                        value["bridge_number"],
+                        value["data_year"],
+                    ),
+                ).fetchone()
             if value["input"].enforce_latest_precondition:
                 actual_latest_hash = (
                     str(latest["canonical_sha256"]) if latest is not None else None
@@ -1135,11 +1147,14 @@ def stage_canonical_batch(
                 staged.append(outcome)
                 plans.append((value, latest, outcome))
                 continue
-            if latest is not None and request.write_mode == "create_only":
+            if (
+                request.write_mode == "create_only"
+                and (latest is not None or inventory_exists is not None)
+            ):
                 raise RevisionConflictError(
                     409,
-                    "snapshot_already_exists",
-                    "create_only cannot add a new revision to an existing logical snapshot",
+                    "inventory_record_already_exists",
+                    "create_only cannot replace an existing bridge/year inventory record",
                     details={
                         "state_code": value["state_code"],
                         "bridge_number": value["bridge_number"],
@@ -1167,10 +1182,11 @@ def stage_canonical_batch(
             staged.append(outcome)
             plans.append((value, latest, outcome))
 
+        result_generation = generation + 1 if request.project_to_inventory else generation
         result = StageCanonicalBatchResult(
             workspace_id=request.workspace_id,
             batch_id=batch_id,
-            data_generation=generation,
+            data_generation=result_generation,
             revisions=tuple(staged),
             request_hash=request_hash,
         )
@@ -1296,6 +1312,28 @@ def stage_canonical_batch(
                         value["state_code"], value["bridge_number"], value["data_year"]
                     ],
                 },
+            )
+
+        if request.project_to_inventory:
+            # The reviewed Loader import writes the exact canonical records to
+            # the yearly inventory in the same transaction as its audit
+            # evidence. It intentionally does not create or consult a
+            # published_snapshots row.
+            for value, _latest, _outcome in plans:
+                _refresh_projection(
+                    connection,
+                    value["document"],
+                    int(value["data_year"]),
+                )
+            connection.execute(
+                "UPDATE workspace_state SET data_generation=?, schema_generation=?, updated_at=? "
+                "WHERE workspace_id=?",
+                (
+                    result_generation,
+                    LATEST_SCHEMA_VERSION,
+                    _now(),
+                    request.workspace_id,
+                ),
             )
         connection.commit()
         return result

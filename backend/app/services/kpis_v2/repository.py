@@ -1,4 +1,4 @@
-"""Exact published-revision KPI computations."""
+"""KPI computations over exact yearly inventory snapshots."""
 
 from __future__ import annotations
 
@@ -22,6 +22,12 @@ from .registry import (
 )
 
 
+AGE_COUNT_DEFINITION_VERSION = "bridgeguard-age-condition-count-v2"
+FUTURE_CONDITION_DEFINITION_VERSION = "bridgeguard-inventory-transition-v2"
+_CONDITION_ORDER = ("Good", "Fair", "Poor")
+_DETAILED_CONDITION_ORDER = ("Good", "Upper Fair", "Lower Fair", "Poor")
+
+
 class KpiComputationError(RuntimeError):
     pass
 
@@ -38,6 +44,10 @@ class _Snapshot:
     total_length: float | None
     width: float | None
     reported_area: float | None
+    deck_condition_class: str | None
+    superstructure_condition_class: str | None
+    substructure_condition_class: str | None
+    culvert_condition_class: str | None
     condition_rating: float | None
     condition_class: str
     condition_invalid: bool
@@ -91,6 +101,32 @@ def _rounded(value: float | None, quantum: str = "0.1") -> float | None:
     return float(Decimal(str(value)).quantize(Decimal(quantum), rounding=ROUND_HALF_UP))
 
 
+def _component_condition_class(value: object) -> str | None:
+    rating = _number(value)
+    if rating is None or not 0 <= rating <= 9:
+        return None
+    if rating >= 7:
+        return "Good"
+    if rating >= 5:
+        return "Fair"
+    return "Poor"
+
+
+def _detailed_condition_class(value: object) -> str | None:
+    """Split the official Fair class into its rating-6 and rating-5 bands."""
+
+    rating = _number(value)
+    if rating is None or not 0 <= rating <= 9:
+        return None
+    if rating >= 7:
+        return "Good"
+    if rating >= 6:
+        return "Upper Fair"
+    if rating >= 5:
+        return "Lower Fair"
+    return "Poor"
+
+
 def _deck_area(snapshot: _Snapshot) -> tuple[float | None, str]:
     if snapshot.reported_area is not None and snapshot.reported_area > 0:
         return snapshot.reported_area, "reported_bg15"
@@ -113,6 +149,18 @@ def _revision_set(rows: Iterable[_Snapshot]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _loaded_identity(row: sqlite3.Row) -> tuple[str, str]:
+    revision_id = (
+        f"loaded-inventory:{int(row['state_code'])}:"
+        f"{str(row['bridge_number'])}:{int(row['data_year'])}"
+    )
+    payload = {key: row[key] for key in row.keys()}
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return revision_id, digest
+
+
 def _load(
     database_path: str | os.PathLike[str],
     *,
@@ -128,12 +176,11 @@ def _load(
     try:
         if year is None:
             selected = connection.execute(
-                "SELECT MAX(data_year) FROM published_snapshots "
-                "WHERE workspace_id=? AND state_code=?",
-                (workspace, state),
+                "SELECT MAX(data_year) FROM bridges WHERE state_code=?",
+                (state,),
             ).fetchone()[0]
             if selected is None:
-                raise KpiComputationError("published KPI population was not found")
+                raise KpiComputationError("loaded KPI population was not found")
             selected_year = int(selected)
         else:
             selected_year = int(year)
@@ -144,19 +191,12 @@ def _load(
         if generation is None:
             raise KpiComputationError("workspace state was not found")
         rows = connection.execute(
-            "SELECT ps.snapshot_revision_id,sr.canonical_sha256,b.* "
-            "FROM published_snapshots ps "
-            "JOIN snapshot_revisions sr ON sr.workspace_id=ps.workspace_id "
-            "AND sr.id=ps.snapshot_revision_id AND sr.state_code=ps.state_code "
-            "AND sr.bridge_number=ps.bridge_number AND sr.data_year=ps.data_year "
-            "JOIN bridges b ON b.state_code=ps.state_code "
-            "AND b.bridge_number=ps.bridge_number AND b.data_year=ps.data_year "
-            "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.data_year=? "
-            "ORDER BY ps.bridge_number,ps.snapshot_revision_id",
-            (workspace, state, selected_year),
+            "SELECT b.* FROM bridges b WHERE b.state_code=? AND b.data_year=? "
+            "ORDER BY b.bridge_number",
+            (state, selected_year),
         ).fetchall()
         if not rows:
-            raise KpiComputationError("published KPI population was not found")
+            raise KpiComputationError("loaded KPI population was not found")
         county_names = {
             str(row[0]): str(row[1])
             for row in connection.execute(
@@ -166,23 +206,21 @@ def _load(
         }
         traffic_rows = connection.execute(
             "SELECT f.bridge_number,f.annual_average_daily_traffic "
-            "FROM published_snapshots ps JOIN features f "
-            "ON f.state_code=ps.state_code AND f.bridge_number=ps.bridge_number "
-            "AND f.data_year=ps.data_year "
-            "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.data_year=? "
+            "FROM features f WHERE f.state_code=? AND f.data_year=? "
             "AND f.feature_type LIKE 'H%' AND f.feature_location='C' "
             "ORDER BY f.bridge_number,f.feature_type,f.id",
-            (workspace, state, selected_year),
+            (state, selected_year),
         ).fetchall()
     except KpiComputationError:
         raise
     except sqlite3.Error as exc:
-        raise KpiComputationError("published KPI projection could not be read") from exc
+        raise KpiComputationError("loaded KPI projection could not be read") from exc
     finally:
         connection.close()
 
     snapshots: list[_Snapshot] = []
     for row in rows:
+        revision_id, canonical_sha256 = _loaded_identity(row)
         condition = compute_controlling_condition(
             bc01=row["deck_condition_rating"],
             bc02=row["superstructure_condition_rating"],
@@ -192,8 +230,8 @@ def _load(
         )
         snapshots.append(
             _Snapshot(
-                revision_id=str(row["snapshot_revision_id"]),
-                canonical_sha256=str(row["canonical_sha256"]).lower(),
+                revision_id=revision_id,
+                canonical_sha256=canonical_sha256,
                 bridge_number=str(row["bridge_number"]),
                 county_code=_integer(row["county_code"]),
                 maintenance_code=_text(row["maintenance_responsibility"]),
@@ -202,6 +240,10 @@ def _load(
                 total_length=_number(row["total_bridge_length"]),
                 width=_number(row["bridge_width_out_to_out"]),
                 reported_area=_number(row["calculated_deck_area"]),
+                deck_condition_class=_component_condition_class(row["deck_condition_rating"]),
+                superstructure_condition_class=_component_condition_class(row["superstructure_condition_rating"]),
+                substructure_condition_class=_component_condition_class(row["substructure_condition_rating"]),
+                culvert_condition_class=_component_condition_class(row["culvert_condition_rating"]),
                 condition_rating=condition.rating,
                 condition_class=(condition.condition_class.value if condition.condition_class else "Unknown"),
                 condition_invalid=bool(condition.invalid_fields),
@@ -251,6 +293,12 @@ def compute_operational_kpis(
     aadt_complete = 0
     aadt_ambiguous = 0
     high_traffic = 0
+    component_counts = {
+        "Deck": {"field": "B.C.01", "Good": 0, "Fair": 0, "Poor": 0, "rated_bridges": 0},
+        "Superstructure": {"field": "B.C.02", "Good": 0, "Fair": 0, "Poor": 0, "rated_bridges": 0},
+        "Substructure": {"field": "B.C.03", "Good": 0, "Fair": 0, "Poor": 0, "rated_bridges": 0},
+        "Culvert": {"field": "B.C.04", "Good": 0, "Fair": 0, "Poor": 0, "rated_bridges": 0},
+    }
     for row in rows:
         counts[row.condition_class] += 1
         county_name = auxiliary.get(f"county:{row.county_code}") if row.county_code is not None else None
@@ -268,6 +316,15 @@ def compute_operational_kpis(
         aadt_complete += int(len(candidates) == 1)
         aadt_ambiguous += int(len(candidates) > 1)
         high_traffic += int(len(candidates) == 1 and candidates[0] >= int(high_traffic_threshold))
+        for component, condition_class in (
+            ("Deck", row.deck_condition_class),
+            ("Superstructure", row.superstructure_condition_class),
+            ("Substructure", row.substructure_condition_class),
+            ("Culvert", row.culvert_condition_class),
+        ):
+            if condition_class is not None:
+                component_counts[component][condition_class] += 1
+                component_counts[component]["rated_bridges"] += 1
 
     classifiable = counts["Good"] + counts["Fair"] + counts["Poor"]
     total = len(rows)
@@ -303,6 +360,14 @@ def compute_operational_kpis(
             key: (_pct(value, classifiable) if key != "Unknown" else None)
             for key, value in counts.items()
         },
+        "component_condition_counts": [
+            {
+                "component": component,
+                **component_counts[component],
+                "not_applicable_or_unrated": total - int(component_counts[component]["rated_bridges"]),
+            }
+            for component in ("Deck", "Superstructure", "Substructure", "Culvert")
+        ],
         "classifiable_bridges": classifiable,
         "average_age_at_snapshot": _rounded(sum(ages) / len(ages)) if ages else None,
         "age_known_count": len(ages),
@@ -352,7 +417,7 @@ def compute_operational_kpis(
         },
     }
     return {
-        "kind": "observed_published_inventory",
+        "kind": "observed_loaded_inventory",
         "state_code": int(state_code),
         "year": selected_year,
         "data_generation": data_generation,
@@ -449,7 +514,7 @@ def compute_age_condition_area(
             }
         )
     return {
-        "kind": "observed_published_inventory",
+        "kind": "observed_loaded_inventory",
         "state_code": int(state_code),
         "year": selected_year,
         "population": population_key,
@@ -461,4 +526,346 @@ def compute_age_condition_area(
         "measure_definition": DEFAULT_KPI_REGISTRY.get("deck_area_by_age_condition").as_dict(),
         "series": series,
         "excluded": {key: _rounded(value) if isinstance(value, float) else value for key, value in excluded.items()},
+    }
+
+
+def compute_age_condition_counts(
+    *,
+    database_path: str | os.PathLike[str],
+    workspace_id: str,
+    state_code: int,
+    year: int | None = None,
+    population: str = "statewide",
+) -> dict[str, object]:
+    """Count bridges by snapshot age and controlling SNBI condition.
+
+    This is intentionally a bridge-count chart.  It does not mix deck area
+    into the y-axis, so values remain whole bridge records.
+    """
+
+    selected_year, data_generation, schema_generation, rows, _auxiliary = _load(
+        database_path,
+        workspace_id=workspace_id,
+        state_code=state_code,
+        year=year,
+    )
+    population_key = str(population).strip().lower()
+    if population_key not in {"statewide", "state_maintained"}:
+        raise KpiComputationError("population must be statewide or state_maintained")
+    selected = (
+        rows
+        if population_key == "statewide"
+        else tuple(row for row in rows if (row.maintenance_code or "").upper() == "S01")
+    )
+    buckets: dict[str, dict[str, int]] = {
+        key: {condition: 0 for condition in _DETAILED_CONDITION_ORDER}
+        for key in _age_bin_order()
+    }
+    excluded = {
+        "missing_or_invalid_age_count": 0,
+        "missing_condition_count": 0,
+    }
+    for row in selected:
+        if row.year_built is None or not 0 <= selected_year - row.year_built <= 300:
+            excluded["missing_or_invalid_age_count"] += 1
+            continue
+        condition = _detailed_condition_class(row.condition_rating)
+        if condition not in _DETAILED_CONDITION_ORDER:
+            excluded["missing_condition_count"] += 1
+            continue
+        buckets[_age_bin(selected_year - row.year_built)][str(condition)] += 1
+    series = [
+        {
+            "age_bin": age_bin,
+            **buckets[age_bin],
+            "Fair": buckets[age_bin]["Upper Fair"] + buckets[age_bin]["Lower Fair"],
+            "total_bridges": sum(buckets[age_bin].values()),
+        }
+        for age_bin in _age_bin_order()
+    ]
+    return {
+        "kind": "observed_loaded_inventory",
+        "state_code": int(state_code),
+        "year": selected_year,
+        "population": population_key,
+        "data_generation": data_generation,
+        "schema_generation": schema_generation,
+        "revision_set_sha256": _revision_set(rows),
+        "definition_version": AGE_COUNT_DEFINITION_VERSION,
+        "series": series,
+        "excluded": excluded,
+    }
+
+
+def _condition_from_database_row(row: sqlite3.Row) -> str | None:
+    condition = compute_controlling_condition(
+        bc01=row["deck_condition_rating"],
+        bc02=row["superstructure_condition_rating"],
+        bc03=row["substructure_condition_rating"],
+        bc04=row["culvert_condition_rating"],
+        bc13=row["lowest_condition_rating_code"],
+    )
+    return _detailed_condition_class(condition.rating)
+
+
+def _transition_probabilities(
+    counts: dict[str, dict[str, int]],
+    *,
+    allow_improvement: bool,
+) -> dict[str, dict[str, float]]:
+    level = {"Good": 3, "Upper Fair": 2, "Lower Fair": 1, "Poor": 0}
+    result: dict[str, dict[str, float]] = {}
+    for source in _DETAILED_CONDITION_ORDER:
+        eligible = {
+            target: int(counts[source][target])
+            for target in _DETAILED_CONDITION_ORDER
+            if allow_improvement or level[target] <= level[source]
+        }
+        total = sum(eligible.values())
+        if total <= 0:
+            result[source] = {
+                target: (1.0 if target == source else 0.0)
+                for target in _DETAILED_CONDITION_ORDER
+            }
+        else:
+            result[source] = {
+                target: (eligible.get(target, 0) / total)
+                for target in _DETAILED_CONDITION_ORDER
+            }
+    return result
+
+
+def _project_condition_counts(
+    current: dict[str, float],
+    matrix: dict[str, dict[str, float]],
+    *,
+    start_year: int,
+    horizon_years: int,
+) -> list[dict[str, object]]:
+    distribution = {
+        condition: float(current[condition])
+        for condition in _DETAILED_CONDITION_ORDER
+    }
+    series: list[dict[str, object]] = []
+    for offset in range(0, int(horizon_years) + 1):
+        upper_fair = distribution["Upper Fair"]
+        lower_fair = distribution["Lower Fair"]
+        series.append(
+            {
+                "year": int(start_year) + offset,
+                **{
+                    condition: _rounded(distribution[condition])
+                    for condition in _DETAILED_CONDITION_ORDER
+                },
+                "Fair": _rounded(upper_fair + lower_fair),
+                "total_bridges": _rounded(sum(distribution.values())),
+                "poor_bridge_count": _rounded(distribution["Poor"]),
+            }
+        )
+        if offset == int(horizon_years):
+            break
+        distribution = {
+            target: math.fsum(
+                distribution[source] * matrix[source][target]
+                for source in _DETAILED_CONDITION_ORDER
+            )
+            for target in _DETAILED_CONDITION_ORDER
+        }
+    return series
+
+
+def _project_age_condition_counts(
+    current_by_age: dict[int, dict[str, float]],
+    matrix: dict[str, dict[str, float]],
+    *,
+    start_year: int,
+    horizon_years: int,
+) -> list[dict[str, object]]:
+    """Age each starting cohort while applying the scenario transition matrix."""
+
+    cohorts = {
+        int(age): {
+            condition: float(distribution[condition])
+            for condition in _DETAILED_CONDITION_ORDER
+        }
+        for age, distribution in current_by_age.items()
+    }
+    result: list[dict[str, object]] = []
+    for offset in range(0, int(horizon_years) + 1):
+        buckets = {
+            age_bin: {condition: 0.0 for condition in _DETAILED_CONDITION_ORDER}
+            for age_bin in _age_bin_order()
+        }
+        for starting_age, distribution in cohorts.items():
+            bucket = buckets[_age_bin(starting_age + offset)]
+            for condition in _DETAILED_CONDITION_ORDER:
+                bucket[condition] += distribution[condition]
+        age_bins = []
+        for age_bin in _age_bin_order():
+            values = buckets[age_bin]
+            age_bins.append(
+                {
+                    "age_bin": age_bin,
+                    **{
+                        condition: _rounded(values[condition])
+                        for condition in _DETAILED_CONDITION_ORDER
+                    },
+                    "Fair": _rounded(values["Upper Fair"] + values["Lower Fair"]),
+                    "total_bridges": _rounded(sum(values.values())),
+                }
+            )
+        result.append(
+            {
+                "year": int(start_year) + offset,
+                "rated_with_known_age": _rounded(
+                    sum(float(row["total_bridges"] or 0.0) for row in age_bins)
+                ),
+                "age_bins": age_bins,
+            }
+        )
+        if offset == int(horizon_years):
+            break
+        cohorts = {
+            age: {
+                target: math.fsum(
+                    distribution[source] * matrix[source][target]
+                    for source in _DETAILED_CONDITION_ORDER
+                )
+                for target in _DETAILED_CONDITION_ORDER
+            }
+            for age, distribution in cohorts.items()
+        }
+    return result
+
+
+def compute_future_condition_scenarios(
+    *,
+    database_path: str | os.PathLike[str],
+    workspace_id: str,
+    state_code: int,
+    year: int | None = None,
+    horizon_years: int = 10,
+) -> dict[str, object]:
+    """Project aggregate condition counts from observed annual SNBI changes.
+
+    The result is generated on demand.  It requires no saved forecast package
+    or publication record: the selected year's rated bridges provide the
+    starting population and consecutive yearly rows provide the transition
+    evidence.
+    """
+
+    horizon = int(horizon_years)
+    if not 1 <= horizon <= 30:
+        raise KpiComputationError("horizon_years must be between 1 and 30")
+    selected_year, data_generation, schema_generation, current_rows, _auxiliary = _load(
+        database_path,
+        workspace_id=workspace_id,
+        state_code=state_code,
+        year=year,
+    )
+    current_counts = {condition: 0.0 for condition in _DETAILED_CONDITION_ORDER}
+    current_by_age: dict[int, dict[str, float]] = defaultdict(
+        lambda: {condition: 0.0 for condition in _DETAILED_CONDITION_ORDER}
+    )
+    current_unrated = 0
+    current_rated_missing_age = 0
+    for row in current_rows:
+        condition = _detailed_condition_class(row.condition_rating)
+        if condition not in current_counts:
+            current_unrated += 1
+            continue
+        current_counts[str(condition)] += 1.0
+        if row.year_built is None or not 0 <= selected_year - row.year_built <= 300:
+            current_rated_missing_age += 1
+            continue
+        current_by_age[selected_year - row.year_built][str(condition)] += 1.0
+
+    connection = _readonly(database_path)
+    try:
+        history_rows = connection.execute(
+            "SELECT bridge_number,data_year,deck_condition_rating,"
+            "superstructure_condition_rating,substructure_condition_rating,"
+            "culvert_condition_rating,lowest_condition_rating_code "
+            "FROM bridges WHERE state_code=? AND data_year<=? "
+            "ORDER BY bridge_number,data_year",
+            (int(state_code), selected_year),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise KpiComputationError("loaded condition history could not be read") from exc
+    finally:
+        connection.close()
+
+    transition_counts = {
+        source: {target: 0 for target in _DETAILED_CONDITION_ORDER}
+        for source in _DETAILED_CONDITION_ORDER
+    }
+    previous: dict[str, tuple[int, str | None]] = {}
+    transition_intervals = 0
+    for row in history_rows:
+        bridge_number = str(row["bridge_number"])
+        data_year = int(row["data_year"])
+        condition = _condition_from_database_row(row)
+        prior = previous.get(bridge_number)
+        if (
+            prior is not None
+            and data_year == prior[0] + 1
+            and prior[1] in _DETAILED_CONDITION_ORDER
+            and condition in _DETAILED_CONDITION_ORDER
+        ):
+            transition_counts[str(prior[1])][str(condition)] += 1
+            transition_intervals += 1
+        previous[bridge_number] = (data_year, condition)
+    if transition_intervals <= 0:
+        raise KpiComputationError("consecutive yearly condition history was not found")
+
+    historical_matrix = _transition_probabilities(transition_counts, allow_improvement=True)
+    no_rehabilitation_matrix = _transition_probabilities(transition_counts, allow_improvement=False)
+    return {
+        "kind": "projected_loaded_inventory",
+        "state_code": int(state_code),
+        "year": selected_year,
+        "horizon_years": horizon,
+        "data_generation": data_generation,
+        "schema_generation": schema_generation,
+        "revision_set_sha256": _revision_set(current_rows),
+        "definition_version": FUTURE_CONDITION_DEFINITION_VERSION,
+        "source_transition_intervals": transition_intervals,
+        "current_unrated_count": current_unrated,
+        "current_rated_missing_or_invalid_age_count": current_rated_missing_age,
+        "scenarios": [
+            {
+                "scenario_id": "historical_trend",
+                "label": "Historical trend",
+                "description": "Observed yearly changes, including improvements recorded after bridge work.",
+                "series": _project_condition_counts(
+                    current_counts,
+                    historical_matrix,
+                    start_year=selected_year,
+                    horizon_years=horizon,
+                ),
+                "age_series": _project_age_condition_counts(
+                    current_by_age,
+                    historical_matrix,
+                    start_year=selected_year,
+                    horizon_years=horizon,
+                ),
+            },
+            {
+                "scenario_id": "no_rehabilitation",
+                "label": "No rehabilitation",
+                "description": "Uses the observed deterioration rates but does not allow condition improvements.",
+                "series": _project_condition_counts(
+                    current_counts,
+                    no_rehabilitation_matrix,
+                    start_year=selected_year,
+                    horizon_years=horizon,
+                ),
+                "age_series": _project_age_condition_counts(
+                    current_by_age,
+                    no_rehabilitation_matrix,
+                    start_year=selected_year,
+                    horizon_years=horizon,
+                ),
+            },
+        ],
     }

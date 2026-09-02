@@ -409,7 +409,6 @@ def test_metric_needing_unrepresented_server_parameter_abstains(catalog) -> None
         (PlanFilter("year_built", "between", (2025, 2020)), "invalid_filter_range"),
         (PlanFilter("published_at", "eq", "not-a-date"), "filter_type_mismatch"),
         (PlanFilter("bridge_name", "is_null", "value"), "filter_value_forbidden"),
-        (PlanFilter("published_at", "is_null"), "null_check_nonnullable"),
     ],
 )
 def test_blank_huge_wildcard_and_invalid_filter_values_fail_closed(
@@ -611,7 +610,7 @@ def test_current_resource_and_county_aggregate_time_semantics(catalog) -> None:
     )
     assert_plan_error(
         PlanValidationError,
-        "latest_requires_bridge_identity",
+        "latest_county_requires_current",
         lambda: validate_bridge_query_plan(county, catalog),
     )
     deck_percent = BridgeQueryPlan(

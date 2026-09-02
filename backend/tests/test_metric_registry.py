@@ -113,18 +113,19 @@ def test_bc13_is_preferred_and_classified(rating, expected):
     assert not result.conflict
 
 
-def test_valid_bc13_remains_controlling_but_disagreement_is_exposed():
+def test_component_minimum_controls_and_bc13_disagreement_is_exposed():
     result = compute_controlling_condition(
         {"BC13": 7, "BC01": 6, "BC02": 8, "BC03": 7, "BC04": 3}
     )
-    assert result.rating == 7
-    assert result.basis is ConditionBasis.REPORTED_BC13
+    assert result.rating == 3
+    assert result.basis is ConditionBasis.APPLICABLE_MINIMUM
+    assert result.basis_fields == ("BC04",)
     assert result.conflict
-    assert "bc13_disagrees_with_primary_minimum" in result.conflict_reasons
+    assert "bc13_disagrees_with_applicable_minimum" in result.conflict_reasons
 
 
 def test_primary_minimum_is_used_when_bc13_is_absent():
-    result = compute_controlling_condition({"BC01": 7, "BC02": 5, "BC03": 5, "BC04": 2})
+    result = compute_controlling_condition({"BC01": 7, "BC02": 5, "BC03": 5, "BC04": "N"})
     assert result.rating == 5
     assert result.basis is ConditionBasis.PRIMARY_MINIMUM
     assert result.basis_fields == ("BC02", "BC03")
@@ -138,11 +139,13 @@ def test_culvert_is_used_only_when_all_three_primary_values_are_absent():
     assert culvert.basis is ConditionBasis.CULVERT_FALLBACK
     assert culvert.condition_class is ConditionClass.POOR
 
-    invalid_primary = compute_controlling_condition({"BC01": "N", "BC04": 4})
-    assert invalid_primary.rating is None
-    assert invalid_primary.basis is ConditionBasis.UNAVAILABLE
-    assert invalid_primary.conflict
-    assert invalid_primary.invalid_fields == ("BC01",)
+    not_applicable_primary = compute_controlling_condition(
+        {"BC01": "N", "BC02": "N", "BC03": "N", "BC04": 4}
+    )
+    assert not_applicable_primary.rating == 4
+    assert not_applicable_primary.basis is ConditionBasis.CULVERT_FALLBACK
+    assert not not_applicable_primary.conflict
+    assert not_applicable_primary.invalid_fields == ()
 
 
 def test_invalid_bc13_falls_back_to_primary_but_is_not_silently_lost():

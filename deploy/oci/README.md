@@ -86,6 +86,8 @@ Set at least:
 ```env
 CEREBRAS_API_KEY=replace-with-real-key
 CEREBRAS_MODEL=gemma-4-31b
+BRIDGETTE_CEREBRAS_MODEL=gpt-oss-120b
+BRIDGEGUARD_QUERY_MODE=hybrid
 
 BRIDGEGUARD_AUTH_MODE=cloudflare
 BRIDGEGUARD_SESSION_SECRET=replace-with-at-least-32-random-characters

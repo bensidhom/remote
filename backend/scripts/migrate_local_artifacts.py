@@ -170,6 +170,82 @@ def _portable_path(raw_path: str, source_root: Path) -> Path | None:
     return Path("attachments", *candidate_parts[attachment_index + 1 :])
 
 
+def repair_attachment_catalog(destination_root: Path) -> dict:
+    """Bind copied legacy attachment rows to the files already under ``data/``.
+
+    This is an explicit administrative migration: it never trusts a path outside
+    the destination data root, never replaces a non-empty digest, and only hashes
+    files whose recorded byte size still matches the copied object.
+    """
+    database = destination_root / "snbi_bridges.db"
+    if not database.is_file():
+        raise FileNotFoundError("Destination snbi_bridges.db is required")
+    workspace_id = (
+        os.getenv("BRIDGEGUARD_WORKSPACE_ID", "shared-research-workspace").strip()
+        or "shared-research-workspace"
+    )
+    repaired = 0
+    skipped = 0
+    with closing(sqlite3.connect(database)) as connection:
+        connection.row_factory = sqlite3.Row
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(bridge_attachments)")
+        }
+        if "sha256" not in columns:
+            return {"repaired": 0, "skipped": 0, "sha256_supported": False}
+        rows = connection.execute(
+            "SELECT id,filepath,size_bytes,sha256"
+            + (",workspace_id" if "workspace_id" in columns else "")
+            + " FROM bridge_attachments ORDER BY id"
+        ).fetchall()
+        connection.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            relative = _portable_path(str(row["filepath"] or ""), destination_root)
+            if relative is None:
+                skipped += 1
+                continue
+            path = (destination_root / relative).resolve()
+            try:
+                path.relative_to(destination_root.resolve())
+            except ValueError:
+                skipped += 1
+                continue
+            if not path.is_file():
+                skipped += 1
+                continue
+            actual_size = path.stat().st_size
+            recorded_size = row["size_bytes"]
+            if recorded_size not in (None, actual_size):
+                skipped += 1
+                continue
+            digest = str(row["sha256"] or "").strip().lower()
+            updates: list[str] = []
+            values: list[object] = []
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                updates.append("sha256=?")
+                values.append(_sha256(path))
+            if str(row["filepath"]) != relative.as_posix():
+                updates.append("filepath=?")
+                values.append(relative.as_posix())
+            if recorded_size is None:
+                updates.append("size_bytes=?")
+                values.append(actual_size)
+            if "workspace_id" in columns and not str(row["workspace_id"] or "").strip():
+                updates.append("workspace_id=?")
+                values.append(workspace_id)
+            if not updates:
+                continue
+            values.append(int(row["id"]))
+            connection.execute(
+                f"UPDATE bridge_attachments SET {','.join(updates)} WHERE id=?",
+                values,
+            )
+            repaired += 1
+        connection.commit()
+    return {"repaired": repaired, "skipped": skipped, "sha256_supported": True}
+
+
 def merge_attachment_rows(source_root: Path, destination_root: Path) -> dict:
     source_db = source_root / "snbi_bridges.db"
     destination_db = destination_root / "snbi_bridges.db"
@@ -257,11 +333,13 @@ def merge_attachment_rows(source_root: Path, destination_root: Path) -> dict:
             )
             inserted += 1
         destination.commit()
+    catalog_repair = repair_attachment_catalog(destination_root)
     return {
         "inserted": inserted,
         "skipped": skipped,
         "backup": str(backup_file),
         "database_backup": str(database_backup),
+        "catalog_repair": catalog_repair,
     }
 
 

@@ -555,6 +555,66 @@ def _service_event(
     raise RuntimeError("Bridgette emitted an unsupported protocol event")
 
 
+def _unexpected_recovery_event(
+    stream_request: BridgetteStreamRequest,
+) -> dict[str, object]:
+    """Convert an unexpected streamed failure into an editable safe response.
+
+    Expected planning/provider/database failures are handled earlier with the
+    richer SNBI-aware recovery builder. This is the final HTTP boundary: it
+    must not expose internals or leave the person with a dead-end error card.
+    """
+
+    question = stream_request.question.strip()
+    preview = " ".join(question.split())[:55]
+    scope = stream_request.scope
+    if scope.time_mode.value == "exact" and scope.data_year is not None:
+        time_instruction = f"Use inventory year {scope.data_year}."
+    elif scope.time_mode.value == "trend":
+        time_instruction = (
+            f"Group by inventory year from {scope.start_year} through {scope.end_year}."
+        )
+    else:
+        time_instruction = "Use the latest available inventory year."
+    return {
+        "type": "clarification",
+        "request_id": stream_request.request_id,
+        "code": "query_temporarily_unavailable",
+        "message": (
+            "Bridgette could not safely finish this request on this attempt, so no "
+            "partial or unverified result was shown. Retry it, choose an editable "
+            "alternative below, or add the exact field, bridge/county, grouping, "
+            "and inventory period you need."
+        ),
+        "options": [
+            {
+                "id": "retry_query",
+                "label": f"Retry: {preview}"[:90],
+                "suggested_question": question,
+            },
+            {
+                "id": "add_exact_context",
+                "label": "Add the exact field, place, and inventory period",
+                "suggested_question": (
+                    f"{question}\n\nAdditional context: {time_instruction} "
+                    "Use the exact reviewed SNBI field and bridge or county I specify."
+                ),
+            },
+            {
+                "id": "make_smaller",
+                "label": "Ask for one result or grouping at a time",
+                "suggested_question": (
+                    f"{question}\n\nAdditional context: {time_instruction} "
+                    "Return one requested result or grouping and at most 10 rows."
+                ),
+            },
+        ],
+        "warnings": [
+            "The failure was recorded for operators without exposing provider, SQL, or database details."
+        ],
+    }
+
+
 def _stream_events(
     stream_request: BridgetteStreamRequest,
     *,
@@ -617,14 +677,10 @@ def _stream_events(
             type(exc).__name__[:80],
         )
         # Do not expose provider messages, SQL parser internals, database paths,
-        # or tenant-specific values through a terminal error event.
-        yield _ndjson(
-            {
-                "type": "error",
-                "request_id": request_id,
-                "detail": "Bridgette could not complete this request.",
-            }
-        )
+        # or tenant-specific values. Preserve a useful conversation even when
+        # the failure happened outside the typed semantic-service boundary.
+        yield _ndjson(_unexpected_recovery_event(stream_request))
+        yield _ndjson({"type": "done", "request_id": request_id})
     finally:
         provider_registry.finish(request_id)
 

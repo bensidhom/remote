@@ -22,13 +22,14 @@ from .models import (
 )
 
 
-METRIC_REGISTRY_VERSION = "bridgeguard-metrics-v1"
+METRIC_REGISTRY_VERSION = "bridgeguard-metrics-v2-available-inventory"
 
 
 class ConditionBasis(str, Enum):
     REPORTED_BC13 = "reported_bc13"
     PRIMARY_MINIMUM = "derived_primary_min"
     CULVERT_FALLBACK = "culvert_only"
+    APPLICABLE_MINIMUM = "derived_applicable_min"
     UNAVAILABLE = "unknown"
 
 
@@ -94,13 +95,17 @@ def _record_value(record: Mapping[str, object] | None, field: str) -> object:
 def _rating_state(value: object) -> tuple[str, float | None]:
     """Classify a source value as absent, valid, or invalid.
 
-    Ratings are numeric 0 through 9.  Boolean values, infinities, NaN, empty
-    strings, alphabetic codes, and out-of-range numbers are not silently
-    treated as missing because doing so could wrongly activate the culvert
+    Ratings are numeric 0 through 9.  SNBI's ``N`` code means the component is
+    not applicable, so it is treated as absent.  That distinction is important
+    for culverts: BC01--BC03 are normally ``N`` and BC04 is the applicable
+    condition rating.  Other alphabetic codes, booleans, infinities, NaN, and
+    out-of-range numbers remain invalid rather than silently activating a
     fallback.
     """
 
     if value is None or (isinstance(value, str) and not value.strip()):
+        return "absent", None
+    if isinstance(value, str) and value.strip().upper() == "N":
         return "absent", None
     if isinstance(value, bool):
         return "invalid", None
@@ -134,16 +139,11 @@ def compute_controlling_condition(
 ) -> ControllingCondition:
     """Return the single operational condition result used across features.
 
-    Selection order is intentionally strict:
-
-    1. use valid BC13;
-    2. otherwise use the minimum valid BC01--BC03 rating;
-    3. only when BC01--BC03 are all truly absent, use valid BC04;
-    4. otherwise return unavailable.
-
-    A valid BC13 remains controlling even when it disagrees with component
-    evidence, but the result carries an explicit conflict.  Invalid supplied
-    evidence also creates a conflict rather than being silently discarded.
+    FHWA defines B.C.12 and B.C.13 from the lowest applicable value among
+    B.C.01--B.C.04.  ``N`` means not applicable and is ignored.  A normal
+    bridge usually has B.C.04=N; a culvert commonly has B.C.01--B.C.03=N.
+    B.C.13 is calculated by FHWA, so it is used only when no component rating
+    is available and is otherwise checked against the component minimum.
     """
 
     supplied = {
@@ -170,40 +170,35 @@ def compute_controlling_condition(
         for field in ("BC01", "BC02", "BC03")
         if states[field][0] == "valid"
     }
-    primaries_all_absent = all(
-        states[field][0] == "absent" for field in ("BC01", "BC02", "BC03")
-    )
-    bc04_rating = (
-        float(states["BC04"][1]) if states["BC04"][0] == "valid" else None
-    )
+    applicable = dict(primary)
+    if states["BC04"][0] == "valid":
+        applicable["BC04"] = float(states["BC04"][1])
     bc13_rating = (
         float(states["BC13"][1]) if states["BC13"][0] == "valid" else None
     )
 
-    if bc13_rating is not None:
+    if applicable:
+        rating = min(applicable.values())
+        basis_fields = tuple(
+            field
+            for field in ("BC01", "BC02", "BC03", "BC04")
+            if field in applicable
+            and math.isclose(applicable[field], rating, rel_tol=0.0, abs_tol=1e-9)
+        )
+        if primary and "BC04" in applicable:
+            basis = ConditionBasis.APPLICABLE_MINIMUM
+        elif primary:
+            basis = ConditionBasis.PRIMARY_MINIMUM
+        else:
+            basis = ConditionBasis.CULVERT_FALLBACK
+        if bc13_rating is not None and not math.isclose(
+            bc13_rating, rating, rel_tol=0.0, abs_tol=1e-9
+        ):
+            conflicts.append("bc13_disagrees_with_applicable_minimum")
+    elif bc13_rating is not None:
         rating = bc13_rating
         basis = ConditionBasis.REPORTED_BC13
         basis_fields = ("BC13",)
-        if primary:
-            expected = min(primary.values())
-            if not math.isclose(rating, expected, rel_tol=0.0, abs_tol=1e-9):
-                conflicts.append("bc13_disagrees_with_primary_minimum")
-        elif primaries_all_absent and bc04_rating is not None:
-            if not math.isclose(rating, bc04_rating, rel_tol=0.0, abs_tol=1e-9):
-                conflicts.append("bc13_disagrees_with_culvert_fallback")
-    elif primary:
-        rating = min(primary.values())
-        basis = ConditionBasis.PRIMARY_MINIMUM
-        basis_fields = tuple(
-            field
-            for field in ("BC01", "BC02", "BC03")
-            if field in primary
-            and math.isclose(primary[field], rating, rel_tol=0.0, abs_tol=1e-9)
-        )
-    elif primaries_all_absent and bc04_rating is not None:
-        rating = bc04_rating
-        basis = ConditionBasis.CULVERT_FALLBACK
-        basis_fields = ("BC04",)
     else:
         rating = None
         basis = ConditionBasis.UNAVAILABLE
@@ -264,15 +259,15 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
     metrics=(
         MetricDefinition(
             metric_id="inventory.bridge_count",
-            label="Published bridge count",
-            description="Count of published bridge snapshots in the selected time scope.",
+            label="Available bridge count",
+            description="Count of governed or loaded-legacy bridge snapshots in the selected time scope.",
             source_resource_id="v_published_bridge_snapshots",
             expression="COUNT(*)",
             required_columns=(),
             unit="bridges",
-            null_semantics="Every source row is counted; staged and unpublished rows are absent from the source.",
+            null_semantics="Every source row is counted; governed rows are used when present, otherwise loaded legacy inventory is used.",
             denominator_semantics="Not a ratio; grain guarantees one row per bridge and exact data year.",
-            time_semantics="Explicit year is exact; latest must use v_current_bridge_snapshots per bridge.",
+            time_semantics="Explicit year is exact; latest is one global available inventory year for the state.",
             allowed_dimensions=_SNAPSHOT_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
@@ -280,16 +275,16 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             metric_id="inventory.concrete_deck_bridge_count",
             label="Concrete-deck bridge count",
             description=(
-                "Published bridge snapshots having at least one span-set BSP09 code in "
+                "Available bridge snapshots having at least one span-set BSP09 code in "
                 "C01, C02, C03, C04, C05, CX, CP-T, or CR-T."
             ),
             source_resource_id="v_bridge_deck_material_summary",
             expression="SUM(has_concrete_deck)",
             required_columns=("has_concrete_deck",),
             unit="bridges",
-            null_semantics="Every published bridge summary is 1 or 0; missing and no-deck material are not concrete.",
-            denominator_semantics="Not a ratio; one summary row exists per published bridge snapshot.",
-            time_semantics="Explicit year is exact; latest is independently selected per bridge.",
+            null_semantics="Every available bridge summary is 1 or 0; missing and no-deck material are not concrete.",
+            denominator_semantics="Not a ratio; one summary row exists per available bridge snapshot.",
+            time_semantics="Explicit year is exact; latest is one global available inventory year.",
             allowed_dimensions=_DECK_MATERIAL_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
@@ -297,7 +292,7 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             metric_id="inventory.concrete_deck_bridge_percent",
             label="Concrete-deck bridge percentage",
             description=(
-                "Percentage of selected published bridge snapshots having at least one "
+                "Percentage of selected available bridge snapshots having at least one "
                 "concrete BSP09 deck-material code."
             ),
             source_resource_id="v_bridge_deck_material_summary",
@@ -305,8 +300,8 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             required_columns=("has_concrete_deck",),
             unit="percent",
             null_semantics="Missing, unknown, and code 0 deck material remain in the denominator and not the numerator.",
-            denominator_semantics="All selected published bridge snapshots; zero selected rows produce null.",
-            time_semantics="Explicit year is exact; latest is independently selected per bridge.",
+            denominator_semantics="All selected available bridge snapshots; zero selected rows produce null.",
+            time_semantics="Explicit year is exact; latest is one global available inventory year.",
             allowed_dimensions=_DECK_MATERIAL_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
@@ -314,16 +309,16 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             metric_id="inventory.current_concrete_deck_bridge_count",
             label="Current concrete-deck bridge count",
             description=(
-                "Current published bridges having at least one span-set BSP09 code in "
+                "Bridges in the latest available year having at least one span-set BSP09 code in "
                 "C01, C02, C03, C04, C05, CX, CP-T, or CR-T."
             ),
             source_resource_id="v_current_bridge_deck_material_summary",
             expression="SUM(has_concrete_deck)",
             required_columns=("has_concrete_deck",),
             unit="bridges",
-            null_semantics="Every current published bridge summary is 1 or 0; missing and no-deck material are not concrete.",
-            denominator_semantics="Not a ratio; one summary row exists per current published bridge.",
-            time_semantics="Each bridge contributes its independently selected latest published snapshot.",
+            null_semantics="Every latest-year bridge summary is 1 or 0; missing and no-deck material are not concrete.",
+            denominator_semantics="Not a ratio; one summary row exists per bridge in the latest available year.",
+            time_semantics="Every bridge contributes from the same global latest available inventory year.",
             allowed_dimensions=_CURRENT_DECK_MATERIAL_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
@@ -331,7 +326,7 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             metric_id="inventory.current_concrete_deck_bridge_percent",
             label="Current concrete-deck bridge percentage",
             description=(
-                "Percentage of current published bridges having at least one concrete "
+                "Percentage of bridges in the latest available year having at least one concrete "
                 "BSP09 deck-material code."
             ),
             source_resource_id="v_current_bridge_deck_material_summary",
@@ -339,106 +334,106 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             required_columns=("has_concrete_deck",),
             unit="percent",
             null_semantics="Missing, unknown, and code 0 deck material remain in the denominator and not the numerator.",
-            denominator_semantics="All current published bridges; zero selected rows produce null.",
-            time_semantics="Each bridge contributes its independently selected latest published snapshot.",
+            denominator_semantics="All bridges in the latest available year; zero selected rows produce null.",
+            time_semantics="Every bridge contributes from the same global latest available inventory year.",
             allowed_dimensions=_CURRENT_DECK_MATERIAL_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.good_bridge_count",
             label="Operational Good bridge count",
-            description="Published snapshots whose deterministic controlling class is Good (rating 7 through 9).",
+            description="Available snapshots whose deterministic controlling class is Good (rating 7 through 9).",
             source_resource_id="v_bridge_condition",
             expression="SUM(CASE WHEN condition_class = 'Good' THEN 1 ELSE 0 END)",
             required_columns=("condition_class",),
             unit="bridges",
             null_semantics="Unknown controlling ratings are not counted as Good.",
             denominator_semantics="Not a percentage; use bridge_count separately when a share is requested.",
-            time_semantics="Condition is evaluated at each exact published data year; latest is per bridge.",
+            time_semantics="Condition is evaluated at each exact data year; latest is one global state inventory year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.fair_bridge_count",
             label="Operational Fair bridge count",
-            description="Published snapshots whose deterministic controlling class is Fair (rating 5 through 6.999...).",
+            description="Available snapshots whose deterministic controlling class is Fair (rating 5 through 6.999...).",
             source_resource_id="v_bridge_condition",
             expression="SUM(CASE WHEN condition_class = 'Fair' THEN 1 ELSE 0 END)",
             required_columns=("condition_class",),
             unit="bridges",
             null_semantics="Unknown controlling ratings are not counted as Fair.",
             denominator_semantics="Not a percentage; use bridge_count separately when a share is requested.",
-            time_semantics="Condition is evaluated at each exact published data year; latest is per bridge.",
+            time_semantics="Condition is evaluated at each exact data year; latest is one global state inventory year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.poor_bridge_count",
             label="Operational Poor bridge count",
-            description="Published snapshots whose deterministic controlling class is Poor (rating below 5).",
+            description="Available snapshots whose deterministic controlling class is Poor (rating below 5).",
             source_resource_id="v_bridge_condition",
             expression="SUM(CASE WHEN condition_class = 'Poor' THEN 1 ELSE 0 END)",
             required_columns=("condition_class",),
             unit="bridges",
             null_semantics="Unknown controlling ratings are not counted as Poor.",
             denominator_semantics="Not a percentage; use bridge_count separately when a share is requested.",
-            time_semantics="Condition is evaluated at each exact published data year; latest is per bridge.",
+            time_semantics="Condition is evaluated at each exact data year; latest is one global state inventory year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.unknown_condition_count",
             label="Unknown operational condition count",
-            description="Published snapshots lacking a valid controlling condition rating.",
+            description="Available snapshots lacking a valid controlling condition rating.",
             source_resource_id="v_bridge_condition",
             expression="SUM(CASE WHEN controlling_rating IS NULL THEN 1 ELSE 0 END)",
             required_columns=("controlling_rating",),
             unit="bridges",
             null_semantics="A null controlling rating is the event being counted.",
             denominator_semantics="Not a ratio; expose alongside classified counts to make missingness visible.",
-            time_semantics="Missingness is evaluated at each exact published data year.",
+            time_semantics="Missingness is evaluated at each exact available data year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.good_bridge_percent",
             label="Operational Good bridge percentage",
-            description="Good-class published snapshots as a percentage of every selected published snapshot.",
+            description="Good-class snapshots as a percentage of every selected available snapshot.",
             source_resource_id="v_bridge_condition",
             expression="100.0 * SUM(CASE WHEN condition_class = 'Good' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)",
             required_columns=("condition_class",),
             unit="percent",
             null_semantics="Unknown controlling ratings remain in the denominator and not in the Good numerator.",
-            denominator_semantics="All selected published bridge snapshots, including unknown condition; zero rows produce null.",
-            time_semantics="Condition is evaluated at each exact published data year; latest is per bridge.",
+            denominator_semantics="All selected available bridge snapshots, including unknown condition; zero rows produce null.",
+            time_semantics="Condition is evaluated at each exact data year; latest is one global state inventory year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.fair_bridge_percent",
             label="Operational Fair bridge percentage",
-            description="Fair-class published snapshots as a percentage of every selected published snapshot.",
+            description="Fair-class snapshots as a percentage of every selected available snapshot.",
             source_resource_id="v_bridge_condition",
             expression="100.0 * SUM(CASE WHEN condition_class = 'Fair' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)",
             required_columns=("condition_class",),
             unit="percent",
             null_semantics="Unknown controlling ratings remain in the denominator and not in the Fair numerator.",
-            denominator_semantics="All selected published bridge snapshots, including unknown condition; zero rows produce null.",
-            time_semantics="Condition is evaluated at each exact published data year; latest is per bridge.",
+            denominator_semantics="All selected available bridge snapshots, including unknown condition; zero rows produce null.",
+            time_semantics="Condition is evaluated at each exact data year; latest is one global state inventory year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
         MetricDefinition(
             metric_id="inventory.poor_bridge_percent",
             label="Operational Poor bridge percentage",
-            description="Poor-class published snapshots as a percentage of every selected published snapshot.",
+            description="Poor-class snapshots as a percentage of every selected available snapshot.",
             source_resource_id="v_bridge_condition",
             expression="100.0 * SUM(CASE WHEN condition_class = 'Poor' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)",
             required_columns=("condition_class",),
             unit="percent",
             null_semantics="Unknown controlling ratings remain in the denominator and not in the Poor numerator.",
-            denominator_semantics="All selected published bridge snapshots, including unknown condition; zero rows produce null.",
-            time_semantics="Condition is evaluated at each exact published data year; latest is per bridge.",
+            denominator_semantics="All selected available bridge snapshots, including unknown condition; zero rows produce null.",
+            time_semantics="Condition is evaluated at each exact data year; latest is one global state inventory year.",
             allowed_dimensions=_CONDITION_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
@@ -476,7 +471,7 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
         MetricDefinition(
             metric_id="inventory.average_daily_traffic",
             label="Average carried-highway AADT",
-            description="Mean AADT across selected published H01 carried-highway observations.",
+            description="Mean AADT across selected available H01 carried-highway observations.",
             source_resource_id="v_carried_highway_features",
             expression="AVG(annual_average_daily_traffic)",
             required_columns=("annual_average_daily_traffic",),
@@ -490,14 +485,14 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
         MetricDefinition(
             metric_id="inventory.total_bridge_length",
             label="Total reported bridge length",
-            description="Sum of known total bridge length across selected published snapshots.",
+            description="Sum of known total bridge length across selected available snapshots.",
             source_resource_id="v_published_bridge_snapshots",
             expression="SUM(total_bridge_length)",
             required_columns=("total_bridge_length",),
             unit="feet",
             null_semantics="Unknown lengths are excluded; report their count separately when material.",
             denominator_semantics="Not a ratio; one length contribution per selected bridge snapshot.",
-            time_semantics="Explicit year is exact; latest must select one current snapshot per bridge.",
+            time_semantics="Explicit year is exact; latest selects the global latest available state inventory year.",
             allowed_dimensions=_SNAPSHOT_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),
@@ -511,7 +506,7 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             unit="square_feet",
             null_semantics="Unknown deck areas are excluded; they are never treated as zero.",
             denominator_semantics="Not a ratio; one deck-area contribution per selected bridge snapshot.",
-            time_semantics="Explicit year is exact; latest must select one current snapshot per bridge.",
+            time_semantics="Explicit year is exact; latest selects the global latest available state inventory year.",
             allowed_dimensions=_SNAPSHOT_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,
         ),

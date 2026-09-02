@@ -48,6 +48,7 @@ from .plans import (
     PlanEvidence,
     compile_bridge_query_plan,
 )
+from .reference_data import NEW_JERSEY_COUNTY_PROMPT_ROWS
 from .registry import (
     DEFAULT_REQUEST_REGISTRY,
     CancelOutcome,
@@ -88,7 +89,7 @@ from .sql_ast import (
 
 
 PROMPT_VERSION = "bridgette-semantic-query-v1"
-PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v1"
+PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v2"
 MAX_GENERATION_ATTEMPTS = 2
 MAX_QUERY_CONTEXT_BYTES = 256 * 1024
 # Keep planning prompts bounded while retaining the complete 154-field SNBI
@@ -240,6 +241,72 @@ class GenerationFeedback:
     attempt: int
     code: str
     instruction: str
+
+
+def _plan_repair_instruction(code: str) -> str:
+    """Return value-free, validation-specific guidance for the sole plan retry."""
+
+    guidance = {
+        "client_scope_override": (
+            "Remove every workspace, state, bridge, revision, and inventory-year "
+            "filter; the server already injected that scope."
+        ),
+        "invalid_field_reference": (
+            "Replace every field reference with an exact field_id or "
+            "resource_id.field_id from semantic_catalog columns."
+        ),
+        "unknown_resource": (
+            "Choose resource_id exactly from semantic_catalog.resources[].id."
+        ),
+        "unknown_metric": (
+            "Choose metric_ids only from active reviewed_metric_registry rows."
+        ),
+        "metric_resource_mismatch": (
+            "Choose a metric whose source_resource exactly equals resource_id."
+        ),
+        "invalid_order": (
+            "Set order.by to an exact selected output field reference or selected "
+            "metric id, or return an empty order array."
+        ),
+        "unknown_order_output": (
+            "Order only by a field or metric already present in the plan output."
+        ),
+        "aggregate_grain_error": (
+            "For an aggregate plan, make selected_fields exactly equal dimensions "
+            "and avoid joins that multiply the base-resource grain."
+        ),
+        "intent_shape_mismatch": (
+            "For list or lookup use selected_fields with empty metric_ids and "
+            "dimensions; for aggregate intents use metrics and approved dimensions."
+        ),
+        "metric_required": (
+            "Select at least one active metric for count, aggregate, trend, or compare."
+        ),
+        "selected_field_required": (
+            "Select at least one reviewed field for a list or lookup plan."
+        ),
+        "intent_time_mismatch": (
+            "Use trend intent for aggregate trend time scope; otherwise use the "
+            "server-selected non-trend intent and time mode."
+        ),
+        "latest_county_requires_current": (
+            "Use v_current_county_bridge_inventory for a latest county summary; "
+            "keep v_county_bridge_inventory for exact-year or trend requests."
+        ),
+        "invalid_identifier": (
+            "Use exact lowercase identifiers from the reviewed context, without "
+            "labels, spaces, aliases, or SNBI tag punctuation."
+        ),
+        "invalid_plan_json": (
+            "Return exactly one JSON object matching the response schema with no prose."
+        ),
+    }
+    specific = guidance.get(
+        code,
+        "Use only active metrics, reviewed resources and fields, and the "
+        "server-selected time mode.",
+    )
+    return f"Return one smaller strict BridgeQueryPlan. {specific}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -896,7 +963,8 @@ def build_plan_context(
     payload["protocol_version"] = PLAN_PROMPT_VERSION
     payload["task"] = (
         "Return exactly one JSON BridgeQueryPlan object. Do not return SQL, "
-        "Markdown, prose, workspace, state, bridge, year, revision, or table values."
+        "Markdown, prose, server scope values, or physical table values. Bridge "
+        "identity and data-year fields may be selected as outputs when reviewed."
     )
     dictionary_payload = payload.get("snbi_dictionary", {})
     compact_index = dictionary_payload.get("complete_compact_index", [])
@@ -934,12 +1002,22 @@ def build_plan_context(
             "value": "typed scalar/list/null allowed by the selected field and operator",
         },
         "order_shape": {"by": "selected output or metric id", "direction": ["asc", "desc"]},
-        "forbidden_fields": sorted(
+        "forbidden_root_fields": sorted(
             {
                 "sql", "workspace", "workspace_id", "state", "state_code",
                 "bridge", "bridge_number", "year", "data_year", "start_year",
                 "end_year", "revision_id", "snapshot_revision_id",
             }
+        ),
+        "server_scope_filter_fields": sorted(
+            {
+                "workspace_id", "state_code", "bridge_number", "data_year",
+                "snapshot_revision_id",
+            }
+        ),
+        "selection_rule": (
+            "Reviewed bridge_number and data_year fields may be selected, grouped, "
+            "or ordered as outputs. Never use server_scope_filter_fields as filters."
         ),
         "fail_closed": (
             "If no reviewed resource or active metric answers the requested fact, "
@@ -949,6 +1027,13 @@ def build_plan_context(
     }
     payload["reviewed_metric_registry"] = _compact_plan_metrics()
     payload["semantic_catalog"] = _compact_plan_catalog(catalog, packed_dictionary)
+    payload["reference_mappings"] = {
+        "new_jersey_counties": list(NEW_JERSEY_COUNTY_PROMPT_ROWS),
+        "planning_rule": (
+            "For a latest/current question asking for results in each county, use "
+            "v_current_county_bridge_inventory and return county_name, not only county_code."
+        ),
+    }
     selected_tags = dictionary_payload.get(
         "selected_detailed_tags", []
     )
@@ -1284,10 +1369,7 @@ def execute_semantic_plan_query(
                 feedback = GenerationFeedback(
                     attempt=attempt,
                     code=exc.code,
-                    instruction=(
-                        "Return one smaller strict BridgeQueryPlan using only active metrics, "
-                        "reviewed resources and fields, and the server-selected time mode."
-                    ),
+                    instruction=_plan_repair_instruction(exc.code),
                 )
                 continue
             raise SemanticQueryAbstained(
@@ -1328,7 +1410,7 @@ def execute_semantic_plan_query(
                 request_id=request.request_id,
                 owner_id=request.identity.actor_id,
                 workspace_id=request.identity.workspace_id,
-                allowed_relations=catalog.query_columns_by_relation,
+                allowed_relations=catalog.sandbox_relation_allowlist,
                 allowed_functions=tuple(
                     function.sql_name.casefold() for function in catalog.functions
                 ),
@@ -1627,7 +1709,7 @@ def execute_semantic_query(
                 request_id=request.request_id,
                 owner_id=request.identity.actor_id,
                 workspace_id=request.identity.workspace_id,
-                allowed_relations=catalog.query_columns_by_relation,
+                allowed_relations=catalog.sandbox_relation_allowlist,
                 allowed_functions=tuple(
                     function.sql_name.casefold() for function in catalog.functions
                 ),

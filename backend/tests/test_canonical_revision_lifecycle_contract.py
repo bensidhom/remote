@@ -227,6 +227,8 @@ def _stage_request(
     request_id: str = "request-001",
     expected_data_generation: int | None = 0,
     atomic_mode: str = "batch",
+    project_to_inventory: bool = False,
+    write_mode: str = "replace_snapshot",
 ) -> Any:
     return StageCanonicalBatchRequest(
         workspace_id=workspace_id,
@@ -237,6 +239,8 @@ def _stage_request(
         expected_data_generation=expected_data_generation,
         atomic_mode=atomic_mode,
         revisions=tuple(inputs or (_input(),)),
+        project_to_inventory=project_to_inventory,
+        write_mode=write_mode,
     )
 
 
@@ -577,6 +581,70 @@ def test_staging_is_immutable_monotonic_diffed_and_generation_neutral(revision_d
     finally:
         connection.rollback()
         connection.close()
+
+
+def test_reviewed_import_projects_yearly_inventory_without_published_snapshot(revision_db):
+    result = stage_canonical_batch(
+        revision_db,
+        _stage_request(
+            _input(document=_document(bridge_name="Direct yearly inventory")),
+            idempotency_key="direct-inventory-1",
+            request_id="direct-inventory-request-1",
+            project_to_inventory=True,
+        ),
+    )
+
+    assert result.data_generation == 1
+    assert get_workspace_state(revision_db, WORKSPACE_A).data_generation == 1
+    connection = _connect(revision_db)
+    try:
+        projected = connection.execute(
+            "SELECT bridge_name, data_year FROM bridges "
+            "WHERE state_code=? AND bridge_number=? AND data_year=?",
+            (STATE, BRIDGE_A, YEAR),
+        ).fetchone()
+        published_count = connection.execute(
+            "SELECT COUNT(*) FROM published_snapshots WHERE workspace_id=?",
+            (WORKSPACE_A,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert tuple(projected) == ("Direct yearly inventory", YEAR)
+    assert published_count == 0
+
+
+def test_create_only_protects_loaded_inventory_without_revision_history(revision_db):
+    connection = _connect(revision_db)
+    try:
+        connection.execute(
+            "INSERT INTO bridges (state_code,bridge_number,data_year,bridge_name) "
+            "VALUES (?,?,?,?)",
+            (STATE, BRIDGE_A, YEAR, "Existing loaded row"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RevisionConflictError) as caught:
+        stage_canonical_batch(
+            revision_db,
+            _stage_request(
+                _input(document=_document(bridge_name="Attempted replacement")),
+                idempotency_key="protect-loaded-inventory-1",
+                request_id="protect-loaded-inventory-request-1",
+                project_to_inventory=True,
+                write_mode="create_only",
+            ),
+        )
+    _assert_error(
+        caught.value,
+        status=409,
+        code="inventory_record_already_exists",
+    )
+    assert get_snapshot_history(
+        revision_db, WORKSPACE_A, STATE, BRIDGE_A, YEAR
+    ) == ()
+    assert get_workspace_state(revision_db, WORKSPACE_A).data_generation == 0
 
 
 def test_idempotency_replay_and_changed_payload_conflict(revision_db):

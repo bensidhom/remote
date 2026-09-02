@@ -449,3 +449,43 @@ def test_bridge_forecast_run_is_annual_revision_bound_and_idempotent(tmp_path):
     assert replacement.result.annual_ledger[0].year == snapshot.data_year
     assert replacement.result.annual_ledger[0].selected_action_ids == ("full_replacement",)
     assert replacement.result.total_present_value_cost == Decimal("1000000")
+
+    scheduled = compare_bridge_lcca_strategies(
+        database_path,
+        history=history,
+        strategies=("deck_and_substructure_rehabilitation", "full_replacement"),
+        horizon_years=3,
+        economics=EconomicAssumptions(
+            mode=EconomicMode.CONSTANT_DOLLAR,
+            base_year=snapshot.data_year,
+            real_discount_rate=Decimal("0.025"),
+        ),
+        action_costs={
+            "deck_replacement": Decimal("500000"),
+            "substructure_rehabilitation": Decimal("250000"),
+            "full_replacement": Decimal("1000000"),
+        },
+        rehabilitation_year=snapshot.data_year + 1,
+        replacement_year=snapshot.data_year + 2,
+        enable_research_effect_assumptions=True,
+    )
+    rehabilitation, future_replacement = scheduled.alternatives
+    assert {action.year for action in rehabilitation.scheduled_actions} == {
+        snapshot.data_year + 1
+    }
+    rehab_row = next(
+        row
+        for row in rehabilitation.result.annual_ledger
+        if row.year == snapshot.data_year + 1
+    )
+    assert rehab_row.selected_action_ids == (
+        "deck_replacement",
+        "substructure_rehabilitation",
+    )
+    assert future_replacement.scheduled_actions[0].year == snapshot.data_year + 2
+    replacement_row = next(
+        row
+        for row in future_replacement.result.annual_ledger
+        if row.year == snapshot.data_year + 2
+    )
+    assert replacement_row.selected_action_ids == ("full_replacement",)

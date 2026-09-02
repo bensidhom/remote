@@ -89,7 +89,7 @@ apply_receipt="$receipt_root/backfill-apply.json"
 forecast_receipt="$receipt_root/forecast-training.json"
 validation_receipt="$receipt_root/validation.json"
 
-candidate python scripts/backfill_legacy_projection.py dry-run \
+candidate python -m scripts.backfill_legacy_projection dry-run \
   --source "$source_db" \
   --destination "$candidate_db" \
   --workspace-id "$workspace_id" \
@@ -111,7 +111,7 @@ print(value)
 PY
 )"
 
-candidate python scripts/backfill_legacy_projection.py apply \
+candidate python -m scripts.backfill_legacy_projection apply \
   --source "$source_db" \
   --destination "$candidate_db" \
   --workspace-id "$workspace_id" \
@@ -122,7 +122,7 @@ candidate python scripts/backfill_legacy_projection.py apply \
   --publish \
   --receipt "$apply_receipt" >/dev/null
 
-candidate python scripts/train_published_forecast.py \
+candidate python -m scripts.train_published_forecast \
   --database "$candidate_db" \
   --workspace-id "$workspace_id" \
   --state-code 34 \
@@ -131,7 +131,7 @@ candidate python scripts/train_published_forecast.py \
   --created-by "$actor_id" \
   --receipt "$forecast_receipt" >/dev/null
 
-candidate python scripts/validate_published_database.py \
+candidate python -m scripts.validate_published_database \
   --database "$candidate_db" \
   --workspace-id "$workspace_id" \
   --state-code 34 \

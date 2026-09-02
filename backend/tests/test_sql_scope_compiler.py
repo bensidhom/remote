@@ -165,7 +165,7 @@ def test_latest_scope_uses_a_scoped_max_year(
     assert "SELECT MAX" in compiled.sql
     # Outer scan and trusted latest-year scan each carry workspace and state.
     assert compiled.parameters == ("workspace-a", 34, "workspace-a", 34, 201)
-    assert execute(connection, compiled) == [("B-1",), ("B-2",)]
+    assert execute(connection, compiled) == [("B-1",)]
 
 
 def test_latest_bridge_scope_cannot_select_another_bridge(
@@ -182,10 +182,9 @@ def test_latest_bridge_scope_cannot_select_another_bridge(
         "B-2",
         "workspace-a",
         34,
-        "B-2",
         201,
     )
-    assert execute(connection, compiled) == [("B-2", 2023)]
+    assert execute(connection, compiled) == []
 
 
 def test_current_view_declares_latest_semantics_without_reinterpreting_year(
@@ -236,16 +235,16 @@ def test_aggregate_resource_rejects_bridge_scope(catalog: SqlCatalog) -> None:
     assert raised.value.code == "incompatible_bridge_resource"
 
 
-def test_historical_aggregate_resource_rejects_ambiguous_latest(
+def test_historical_aggregate_resource_uses_global_latest_year(
     catalog: SqlCatalog,
+    connection: sqlite3.Connection,
 ) -> None:
-    with pytest.raises(SqlCompilationError) as raised:
-        validate_and_compile_sql(
-            "SELECT county, bridge_count FROM v_county_inventory",
-            catalog,
-            QueryScope("workspace-a", 34, "latest"),
-        )
-    assert raised.value.code == "latest_requires_bridge_identity"
+    compiled = validate_and_compile_sql(
+        "SELECT county, bridge_count FROM v_county_inventory",
+        catalog,
+        QueryScope("workspace-a", 34, "latest"),
+    )
+    assert execute(connection, compiled) == [("Gloucester", 1)]
 
 
 def test_trend_scope_uses_inclusive_server_range(

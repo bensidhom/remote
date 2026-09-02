@@ -107,7 +107,7 @@ def _report(path, year: int):
     )
 
 
-def test_forecasts_never_enter_observed_kpis_and_publication_identity_invalidates_together(tmp_path):
+def test_forecasts_and_publication_pointers_never_enter_loaded_inventory_kpis(tmp_path):
     database = tmp_path / "analytics.sqlite3"
     _database(str(database))
     historical_before = _report(database, 2023)
@@ -122,7 +122,7 @@ def test_forecasts_never_enter_observed_kpis_and_publication_identity_invalidate
     connection.close()
 
     # A modeled future state is not an observed bridge snapshot and cannot alter
-    # any operational KPI value or its exact published revision-set receipt.
+    # any operational KPI value or its exact loaded-inventory receipt.
     assert _report(database, 2024) == current_before
 
     connection = sqlite3.connect(database)
@@ -143,7 +143,7 @@ def test_forecasts_never_enter_observed_kpis_and_publication_identity_invalidate
     current_after = _report(database, 2024)
     historical_after = _report(database, 2023)
     assert current_after["data_generation"] == current_before["data_generation"] + 1
-    assert current_after["revision_set_sha256"] != current_before["revision_set_sha256"]
+    assert current_after["revision_set_sha256"] == current_before["revision_set_sha256"]
     assert current_after["values"] == current_before["values"]
     # The global generation signals staleness, while the untouched historical
     # population retains its exact revision set and observed values.
@@ -161,15 +161,43 @@ def test_history_ui_uses_only_exact_revision_forecast_and_lcca_for_rehabilitatio
     detail = (root / "frontend/src/components/BridgeDetailModal.tsx").read_text(
         encoding="utf-8"
     )
+    lcca = (root / "frontend/src/components/BridgeLCCAModal.tsx").read_text(
+        encoding="utf-8"
+    )
     map_page = (root / "frontend/src/pages/Map.tsx").read_text(encoding="utf-8")
 
     assert "'/api/forecasts/v2/bridge'" in history
+    assert "'/api/forecasts/v2/bridge/backtest'" in history
     assert "expected_data_generation" in history
     assert "as_of_year: requestedYear" in history
+    assert "Test a past year" in history
+    assert "later real values were not used to produce them" in history
+    assert "Loaded source:" not in history
+    assert "Forecast package:" not in history
+    assert "Historical evaluation:" not in history
+    assert "research unvalidated" not in history
     assert "/api/bridge-history/" not in history
     assert "/api/forecasts/train-bridge/" not in history
     assert "/api/forecasts/bridge/" not in history
     assert "Rehabilitation and maintenance simulations are in the LCCA tab" in history
     assert "dataYear={bridge.data_year}" in detail
     assert "dataYear={historyModal.data_year}" in map_page
-
+    assert "Planning/research comparison" not in lcca
+    assert "Enable illustrative treatment effects" not in lcca
+    assert "Run yearly simulation" not in lcca
+    assert "enable_research_effect_assumptions: true" in lcca
+    assert "rehabilitation_year: rehabilitationYear" in lcca
+    assert "replacement_year: replacementYear" in lcca
+    assert "Results update automatically" in lcca
+    assert "NJDOT defaults · editable" in lcca
+    assert "No work is scheduled; the Markov model advances condition one year at a time." in lcca
+    assert "Action details" in lcca
+    assert "Condition, cost, and actions" in lcca
+    assert "every strategy selected above" in lcca
+    assert "Cumulative present value" in lcca
+    assert 'yAxisId="condition"' in lcca
+    assert 'yAxisId="money"' in lcca
+    assert "Condition and actions" not in lcca
+    assert "Money and actions" not in lcca
+    assert "Scenario receipt:" not in lcca
+    assert "Forecast status" not in lcca

@@ -21,7 +21,7 @@ import sqlite3
 from typing import Iterable, Mapping, Sequence
 
 
-LATEST_SCHEMA_VERSION = 13
+LATEST_SCHEMA_VERSION = 17
 
 
 class SchemaDriftError(RuntimeError):
@@ -2124,14 +2124,14 @@ POINT_CLOUD_RUN_TABLES: tuple[TableSpec, ...] = (
 )
 
 
-_PUBLISHED_BRIDGE_COLUMNS = """
-    ps.workspace_id,
-    ps.snapshot_revision_id,
+_AVAILABLE_BRIDGE_COLUMNS = """
+    available.workspace_id,
+    available.snapshot_revision_id,
     b.state_code,
     b.bridge_number,
     b.bridge_name,
     b.data_year,
-    ps.published_at,
+    available.published_at,
     b.county_code,
     b.bridge_location,
     b.latitude,
@@ -2153,26 +2153,41 @@ _PUBLISHED_BRIDGE_COLUMNS = """
 
 PUBLISHED_BRIDGES_VIEW = ViewSpec(
     "v_published_bridge_snapshots",
-    "CREATE VIEW v_published_bridge_snapshots AS SELECT "
-    + _PUBLISHED_BRIDGE_COLUMNS
-    + " FROM published_snapshots ps JOIN bridges b "
-    "ON b.state_code=ps.state_code AND b.bridge_number=ps.bridge_number "
-    "AND b.data_year=ps.data_year",
+    "CREATE VIEW v_published_bridge_snapshots AS "
+    "WITH available AS (SELECT ws.workspace_id, "
+    "'loaded-inventory:' || CAST(b.state_code AS TEXT) || ':' || "
+    "b.bridge_number || ':' || CAST(b.data_year AS TEXT) AS snapshot_revision_id, "
+    "b.state_code, b.bridge_number, b.data_year, NULL AS published_at "
+    "FROM workspace_state ws CROSS JOIN bridges b) "
+    "SELECT " + _AVAILABLE_BRIDGE_COLUMNS + " FROM available JOIN bridges b "
+    "ON b.state_code=available.state_code "
+    "AND b.bridge_number=available.bridge_number "
+    "AND b.data_year=available.data_year",
 )
 
 CURRENT_BRIDGES_VIEW = ViewSpec(
     "v_current_bridge_snapshots",
-    "CREATE VIEW v_current_bridge_snapshots AS SELECT p.* "
-    "FROM v_published_bridge_snapshots p WHERE NOT EXISTS ("
-    "SELECT 1 FROM v_published_bridge_snapshots newer "
-    "WHERE newer.workspace_id=p.workspace_id AND newer.state_code=p.state_code "
-    "AND newer.bridge_number=p.bridge_number AND newer.data_year>p.data_year)",
+    "CREATE VIEW v_current_bridge_snapshots AS "
+    "WITH loaded_latest AS ("
+    "SELECT state_code, MAX(data_year) AS data_year FROM bridges GROUP BY state_code), "
+    "available AS ("
+    "SELECT ws.workspace_id, "
+    "'loaded-inventory:' || CAST(b.state_code AS TEXT) || ':' || "
+    "b.bridge_number || ':' || CAST(b.data_year AS TEXT) AS snapshot_revision_id, "
+    "b.state_code, b.bridge_number, b.data_year, NULL AS published_at "
+    "FROM workspace_state ws CROSS JOIN loaded_latest latest "
+    "JOIN bridges b ON b.state_code=latest.state_code "
+    "AND b.data_year=latest.data_year) "
+    "SELECT " + _AVAILABLE_BRIDGE_COLUMNS + " FROM available JOIN bridges b "
+    "ON b.state_code=available.state_code "
+    "AND b.bridge_number=available.bridge_number "
+    "AND b.data_year=available.data_year",
 )
 
 BRIDGE_FEATURES_VIEW = ViewSpec(
     "v_bridge_features",
     """CREATE VIEW v_bridge_features AS SELECT
-    ps.workspace_id, ps.snapshot_revision_id,
+    p.workspace_id, p.snapshot_revision_id,
     f.state_code, f.bridge_number, f.data_year,
     f.feature_type, f.feature_location, f.feature_name,
     f.functional_classification, f.urban_code, f.nhs_designation,
@@ -2191,9 +2206,9 @@ BRIDGE_FEATURES_VIEW = ViewSpec(
     f.movable_bridge_max_navigation_vertical_clearance,
     f.navigation_channel_width, f.navigation_channel_min_horizontal_clearance,
     f.substructure_navigation_protection
-    FROM published_snapshots ps JOIN features f
-      ON f.state_code=ps.state_code AND f.bridge_number=ps.bridge_number
-     AND f.data_year=ps.data_year""",
+    FROM v_published_bridge_snapshots p JOIN features f
+      ON f.state_code=p.state_code AND f.bridge_number=p.bridge_number
+     AND f.data_year=p.data_year""",
 )
 
 CARRIED_HIGHWAY_FEATURES_VIEW = ViewSpec(
@@ -2205,13 +2220,13 @@ CARRIED_HIGHWAY_FEATURES_VIEW = ViewSpec(
 BRIDGE_ROUTES_VIEW = ViewSpec(
     "v_bridge_routes",
     """CREATE VIEW v_bridge_routes AS SELECT
-    ps.workspace_id, ps.snapshot_revision_id,
+    p.workspace_id, p.snapshot_revision_id,
     r.state_code, r.bridge_number, r.data_year, r.feature_type,
     r.route_designation, r.route_number, r.route_direction,
     r.route_type, r.service_type
-    FROM published_snapshots ps JOIN routes r
-      ON r.state_code=ps.state_code AND r.bridge_number=ps.bridge_number
-     AND r.data_year=ps.data_year""",
+    FROM v_published_bridge_snapshots p JOIN routes r
+      ON r.state_code=p.state_code AND r.bridge_number=p.bridge_number
+     AND r.data_year=p.data_year""",
 )
 
 BRIDGE_CONDITION_VIEW = ViewSpec(
@@ -2222,41 +2237,55 @@ BRIDGE_CONDITION_VIEW = ViewSpec(
         CASE WHEN p.deck_condition_rating BETWEEN 0 AND 9
                    OR p.superstructure_condition_rating BETWEEN 0 AND 9
                    OR p.substructure_condition_rating BETWEEN 0 AND 9
+                   OR p.culvert_condition_rating BETWEEN 0 AND 9
              THEN min(
                CASE WHEN p.deck_condition_rating BETWEEN 0 AND 9
                     THEN p.deck_condition_rating ELSE 99 END,
                CASE WHEN p.superstructure_condition_rating BETWEEN 0 AND 9
                     THEN p.superstructure_condition_rating ELSE 99 END,
                CASE WHEN p.substructure_condition_rating BETWEEN 0 AND 9
-                    THEN p.substructure_condition_rating ELSE 99 END)
-             ELSE NULL END AS derived_primary_rating,
+                    THEN p.substructure_condition_rating ELSE 99 END,
+               CASE WHEN p.culvert_condition_rating BETWEEN 0 AND 9
+                    THEN p.culvert_condition_rating ELSE 99 END)
+             ELSE NULL END AS derived_applicable_rating,
         CASE WHEN (p.deck_condition_rating IS NOT NULL
-                         AND NOT (p.deck_condition_rating BETWEEN 0 AND 9))
+                         AND NOT (p.deck_condition_rating BETWEEN 0 AND 9)
+                         AND upper(trim(CAST(p.deck_condition_rating AS TEXT)))<>'N')
                     OR (p.superstructure_condition_rating IS NOT NULL
-                         AND NOT (p.superstructure_condition_rating BETWEEN 0 AND 9))
+                         AND NOT (p.superstructure_condition_rating BETWEEN 0 AND 9)
+                         AND upper(trim(CAST(p.superstructure_condition_rating AS TEXT)))<>'N')
                     OR (p.substructure_condition_rating IS NOT NULL
-                         AND NOT (p.substructure_condition_rating BETWEEN 0 AND 9))
-             THEN 1 ELSE 0 END AS invalid_primary_rating,
-        CASE WHEN p.deck_condition_rating IS NULL
-                   AND p.superstructure_condition_rating IS NULL
-                   AND p.substructure_condition_rating IS NULL
-             THEN 1 ELSE 0 END AS all_primary_absent
+                         AND NOT (p.substructure_condition_rating BETWEEN 0 AND 9)
+                         AND upper(trim(CAST(p.substructure_condition_rating AS TEXT)))<>'N')
+                    OR (p.culvert_condition_rating IS NOT NULL
+                         AND NOT (p.culvert_condition_rating BETWEEN 0 AND 9)
+                         AND upper(trim(CAST(p.culvert_condition_rating AS TEXT)))<>'N')
+             THEN 1 ELSE 0 END AS invalid_component_rating,
+        CASE WHEN p.deck_condition_rating BETWEEN 0 AND 9
+                   OR p.superstructure_condition_rating BETWEEN 0 AND 9
+                   OR p.substructure_condition_rating BETWEEN 0 AND 9
+             THEN 1 ELSE 0 END AS has_primary_rating,
+        CASE WHEN p.culvert_condition_rating BETWEEN 0 AND 9
+             THEN 1 ELSE 0 END AS has_culvert_rating
       FROM v_published_bridge_snapshots p
     ), controlling AS (
       SELECT ratings.*,
-        CASE WHEN lowest_condition_rating_code BETWEEN 0 AND 9
-             THEN lowest_condition_rating_code
-             WHEN derived_primary_rating IS NOT NULL THEN derived_primary_rating
-             WHEN all_primary_absent=1 AND culvert_condition_rating BETWEEN 0 AND 9
-             THEN culvert_condition_rating ELSE NULL END AS controlling_rating,
-        CASE WHEN lowest_condition_rating_code BETWEEN 0 AND 9 THEN 'reported_bc13'
-             WHEN derived_primary_rating IS NOT NULL THEN 'derived_primary_min'
-             WHEN all_primary_absent=1 AND culvert_condition_rating BETWEEN 0 AND 9 THEN 'culvert_only'
-             ELSE 'unknown' END AS condition_basis,
-        CASE WHEN invalid_primary_rating=1 THEN 1
+        CASE WHEN derived_applicable_rating IS NOT NULL THEN derived_applicable_rating
              WHEN lowest_condition_rating_code BETWEEN 0 AND 9
-                   AND derived_primary_rating IS NOT NULL
-                   AND abs(lowest_condition_rating_code-derived_primary_rating)>0.000001
+             THEN lowest_condition_rating_code ELSE NULL END AS controlling_rating,
+        CASE WHEN derived_applicable_rating IS NOT NULL
+                  AND has_primary_rating=1 AND has_culvert_rating=1
+             THEN 'derived_applicable_min'
+             WHEN derived_applicable_rating IS NOT NULL AND has_primary_rating=1
+             THEN 'derived_primary_min'
+             WHEN derived_applicable_rating IS NOT NULL AND has_culvert_rating=1
+             THEN 'culvert_only'
+             WHEN lowest_condition_rating_code BETWEEN 0 AND 9 THEN 'reported_bc13'
+             ELSE 'unknown' END AS condition_basis,
+        CASE WHEN invalid_component_rating=1 THEN 1
+             WHEN lowest_condition_rating_code BETWEEN 0 AND 9
+                   AND derived_applicable_rating IS NOT NULL
+                   AND abs(lowest_condition_rating_code-derived_applicable_rating)>0.000001
              THEN 1 ELSE 0 END AS condition_conflict
       FROM ratings
     )
@@ -2298,13 +2327,57 @@ COUNTY_INVENTORY_VIEW = ViewSpec(
 )
 
 
+CURRENT_COUNTY_INVENTORY_VIEW = ViewSpec(
+    "v_current_county_bridge_inventory",
+    """CREATE VIEW v_current_county_bridge_inventory AS
+    WITH classified AS (
+      SELECT p.*,
+        CASE WHEN p.lowest_condition_rating_code BETWEEN 0 AND 9
+             THEN p.lowest_condition_rating_code
+             WHEN p.deck_condition_rating BETWEEN 0 AND 9
+                   OR p.superstructure_condition_rating BETWEEN 0 AND 9
+                   OR p.substructure_condition_rating BETWEEN 0 AND 9
+             THEN min(
+               CASE WHEN p.deck_condition_rating BETWEEN 0 AND 9
+                    THEN p.deck_condition_rating ELSE 99 END,
+               CASE WHEN p.superstructure_condition_rating BETWEEN 0 AND 9
+                    THEN p.superstructure_condition_rating ELSE 99 END,
+               CASE WHEN p.substructure_condition_rating BETWEEN 0 AND 9
+                    THEN p.substructure_condition_rating ELSE 99 END)
+             WHEN p.deck_condition_rating IS NULL
+                   AND p.superstructure_condition_rating IS NULL
+                   AND p.substructure_condition_rating IS NULL
+                   AND p.culvert_condition_rating BETWEEN 0 AND 9
+             THEN p.culvert_condition_rating ELSE NULL END AS controlling_rating
+      FROM v_current_bridge_snapshots p
+    )
+    SELECT p.workspace_id, p.state_code, p.county_code,
+      COALESCE(c.county_name, 'Unknown') AS county_name, p.data_year,
+      COUNT(*) AS bridge_count,
+      SUM(CASE WHEN p.controlling_rating>=7 THEN 1 ELSE 0 END) AS good_bridge_count,
+      SUM(CASE WHEN p.controlling_rating>=5 AND p.controlling_rating<7
+               THEN 1 ELSE 0 END) AS fair_bridge_count,
+      SUM(CASE WHEN p.controlling_rating<5 THEN 1 ELSE 0 END) AS poor_bridge_count,
+      SUM(CASE WHEN p.controlling_rating IS NULL THEN 1 ELSE 0 END)
+        AS unknown_condition_count,
+      SUM(COALESCE(NULLIF(p.calculated_deck_area, 0),
+          CASE WHEN p.total_bridge_length>0 AND p.bridge_width_out_to_out>0
+               THEN p.total_bridge_length*p.bridge_width_out_to_out ELSE NULL END))
+        AS total_deck_area
+    FROM classified p LEFT JOIN ref_counties c
+      ON c.state_code=p.state_code AND c.county_code=p.county_code
+    GROUP BY p.workspace_id, p.state_code, p.county_code,
+             COALESCE(c.county_name, 'Unknown'), p.data_year""",
+)
+
+
 def _published_child_view(name: str, table: str, columns: str) -> ViewSpec:
     return ViewSpec(
         name,
-        f"CREATE VIEW {name} AS SELECT ps.workspace_id, "
-        f"ps.snapshot_revision_id, {columns} FROM published_snapshots ps "
-        f"JOIN {table} child ON child.state_code=ps.state_code "
-        "AND child.bridge_number=ps.bridge_number AND child.data_year=ps.data_year",
+        f"CREATE VIEW {name} AS SELECT p.workspace_id, "
+        f"p.snapshot_revision_id, {columns} FROM v_published_bridge_snapshots p "
+        f"JOIN {table} child ON child.state_code=p.state_code "
+        "AND child.bridge_number=p.bridge_number AND child.data_year=p.data_year",
     )
 
 
@@ -2346,8 +2419,8 @@ BRIDGE_SPAN_SETS_VIEW = _published_child_view(
 BRIDGE_DECK_MATERIAL_SUMMARY_VIEW = ViewSpec(
     "v_bridge_deck_material_summary",
     """CREATE VIEW v_bridge_deck_material_summary AS SELECT
-    ps.workspace_id, ps.snapshot_revision_id,
-    ps.state_code, ps.bridge_number, ps.data_year,
+    p.workspace_id, p.snapshot_revision_id,
+    p.state_code, p.bridge_number, p.data_year,
     COUNT(s.id) AS span_set_count,
     SUM(CASE WHEN s.deck_material_and_type IS NOT NULL
               AND s.deck_material_and_type<>''
@@ -2363,11 +2436,11 @@ BRIDGE_DECK_MATERIAL_SUMMARY_VIEW = ViewSpec(
               AND s.deck_material_and_type<>''
               AND s.deck_material_and_type<>'0' THEN 1 ELSE 0 END)=1
          THEN 1 ELSE 0 END AS has_known_deck_material
-    FROM published_snapshots ps LEFT JOIN span_sets s
-      ON s.state_code=ps.state_code AND s.bridge_number=ps.bridge_number
-     AND s.data_year=ps.data_year
-    GROUP BY ps.workspace_id, ps.snapshot_revision_id,
-             ps.state_code, ps.bridge_number, ps.data_year""",
+    FROM v_published_bridge_snapshots p LEFT JOIN span_sets s
+      ON s.state_code=p.state_code AND s.bridge_number=p.bridge_number
+     AND s.data_year=p.data_year
+    GROUP BY p.workspace_id, p.snapshot_revision_id,
+             p.state_code, p.bridge_number, p.data_year""",
 )
 
 CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY_VIEW = ViewSpec(
@@ -2406,6 +2479,7 @@ QUERY_SEMANTIC_VIEWS: tuple[ViewSpec, ...] = (
     BRIDGE_ROUTES_VIEW,
     BRIDGE_CONDITION_VIEW,
     COUNTY_INVENTORY_VIEW,
+    CURRENT_COUNTY_INVENTORY_VIEW,
     BRIDGE_ELEMENTS_VIEW,
     BRIDGE_WORKS_VIEW,
     BRIDGE_POSTING_STATUSES_VIEW,

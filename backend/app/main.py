@@ -3384,6 +3384,228 @@ def get_available_years_for_state(state_code: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _loaded_document_etag(document: dict) -> str:
+    encoded = json.dumps(
+        document,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f'"{hashlib.sha256(encoded).hexdigest()}"'
+
+
+def _loaded_inventory_legacy_flags(
+    state_code: int,
+    documents: List[Dict],
+    *,
+    year: int | None,
+) -> List[bool]:
+    """Classify direct inventory documents from source evidence in this DB.
+
+    Published revisions used to carry source records into validation. The
+    direct yearly-inventory editor instead exports only canonical SNBI fields,
+    so it must recover the same evidence from ``bridge_source_records``. This
+    keeps NBI-transition rows on the research/legacy validation profile while
+    native SNBI rows continue through strict SNBI validation.
+    """
+
+    bridge_numbers = {
+        str(document.get("BID01") or "")
+        for document in documents
+        if isinstance(document, dict) and str(document.get("BID01") or "")
+    }
+    if not bridge_numbers:
+        return [False for _document in documents]
+
+    connection = sqlite3.connect(
+        f"file:{Path(USER_DB).resolve().as_posix()}?mode=ro",
+        uri=True,
+    )
+    try:
+        if year is not None:
+            rows = connection.execute(
+                "SELECT DISTINCT bridge_number FROM bridge_source_records "
+                "WHERE state_code=? AND data_year=? AND source_name='NBI TXT'",
+                (int(state_code), int(year)),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT DISTINCT s.bridge_number FROM bridge_source_records s "
+                "JOIN bridges b ON b.state_code=s.state_code "
+                "AND b.bridge_number=s.bridge_number AND b.data_year=s.data_year "
+                "WHERE s.state_code=? AND s.source_name='NBI TXT' "
+                "AND (b.data_year IS NULL OR b.data_year=("
+                "SELECT MAX(b2.data_year) FROM bridges b2 "
+                "WHERE b2.state_code=b.state_code AND b2.bridge_number=b.bridge_number))",
+                (int(state_code),),
+            ).fetchall()
+    finally:
+        connection.close()
+
+    legacy_bridge_numbers = {str(row[0]) for row in rows}
+    return [
+        isinstance(document, dict)
+        and str(document.get("BID01") or "") in legacy_bridge_numbers
+        for document in documents
+    ]
+
+
+@app.get("/api/bridge-snapshots")
+def list_loaded_bridge_snapshots(
+    state_code: int,
+    year: int,
+    limit: int = 10_000,
+):
+    """List exact yearly bridge rows for selectors without publication pointers."""
+
+    maximum = max(1, min(int(limit), 10_000))
+    connection = sqlite3.connect(f"file:{Path(USER_DB).resolve().as_posix()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT state_code,bridge_number,bridge_name,data_year,fhwa_omit "
+            "FROM bridges WHERE state_code=? AND data_year=? "
+            "ORDER BY bridge_number LIMIT ?",
+            (int(state_code), int(year), maximum + 1),
+        ).fetchall()
+        state = connection.execute(
+            "SELECT data_generation,schema_generation FROM workspace_state WHERE workspace_id=?",
+            (SHARED_WORKSPACE_ID,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if len(rows) > maximum:
+        raise HTTPException(status_code=422, detail="Bridge selector exceeds the 10,000-row limit")
+    return {
+        "snapshots": [dict(row) for row in rows],
+        "data_generation": int(state[0]) if state else 0,
+        "schema_generation": int(state[1]) if state else 0,
+    }
+
+
+@app.get("/api/bridge-document/{state_code}/{bridge_number}/{year}")
+def get_loaded_bridge_document(state_code: int, bridge_number: str, year: int):
+    """Return one complete editable SNBI document from the exact yearly row."""
+
+    documents = export_all_bridges_snbi(
+        USER_DB,
+        int(state_code),
+        year=int(year),
+        bridge_number=str(bridge_number),
+    )
+    if not documents:
+        raise HTTPException(status_code=404, detail="Bridge snapshot not found")
+    if len(documents) != 1:
+        raise HTTPException(status_code=409, detail="Bridge snapshot identity is ambiguous")
+    document = clean_nan_values(documents[0])
+    legacy_flags = _loaded_inventory_legacy_flags(
+        int(state_code),
+        [document],
+        year=int(year),
+    )
+    connection = sqlite3.connect(f"file:{Path(USER_DB).resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        state = connection.execute(
+            "SELECT data_generation,schema_generation FROM workspace_state WHERE workspace_id=?",
+            (SHARED_WORKSPACE_ID,),
+        ).fetchone()
+    finally:
+        connection.close()
+    etag = _loaded_document_etag(document)
+    return JSONResponse(
+        content={
+            "canonical_document": document,
+            "snapshot_id": f"loaded-inventory:{int(state_code)}:{str(bridge_number)}:{int(year)}",
+            "data_generation": int(state[0]) if state else 0,
+            "schema_generation": int(state[1]) if state else 0,
+            "validation": clean_nan_values(
+                validate_snbi_payload(
+                    [document],
+                    issue_limit=1000,
+                    submission_year=int(year),
+                    legacy_flags=legacy_flags,
+                )
+            ),
+        },
+        headers={"ETag": etag, "Cache-Control": "no-store"},
+    )
+
+
+@app.put("/api/bridge-document/{state_code}/{bridge_number}/{year}")
+def replace_loaded_bridge_document(
+    state_code: int,
+    bridge_number: str,
+    year: int,
+    payload: dict,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+):
+    """Atomically replace one exact yearly snapshot and all of its child rows."""
+
+    document = payload.get("canonical_document")
+    if not isinstance(document, dict):
+        raise HTTPException(status_code=400, detail="canonical_document is required")
+    current = get_loaded_bridge_document(state_code, bridge_number, year)
+    current_etag = current.headers.get("etag")
+    if not if_match or if_match != current_etag:
+        raise HTTPException(status_code=412, detail="The inventory snapshot changed; reload before saving")
+    if str(document.get("BID01", "")).strip() != str(bridge_number):
+        raise HTTPException(status_code=400, detail="BID01 cannot change in this editor")
+    try:
+        if int(document.get("BL01")) != int(state_code):
+            raise HTTPException(status_code=400, detail="BL01 cannot change in this editor")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="BL01 must match the selected state")
+
+    connection = sqlite3.connect(USER_DB)
+    try:
+        state_row = connection.execute(
+            "SELECT data_generation FROM workspace_state WHERE workspace_id=?",
+            (SHARED_WORKSPACE_ID,),
+        ).fetchone()
+        source_row = connection.execute(
+            "SELECT source_payload_json FROM bridge_source_records "
+            "WHERE state_code=? AND bridge_number=? AND data_year=? AND source_name='NBI TXT' "
+            "ORDER BY id DESC LIMIT 1",
+            (int(state_code), str(bridge_number), int(year)),
+        ).fetchone()
+    finally:
+        connection.close()
+    expected_generation = payload.get("expected_data_generation")
+    if expected_generation is not None and state_row is not None and int(expected_generation) != int(state_row[0]):
+        raise HTTPException(status_code=409, detail="The inventory changed; reload before saving")
+
+    document_for_load = dict(document)
+    if source_row is not None:
+        try:
+            nbi_source = json.loads(str(source_row[0]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            nbi_source = None
+        if isinstance(nbi_source, dict):
+            document_for_load["_SourceData"] = {"nbi": nbi_source}
+
+    inserted, existed, skipped, reasons = load_json_to_db(
+        USER_DB,
+        [document_for_load],
+        data_year_override=int(year),
+    )
+    if skipped or not (inserted or existed):
+        raise HTTPException(status_code=422, detail=(reasons[0] if reasons else "Snapshot replacement failed"))
+    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    connection = sqlite3.connect(USER_DB)
+    try:
+        connection.execute(
+            "UPDATE workspace_state SET data_generation=data_generation+1,updated_at=? WHERE workspace_id=?",
+            (now, SHARED_WORKSPACE_ID),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    response = get_loaded_bridge_document(state_code, bridge_number, year)
+    response.status_code = 200
+    return response
+
+
 @app.get("/api/export-bridges/{state_code}")
 def export_bridges_by_state(state_code: int, year: int = None):
     """Export all bridges for a state as SNBI JSON objects (one dict per bridge)."""
@@ -3399,7 +3621,16 @@ def validate_bridges_by_state(state_code: int, year: int = None):
     """Validate exported SNBI JSON for a state/year without blocking export."""
     try:
         data = export_all_bridges_snbi(USER_DB, state_code, year=year)
-        return clean_nan_values(validate_snbi_payload(data, submission_year=year))
+        legacy_flags = _loaded_inventory_legacy_flags(
+            int(state_code), data, year=year
+        )
+        return clean_nan_values(
+            validate_snbi_payload(
+                data,
+                submission_year=year,
+                legacy_flags=legacy_flags,
+            )
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3416,7 +3647,17 @@ def validate_single_bridge(state_code: int, bridge_number: str, year: int = None
         ]
         if not bridge_payload:
             raise HTTPException(status_code=404, detail="Bridge not found for validation")
-        return clean_nan_values(validate_snbi_payload(bridge_payload, issue_limit=1000, submission_year=year))
+        legacy_flags = _loaded_inventory_legacy_flags(
+            int(state_code), bridge_payload, year=year
+        )
+        return clean_nan_values(
+            validate_snbi_payload(
+                bridge_payload,
+                issue_limit=1000,
+                submission_year=year,
+                legacy_flags=legacy_flags,
+            )
+        )
     except HTTPException:
         raise
     except Exception as e:

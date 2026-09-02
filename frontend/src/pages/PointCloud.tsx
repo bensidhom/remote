@@ -16,6 +16,61 @@ interface PointStats {
 interface Measurement { groundZ: number | null; soffitZ: number | null }
 interface ParseResult  { positions: Float32Array; colors: Float32Array; stats: PointStats }
 
+function copyParseResult(result: ParseResult): ParseResult {
+  return {
+    positions: new Float32Array(result.positions),
+    colors: new Float32Array(result.colors),
+    stats: { ...result.stats },
+  };
+}
+
+function combineCloudResults(raw: ParseResult, processed: ParseResult): ParseResult {
+  const rawCount = raw.positions.length / 3;
+  const processedCount = processed.positions.length / 3;
+  const processedLimit = Math.min(processedCount, Math.floor(MAX_UI_POINTS * 0.65));
+  const rawLimit = Math.min(rawCount, MAX_UI_POINTS - processedLimit);
+  const outputCount = rawLimit + processedLimit;
+  const positions = new Float32Array(outputCount * 3);
+  const colors = new Float32Array(outputCount * 3);
+  const rawStep = Math.max(1, rawCount / Math.max(1, rawLimit));
+  const processedStep = Math.max(1, processedCount / Math.max(1, processedLimit));
+  let outputIndex = 0;
+  const append = (source: ParseResult, count: number, step: number, rawLayer: boolean) => {
+    for (let sample = 0; sample < count; sample++, outputIndex++) {
+      const sourceIndex = Math.min(source.positions.length / 3 - 1, Math.floor(sample * step));
+      const sourceOffset = sourceIndex * 3;
+      const outputOffset = outputIndex * 3;
+      positions[outputOffset] = source.positions[sourceOffset] + source.stats.originX - raw.stats.originX;
+      positions[outputOffset + 1] = source.positions[sourceOffset + 1] + source.stats.originY - raw.stats.originY;
+      positions[outputOffset + 2] = source.positions[sourceOffset + 2] + source.stats.originZ - raw.stats.originZ;
+      if (rawLayer) {
+        colors[outputOffset] = 0.72; colors[outputOffset + 1] = 0.75; colors[outputOffset + 2] = 0.82;
+      } else {
+        colors[outputOffset] = source.colors[sourceOffset];
+        colors[outputOffset + 1] = source.colors[sourceOffset + 1];
+        colors[outputOffset + 2] = source.colors[sourceOffset + 2];
+      }
+    }
+  };
+  append(raw, rawLimit, rawStep, true);
+  append(processed, processedLimit, processedStep, false);
+  return {
+    positions,
+    colors,
+    stats: {
+      count: outputCount,
+      originalCount: (raw.stats.originalCount ?? rawCount) + (processed.stats.originalCount ?? processedCount),
+      minX: Math.min(raw.stats.minX, processed.stats.minX), maxX: Math.max(raw.stats.maxX, processed.stats.maxX),
+      minY: Math.min(raw.stats.minY, processed.stats.minY), maxY: Math.max(raw.stats.maxY, processed.stats.maxY),
+      minZ: Math.min(raw.stats.minZ, processed.stats.minZ), maxZ: Math.max(raw.stats.maxZ, processed.stats.maxZ),
+      spanX: Math.max(raw.stats.maxX, processed.stats.maxX) - Math.min(raw.stats.minX, processed.stats.minX),
+      spanY: Math.max(raw.stats.maxY, processed.stats.maxY) - Math.min(raw.stats.minY, processed.stats.minY),
+      spanZ: Math.max(raw.stats.maxZ, processed.stats.maxZ) - Math.min(raw.stats.minZ, processed.stats.minZ),
+      originX: raw.stats.originX, originY: raw.stats.originY, originZ: raw.stats.originZ,
+    },
+  };
+}
+
 function heightToColor(t: number): [number, number, number] {
   const c = Math.max(0, Math.min(1, t));
   if (c < 0.25) return [0, c * 4, 1];
@@ -696,19 +751,13 @@ interface DurablePointCloudEvidence {
   truncated: boolean;
 }
 
-const POINT_CLOUD_COMPONENT_CLASSES = [
-  'deck_slab',
-  'girder_beam',
-  'diaphragm_bracing',
-  'bearing',
-  'pier_column',
-  'abutment_wingwall',
-  'parapet_railing',
-  'under_surface',
-  'attached_restriction_appurtenance',
-  'clutter',
-  'unknown_structure',
-] as const;
+interface ProcessedCloudBundle {
+  preview: ParseResult;
+  analysis: any;
+  run: DurablePointCloudRun | null;
+  evidence: DurablePointCloudEvidence | null;
+  renderedPointCount: number;
+}
 
 const EMPTY_SOURCE_REVIEW: PointCloudSourceReview = {
   horizontalUnit: 'unknown',
@@ -726,6 +775,35 @@ const EMPTY_SOURCE_REVIEW: PointCloudSourceReview = {
   registrationMethod: '',
   registrationReviewed: false,
 };
+
+// Preserve raw road-to-soffit geometry for display when an exact automatic
+// feature-bound B.H.12/B.H.13 result is unavailable.
+const geometryClearanceCandidate = (info: any | null | undefined): any | null => {
+  if (info?.status === 'success') return info;
+  if (info?.raw_geometry_candidate) {
+    const raw = geometryClearanceCandidate(info.raw_geometry_candidate);
+    if (raw) return raw;
+  }
+  const candidates = Array.isArray(info?.roadway_candidates)
+    ? info.roadway_candidates
+    : [];
+  if (!candidates.length) return null;
+  const primary = candidates[0];
+  return {
+    ...info,
+    status: 'geometry_candidate',
+    roadways: candidates,
+    roadway_count: candidates.length,
+    clearance_m: primary.center_m,
+    min_clearance_m: primary.controlling_min_m,
+    typical_clearance_m: primary.median_m,
+  };
+};
+
+const compactComponentLabel = (value: unknown): string => String(value ?? 'Unknown component')
+  .replace(/\s+#\d+\s*$/i, '')
+  .replace(/\s+/g, ' ')
+  .trim();
 
 const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridgeNumber, bridgeName, dataYear }) => {
   const mountRef      = useRef<HTMLDivElement>(null);
@@ -746,6 +824,9 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const origPosRef       = useRef<Float32Array | null>(null); // backup for isolate/reset
   const renderPendingRef = useRef<number>(5); // dirty-render counter
   const originalFileRef  = useRef<File | null>(null); // kept for bridge save
+  const rawCloudDataRef = useRef<ParseResult | null>(null);
+  const processedCloudBundleRef = useRef<ProcessedCloudBundle | null>(null);
+  const loadedBridgeSourceShaRef = useRef<string | null>(null);
 
   const [stats,       setStats]       = useState<PointStats | null>(null);
   const [status,      setStatus]      = useState('Open an E57 source, or locally visualize .xyz, .ply, .las, .npz, or .csv.');
@@ -755,6 +836,8 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const [measureStep, setMeasureStep] = useState<'idle'|'ground'|'soffit'>('idle');
   const [pointSize,   setPointSize]   = useState(0.06);
   const [fileName,    setFileName]    = useState('');
+  const [cloudDisplayMode, setCloudDisplayMode] = useState<'raw' | 'processed' | 'together'>('raw');
+  const [availableCloudLayers, setAvailableCloudLayers] = useState({ raw: false, processed: false });
   const [segLabels,   setSegLabels]   = useState<Uint8Array | null>(null);
   const [segVisible,  setSegVisible]  = useState<boolean[]>(Array(SEG_COUNT).fill(true));
   const [segClasses,  setSegClasses]  = useState<SegClass[]>(DEFAULT_SEG_CLASSES);
@@ -766,13 +849,12 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const [segColorMode, setSegColorMode] = useState<'components' | 'instances'>('components');
   // Backend clearance result (min/typical/cross-section + DB cross-check)
   const [clearanceInfo, setClearanceInfo] = useState<any | null>(null);
+  const [selectedClearancePlaneId, setSelectedClearancePlaneId] = useState('');
   const [clearanceBusy, setClearanceBusy] = useState(false);
   const [analysisInfo, setAnalysisInfo] = useState<any | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [durableRun, setDurableRun] = useState<DurablePointCloudRun | null>(null);
-  const [durableEvidence, setDurableEvidence] = useState<DurablePointCloudEvidence | null>(null);
-  const [componentCorrections, setComponentCorrections] = useState<Record<string, string>>({});
-  const [reviewBusy, setReviewBusy] = useState(false);
+  const [, setDurableEvidence] = useState<DurablePointCloudEvidence | null>(null);
   const durablePollAbortRef = useRef<AbortController | null>(null);
   // Ref mirror for the render loop (its closure is created once at mount):
   // while the server analyze runs, the viewer throttles its redraws so the
@@ -782,8 +864,8 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   useEffect(() => () => durablePollAbortRef.current?.abort(), []);
   // Layer toggles for the one-pass result: fitted component volumes + Poisson mesh
   const analysisMeshRef = useRef<THREE.Mesh | null>(null);
-  const [showVolumes, setShowVolumes] = useState(true);
-  const [showMesh, setShowMesh] = useState(true);
+  const [showVolumes, setShowVolumes] = useState(false);
+  const [showMesh, setShowMesh] = useState(false);
   const [reconstructing, setReconstructing] = useState(false);
   // False when the current cloud came from photogrammetric reconstruction
   // (SfM/VGGT): its geometry has no absolute scale, so measurements are
@@ -795,16 +877,20 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const [viewMode,    setViewMode]    = useState<'points' | 'surface'>('points');
   // Bridge-linked cloud save/load
   const hasBridge = !!(bridgeStateCode && bridgeNumber);
-  const [cloudInfo,   setCloudInfo]   = useState<{ exists: boolean; filename?: string; size_bytes?: number; uploaded_at?: string; accepted_result_exists?: boolean; accepted_result_data_year?: number; legacy_processed_exists?: boolean; processed_point_count?: number; source_profile?: any } | null>(null);
+  const [cloudInfo,   setCloudInfo]   = useState<{ exists: boolean; raw_exists?: boolean; filename?: string; size_bytes?: number; uploaded_at?: string; source_sha256?: string; accepted_result_exists?: boolean; accepted_result_data_year?: number; legacy_processed_exists?: boolean; processed_point_count?: number; source_profile?: any } | null>(null);
   const [sourceReview, setSourceReview] = useState<PointCloudSourceReview>(EMPTY_SOURCE_REVIEW);
   const [saving,      setSaving]      = useState(false);
   const [deleting,    setDeleting]    = useState(false);
 
   useEffect(() => {
     durablePollAbortRef.current?.abort();
+    rawCloudDataRef.current = null;
+    processedCloudBundleRef.current = null;
+    loadedBridgeSourceShaRef.current = null;
+    setAvailableCloudLayers({ raw: false, processed: false });
+    setCloudDisplayMode('raw');
     setDurableRun(null);
     setDurableEvidence(null);
-    setComponentCorrections({});
   }, [bridgeStateCode, bridgeNumber, dataYear]);
 
   useEffect(() => {
@@ -921,6 +1007,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       .then(r => r.json())
       .then(d => {
         setCloudInfo(d);
+        if (d.filename) setFileName(d.filename);
         const declaration = d.source_profile?.coordinate_declaration;
         const frame = declaration?.frame;
         if (frame) {
@@ -1070,7 +1157,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         );
       }
       const d = await res.json();
-      setCloudInfo({ exists: true, filename: d.filename, size_bytes: d.size_bytes, source_profile: d.source_profile });
+      setCloudInfo(previous => ({ ...(previous ?? {}), exists: true, raw_exists: true, filename: d.filename, size_bytes: d.size_bytes, source_profile: d.source_profile }));
       setStatus(d.source_profile?.metric_processing_authorized
         ? `Saved and reviewed "${d.filename}" for metric processing.`
         : `Saved "${d.filename}" for visualization; units/gravity or the reviewed server parser remain unverified.`);
@@ -1102,7 +1189,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         const detail = payload?.detail;
         throw new Error(typeof detail === 'string' ? detail : detail?.message || detail?.code || `Delete failed (${response.status})`);
       }
-      setCloudInfo({ exists: false, accepted_result_exists: false });
+      setCloudInfo(previous => ({ ...(previous ?? {}), exists: !!previous?.accepted_result_exists, raw_exists: false }));
       setStatus(payload?.status === 'deleted'
         ? 'The unprocessed saved point cloud was deleted with an audit receipt.'
         : 'Deletion was accepted and will be retried by the durable cleanup worker.');
@@ -1114,9 +1201,15 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   }, [hasBridge, cloudInfo?.exists, deleting, bridgeStateCode, bridgeNumber]);
 
   // loadFromBridge is defined after processFile (below) because it depends on it.
-  const loadFromBridgeRef = useRef<(() => Promise<void>) | null>(null);
+  const loadFromBridgeRef = useRef<((mode?: 'auto' | 'raw' | 'processed') => Promise<void>) | null>(null);
   const loadFromBridge = useCallback(() => {
-    return loadFromBridgeRef.current?.() ?? Promise.resolve();
+    return loadFromBridgeRef.current?.('auto') ?? Promise.resolve();
+  }, []);
+  const loadRawFromBridge = useCallback(() => {
+    return loadFromBridgeRef.current?.('raw') ?? Promise.resolve();
+  }, []);
+  const loadProcessedFromBridge = useCallback(() => {
+    return loadFromBridgeRef.current?.('processed') ?? Promise.resolve();
   }, []);
 
   const loadIntoScene = useCallback((result: ParseResult) => {
@@ -1178,47 +1271,101 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   useEffect(() => { drawClearancePlanes(measurement.groundZ, measurement.soffitZ, stats); }, [measurement, stats, drawClearancePlanes]);
 
-  // Draw the full clearance result: the fitted road & soffit surfaces per roadway
-  // and the controlling-minimum + centre measurement lines. World coords â†’ centred
-  // frame via origin. Falls back to the single clearance_line (e.g. waterway).
-  const drawClearanceLine = useCallback((info: any, s: PointStats | null) => {
+  // Several transverse sections are evaluated, but only sections contributing
+  // to the minimum envelope are persisted. Draw one selected retained plane at
+  // a time so the geometry and its distances remain readable.
+  const drawClearanceLine = useCallback((info: any, s: PointStats | null, selectedPlaneId = '') => {
     if (!sceneRef.current) return;
     if (clearLineRef.current) { sceneRef.current.remove(clearLineRef.current); clearLineRef.current = null; }
     if (!info || !s) return;
     const group = new THREE.Group();
+    const featureMeasurement = info?.feature_measurement?.primary_measurement;
+    const selectedBh12 = Array.isArray(featureMeasurement?.bh12_candidates)
+      ? featureMeasurement.bh12_candidates.find((candidate: any) => candidate.candidate_id === featureMeasurement.selected_bh12_candidate_id)
+      : null;
+    const bh12ControlId = selectedBh12?.controlling_sample_id;
+    const bh13ControlId = featureMeasurement?.bh13_controlling_sample_id;
     const V = (x: number, y: number, z: number) => new THREE.Vector3(x - s.originX, y - s.originY, z - s.originZ);
     const dotR = Math.max(0.15, s.spanZ * 0.02);
     const dot = (v: THREE.Vector3, color: number) => {
       const m = new THREE.Mesh(new THREE.SphereGeometry(dotR, 12, 12), new THREE.MeshBasicMaterial({ color }));
       m.position.copy(v); return m;
     };
-    const vline = (p: number[], color: number, w = 2) => {
+    const vline = (p: number[], color: number, w = 2, markers = true) => {
       // p = [x, y, road_z, soffit_z]
       const a = V(p[0], p[1], p[2]), b = V(p[0], p[1], p[3]);
       group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]),
         new THREE.LineBasicMaterial({ color, linewidth: w })));
-      group.add(dot(a, 0x22c55e)); group.add(dot(b, 0xf97316));
+      if (markers) { group.add(dot(a, 0x22c55e)); group.add(dot(b, 0xf97316)); }
     };
     const plane = (corners: number[][], color: number, opacity: number) => {
       if (!corners || corners.length < 3) return;
       const geo = new THREE.BufferGeometry();
-      const verts = new Float32Array(corners.flatMap((c) => { const v = V(c[0], c[1], c[2]); return [v.x, v.y, v.z]; }));
+      const planePoints = corners.map((c) => V(c[0], c[1], c[2]));
+      const verts = new Float32Array(planePoints.flatMap((v) => [v.x, v.y, v.z]));
       geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
       const idx: number[] = [];                            // fan over the hull polygon
       for (let i = 1; i < corners.length - 1; i++) idx.push(0, i, i + 1);
       geo.setIndex(idx);
       group.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false })));
+      const outline = [...planePoints, planePoints[0]];
+      group.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(outline),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }),
+      ));
+    };
+    const clearanceRectangles = (samples: any[], defaultColor: number) => {
+      if (!samples.length) return;
+      const points = samples.map(sample => new THREE.Vector2(Number(sample.x), Number(sample.y)));
+      const fallbackDirection = new THREE.Vector2(1, 0);
+      for (let index = 0; index < samples.length; index++) {
+        const current = points[index];
+        const previous = points[index - 1];
+        const next = points[index + 1];
+        const left = previous
+          ? previous.clone().add(current).multiplyScalar(0.5)
+          : current.clone().sub((next ? next.clone().sub(current) : fallbackDirection).multiplyScalar(0.5));
+        const right = next
+          ? current.clone().add(next).multiplyScalar(0.5)
+          : current.clone().add((previous ? current.clone().sub(previous) : fallbackDirection).multiplyScalar(0.5));
+        const sample = samples[index];
+        const sampleId = sample.measurement_sample_id;
+        const controlsBh13 = sampleId === bh13ControlId;
+        const controlsBh12 = sampleId === bh12ControlId;
+        const color = controlsBh13 ? 0xdc2626 : controlsBh12 ? 0x2563eb : sample.used_by_result === false ? 0x94a3b8 : defaultColor;
+        plane([
+          [left.x, left.y, Number(sample.road_z)],
+          [right.x, right.y, Number(sample.road_z)],
+          [right.x, right.y, Number(sample.soffit_z)],
+          [left.x, left.y, Number(sample.soffit_z)],
+        ], color, controlsBh13 || controlsBh12 || sample.controlling ? 0.26 : 0.15);
+      }
     };
 
     const roadways = info.roadways as any[] | undefined;
     if (roadways && roadways.length) {
       const pal = [0x6366f1, 0x2563eb, 0x16a34a, 0xa855f7];
-      roadways.forEach((rw, i) => {
+      roadways.slice(0, 1).forEach((rw, i) => {
         const col = pal[i % pal.length];
-        plane(rw.soffit_plane_corners, col, 0.22);      // deck underside
-        plane(rw.road_plane_corners, 0x94a3b8, 0.16);   // road surface
-        if (rw.controlling_point) vline(rw.controlling_point, 0xef4444, 3);  // controlling min = red
-        if (rw.center_point) vline(rw.center_point, 0x10b981, 2);            // centre = green
+        const retainedPlanes = Array.isArray(rw.measurement_planes) ? rw.measurement_planes : [];
+        const selectedPlane = retainedPlanes.find((candidate: any) => candidate.plane_id === selectedPlaneId)
+          ?? retainedPlanes.find((candidate: any) => candidate.controls_global_minimum)
+          ?? retainedPlanes[0]
+          ?? null;
+        const samples = Array.isArray(selectedPlane?.samples)
+          ? selectedPlane.samples
+          : (Array.isArray(rw.profile_samples) ? rw.profile_samples : []);
+        clearanceRectangles(samples, col);
+        samples.forEach((sample: any) => {
+          const p = [sample.x, sample.y, sample.road_z, sample.soffit_z];
+          const sampleId = sample.measurement_sample_id;
+          const controlsBh13 = sampleId === bh13ControlId;
+          const controlsBh12 = sampleId === bh12ControlId;
+          const isMin = controlsBh13 || controlsBh12 || !!sample.controlling;
+          const contributes = sample.used_by_result !== false;
+          vline(p, controlsBh13 ? 0xdc2626 : controlsBh12 ? 0x2563eb : isMin ? 0xef4444 : contributes ? col : 0x94a3b8, isMin ? 3 : 1, false);
+        });
+        if (!samples.length && rw.controlling_point) vline(rw.controlling_point, 0xef4444, 3);  // legacy result
       });
     } else if (info.clearance_line) {
       // Single line (unvalidated water-surface gap proxy, or fallback).
@@ -1230,7 +1377,18 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     renderPendingRef.current = 6;
   }, []);
 
-  useEffect(() => { drawClearanceLine(clearanceInfo, stats); }, [clearanceInfo, stats, drawClearanceLine]);
+  useEffect(() => {
+    const candidate = geometryClearanceCandidate(clearanceInfo);
+    const roadway = Array.isArray(candidate?.roadways) ? candidate.roadways[0] : null;
+    const retainedPlanes = Array.isArray(roadway?.measurement_planes) ? roadway.measurement_planes : [];
+    setSelectedClearancePlaneId(current => retainedPlanes.some((plane: any) => plane.plane_id === current)
+      ? current
+      : (retainedPlanes.find((plane: any) => plane.controls_global_minimum)?.plane_id ?? retainedPlanes[0]?.plane_id ?? ''));
+  }, [clearanceInfo]);
+
+  useEffect(() => {
+    drawClearanceLine(geometryClearanceCandidate(clearanceInfo), stats, selectedClearancePlaneId);
+  }, [clearanceInfo, stats, selectedClearancePlaneId, drawClearanceLine]);
 
   // Draw each fitted component as its actual geometry: a translucent triangulated
   // surface (deck top+soffit heightfield, under-surface, pier prisms) that hugs the
@@ -1315,11 +1473,15 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     renderPendingRef.current = 6;
   }, [showVolumes, showMesh, analysisInfo]);
 
-  // Apply the one-pass result to the cloud: colour every point by its component
-  // and hide the points the pipeline removed (noise / vegetation / off-structure)
-  // by collapsing them to NaN so only the isolated bridge remains on screen.
+  // Apply the one-pass result to the cloud. Label 0 means outside the analysed
+  // bridge footprint or not confidently assigned; keep those source points
+  // visible in grey so semantic review never appears to delete scan evidence.
   const applyAnalysisResult = useCallback((d: any) => {
     if (!pointsRef.current) return;
+    // Start every result in the least-obstructed QA view. Fitted geometry is an
+    // optional overlay and should never cover the source cloud by default.
+    setShowVolumes(false);
+    setShowMesh(false);
     const geo = pointsRef.current.geometry as THREE.BufferGeometry;
     const posAttr = geo.getAttribute('position') as THREE.BufferAttribute;
     const colAttr = geo.getAttribute('color') as THREE.BufferAttribute;
@@ -1333,32 +1495,89 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     const pos = posAttr.array as Float32Array;
     const colors = colAttr.array as Float32Array;
     const op = origPosRef.current;
+    const counts = new Map<number, number>();
     for (let i = 0; i < cnt; i++) {
       const lid = labels[i] || 0;
-      if (lid === 0) { pos[i * 3] = NaN; pos[i * 3 + 1] = NaN; pos[i * 3 + 2] = NaN; }
-      else {
-        pos[i * 3] = op[i * 3]; pos[i * 3 + 1] = op[i * 3 + 1]; pos[i * 3 + 2] = op[i * 3 + 2];
-        const rgb = lut.get(lid) || [0.6, 0.6, 0.6];
-        colors[i * 3] = rgb[0]; colors[i * 3 + 1] = rgb[1]; colors[i * 3 + 2] = rgb[2];
-      }
+      counts.set(lid, (counts.get(lid) || 0) + 1);
+      pos[i * 3] = op[i * 3]; pos[i * 3 + 1] = op[i * 3 + 1]; pos[i * 3 + 2] = op[i * 3 + 2];
+      const rgb = lid === 0 ? [0.58, 0.62, 0.70] : (lut.get(lid) || [0.6, 0.6, 0.6]);
+      colors[i * 3] = rgb[0]; colors[i * 3 + 1] = rgb[1]; colors[i * 3 + 2] = rgb[2];
     }
     posAttr.needsUpdate = true; colAttr.needsUpdate = true;
-    pointsRef.current.frustumCulled = false;           // NaN-culled points break the bounding sphere
+    pointsRef.current.frustumCulled = false;
     setSegLabels(labels);
-    setSegClasses((d.classes || []).map((c: any) => ({
+    const returnedClasses: SegClass[] = (d.classes || []).map((c: any) => ({
       id: c.id,
       key: c.key,
       name: c.name,
       color_rgb: c.color_rgb,
       color_hex: c.color_hex,
-      count: labels.filter((x) => x === c.id).length,
+      count: counts.get(c.id) || 0,
       material: c.material,
       is_clearance: c.is_clearance,
-    })));
-    setSegVisible(Array((d.classes || []).length).fill(true));
+    }));
+    if ((counts.get(0) || 0) > 0 && !returnedClasses.some(c => c.id === 0)) {
+      returnedClasses.push({
+        id: 0,
+        key: 'retained_unclassified',
+        name: 'Outside analysis / retained',
+        color_rgb: [0.58, 0.62, 0.70],
+        color_hex: '#949eB3',
+        count: counts.get(0) || 0,
+        is_clearance: false,
+      });
+    }
+    setSegClasses(returnedClasses);
+    setSegVisible(Array(returnedClasses.length).fill(true));
     setSegDone(true);
     renderPendingRef.current = 8;
   }, []);
+
+  const activateCloudDisplay = useCallback((mode: 'raw' | 'processed' | 'together') => {
+    const raw = rawCloudDataRef.current;
+    const bundle = processedCloudBundleRef.current;
+    if (mode === 'raw') {
+      if (!raw) return;
+      origColorsRef.current = null;
+      origPosRef.current = null;
+      loadIntoScene(copyParseResult(raw));
+      setAnalysisInfo(null);
+      setClearanceInfo(null);
+      setDurableRun(null);
+      setDurableEvidence(null);
+      setMeasurement({ groundZ: null, soffitZ: null });
+      setSegLabels(null); setSegDone(false); setSegClasses(DEFAULT_SEG_CLASSES);
+      setSegVisible(Array(DEFAULT_SEG_CLASSES.length).fill(true));
+      setCloudDisplayMode('raw');
+      setStatus('Raw point cloud loaded.');
+      return;
+    }
+    if (!bundle || (mode === 'together' && !raw)) return;
+    origColorsRef.current = null;
+    origPosRef.current = null;
+    const visible = mode === 'together'
+      ? combineCloudResults(raw!, bundle.preview)
+      : copyParseResult(bundle.preview);
+    loadIntoScene(visible);
+    setAnalysisInfo(bundle.analysis);
+    setClearanceInfo(bundle.analysis.clearance ?? null);
+    setDurableRun(bundle.run);
+    setDurableEvidence(bundle.evidence);
+    const geometryClearance = geometryClearanceCandidate(bundle.analysis.clearance);
+    if (geometryClearance) setMeasurement({
+      groundZ: geometryClearance.ground_z ?? null,
+      soffitZ: geometryClearance.soffit_z ?? null,
+    });
+    if (mode === 'processed') {
+      applyAnalysisResult(bundle.analysis);
+      setStatus(`Processed point cloud loaded with ${bundle.analysis.component_count ?? 0} component groups and all saved results.`);
+    } else {
+      setSegLabels(null); setSegDone(false); setSegClasses(DEFAULT_SEG_CLASSES);
+      setSegVisible(Array(DEFAULT_SEG_CLASSES.length).fill(true));
+      setStatus('Raw and processed point clouds shown together. Raw points are grey.');
+    }
+    setCloudDisplayMode(mode);
+  }, [applyAnalysisResult, loadIntoScene]);
 
   // Restore the full original cloud (undo isolation colouring/hiding).
   const restoreOriginalCloud = useCallback(() => {
@@ -1408,6 +1627,11 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   const processFile = useCallback(async (file: File) => {
     originalFileRef.current = file;
+    rawCloudDataRef.current = null;
+    processedCloudBundleRef.current = null;
+    loadedBridgeSourceShaRef.current = null;
+    setAvailableCloudLayers({ raw: false, processed: false });
+    setCloudDisplayMode('raw');
     setLoading(true); setFileName(file.name);
     setStatus(`Parsing ${file.name}â€¦`);
     setMeasurement({ groundZ: null, soffitZ: null });
@@ -1439,7 +1663,9 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         const res = await fetch('/api/point-cloud/preview?binary=1', { method: 'POST', body: fd });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `E57 parse failed (${res.status})`);
         const { result: pr, meta } = await readCloudResponse(res);
-        loadIntoScene(pr);
+        rawCloudDataRef.current = copyParseResult(pr);
+        setAvailableCloudLayers({ raw: true, processed: false });
+        loadIntoScene(copyParseResult(pr));
         const scanCount = Number(meta.source_profile?.total_scan_count ?? meta.scan_count ?? 1);
         setSourceReview(v => ({
           ...v,
@@ -1461,7 +1687,9 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         const res = await fetch('/api/point-cloud/preview-npz?binary=1', { method: 'POST', body: fd });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `NPZ parse failed (${res.status})`);
         const { result: pr, meta } = await readCloudResponse(res);
-        loadIntoScene(pr);
+        rawCloudDataRef.current = copyParseResult(pr);
+        setAvailableCloudLayers({ raw: true, processed: false });
+        loadIntoScene(copyParseResult(pr));
         setStatus(`Loaded ${(meta.rendered_point_count ?? 0).toLocaleString()} of ${(meta.original_point_count ?? 0).toLocaleString()} NPZ points${meta.downsampled ? ' (downsampled)' : ''} from "${file.name}"`);
         return;
       }
@@ -1471,7 +1699,9 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       else if (ext === 'las') result = parseLAS(buf);
       else if (ext === 'laz') throw new Error('.LAZ (compressed LAS) is not supported. Convert to .LAS or .PLY first using CloudCompare or PDAL.');
       else                    result = parseXYZ(buf);
-      loadIntoScene(result);
+      rawCloudDataRef.current = copyParseResult(result);
+      setAvailableCloudLayers({ raw: true, processed: false });
+      loadIntoScene(copyParseResult(result));
       const oc = result.stats.originalCount ?? result.stats.count;
       setStatus(oc > result.stats.count
         ? `Loaded ${result.stats.count.toLocaleString()} of ${oc.toLocaleString()} points (downsampled) from "${file.name}"`
@@ -1504,7 +1734,12 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       setClearanceInfo(null); setMeasurement({ groundZ: null, soffitZ: null });
       setFileName(isVideo ? arr[0].name : `${arr.length} photos`);
       cloudScaleKnownRef.current = false;
-      loadIntoScene(previewToResult(d));
+      const reconstructed = previewToResult(d);
+      rawCloudDataRef.current = copyParseResult(reconstructed);
+      processedCloudBundleRef.current = null;
+      setAvailableCloudLayers({ raw: true, processed: false });
+      setCloudDisplayMode('raw');
+      loadIntoScene(copyParseResult(reconstructed));
       setStatus(`Reconstructed ${(d.rendered_point_count ?? 0).toLocaleString()} points Â· ${d.engine ?? ''}. ${d.scale_note ?? ''}`);
     } catch (err) {
       setStatus(`Reconstruction error: ${err instanceof Error ? err.message : String(err)}`);
@@ -1515,68 +1750,73 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   // Assign the real loadFromBridge implementation now that processFile is declared
   useEffect(() => {
-    loadFromBridgeRef.current = async () => {
+    loadFromBridgeRef.current = async (mode = 'auto') => {
       if (!hasBridge) return;
       const sc = String(bridgeStateCode);
       const bn = String(bridgeNumber);
       setLoading(true);
-      setStatus('Loading saved point cloudâ€¦');
+      setStatus(mode === 'processed' ? 'Loading processed point cloud and analysis…' : mode === 'raw' ? 'Loading raw point cloud…' : 'Loading saved point cloud…');
       try {
-        // Accepted durable results are the only processed default. Legacy
-        // current.json pointers are intentionally ignored by the active UI.
-        const yearQuery = dataYear == null || dataYear === '' ? '' : `?data_year=${Number(dataYear)}`;
-        const published = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published${yearQuery}`);
-        if (published.ok) {
-          const run = await published.json() as DurablePointCloudRun;
-          const separator = yearQuery ? '&' : '?';
-          const [resultResponse, previewResponse, evidenceResponse] = await Promise.all([
-            fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published/result${yearQuery}`),
-            fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published/preview${yearQuery}${separator}binary=1`),
-            fetch(`/api/bridges/${sc}/${bn}/point-cloud/runs/published/evidence${yearQuery}`),
-          ]);
-          if (!resultResponse.ok) throw await responseError(resultResponse, 'Accepted result failed');
-          if (!previewResponse.ok) throw await responseError(previewResponse, 'Accepted preview failed');
-          if (!evidenceResponse.ok) throw await responseError(evidenceResponse, 'Accepted evidence failed');
-          const analysis = await resultResponse.json();
-          const { result: preview, meta } = await readCloudResponse(previewResponse);
-          const evidence = await evidenceResponse.json() as DurablePointCloudEvidence;
-          originalFileRef.current = null;
-          cloudScaleKnownRef.current = analysis.scale_known !== false;
-          loadIntoScene(preview);
-          origPosRef.current = new Float32Array(preview.positions);
-          origColorsRef.current = new Float32Array(preview.colors);
-          setAnalysisInfo(analysis);
-          applyAnalysisResult(analysis);
-          setClearanceInfo(analysis.clearance ?? null);
-          if (analysis.clearance) setMeasurement({
-            groundZ: analysis.clearance.ground_z ?? null,
-            soffitZ: analysis.clearance.soffit_z ?? null,
-          });
-          setDurableRun(run);
-          setDurableEvidence(evidence);
-          setComponentCorrections({});
-          setCloudInfo(previous => ({
-            ...(previous ?? { exists: true }),
-            exists: true,
-            accepted_result_exists: true,
-            accepted_result_data_year: run.data_year,
-            processed_point_count: meta.rendered_point_count,
-          }));
-          setStatus(`Loaded accepted result: ${(meta.rendered_point_count ?? 0).toLocaleString()} points - ${analysis.component_count ?? 0} component candidates`);
-          setLoading(false);
-          return;
+        if (mode !== 'raw') {
+          const savedResultResponse = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/saved-result`);
+          if (savedResultResponse.ok) {
+            const savedPreviewResponse = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/saved-result/preview?binary=1`);
+            if (!savedPreviewResponse.ok) throw await responseError(savedPreviewResponse, 'Saved processed preview failed');
+            const analysis = await savedResultResponse.json();
+            const { result: preview, meta } = await readCloudResponse(savedPreviewResponse);
+            processedCloudBundleRef.current = {
+              preview: copyParseResult(preview),
+              analysis,
+              run: null,
+              evidence: null,
+              renderedPointCount: Number(meta.rendered_point_count ?? preview.stats.count),
+            };
+            cloudScaleKnownRef.current = analysis.scale_known !== false;
+            try {
+              const rawResponse = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/preview?max_points=700000&binary=1`);
+              if (rawResponse.ok) {
+                const { result: rawPreview } = await readCloudResponse(rawResponse);
+                rawCloudDataRef.current = copyParseResult(rawPreview);
+                loadedBridgeSourceShaRef.current = cloudInfo?.source_sha256 ?? null;
+              }
+            } catch { /* The saved processed result remains independently loadable. */ }
+            setAvailableCloudLayers({ raw: !!rawCloudDataRef.current, processed: true });
+            activateCloudDisplay('processed');
+            setCloudInfo(previous => ({
+              ...(previous ?? { exists: true }),
+              exists: true,
+              legacy_processed_exists: true,
+              processed_point_count: meta.rendered_point_count,
+            }));
+            setLoading(false);
+            return;
+          }
+          if (savedResultResponse.status !== 404) throw await responseError(savedResultResponse, 'Saved processed result lookup failed');
+          if (mode === 'processed') throw new Error('No saved processed result exists for this bridge and year.');
         }
-        if (published.status !== 404) {
-          throw await responseError(published, 'Accepted result lookup failed');
-        }
+
+        // Loading raw intentionally clears any currently displayed processed
+        // labels, evidence, fitted geometry, and clearance result.
+        setAnalysisInfo(null);
+        setClearanceInfo(null);
+        setDurableRun(null);
+        setDurableEvidence(null);
+        setMeasurement({ groundZ: null, soffitZ: null });
+        setSegLabels(null);
+        setSegDone(false);
+        setSegClasses(DEFAULT_SEG_CLASSES);
+        setSegVisible(Array(DEFAULT_SEG_CLASSES.length).fill(true));
         // E57 is parsed server-side (pye57) â€” no download/re-upload of the large file.
         const pv = await fetch(`/api/bridges/${sc}/${bn}/point-cloud/preview?max_points=${E57_MAX_POINTS}&binary=1`);
         if (pv.ok) {
           const { result: pr, meta } = await readCloudResponse(pv);
           originalFileRef.current = null;
           cloudScaleKnownRef.current = true;   // E57 scans carry real units
-          loadIntoScene(pr);
-          setStatus(`Loaded ${(meta.rendered_point_count ?? 0).toLocaleString()} of ${(meta.original_point_count ?? 0).toLocaleString()} points${meta.downsampled ? ' (downsampled)' : ''}`);
+          rawCloudDataRef.current = copyParseResult(pr);
+          loadedBridgeSourceShaRef.current = cloudInfo?.source_sha256 ?? null;
+          setAvailableCloudLayers({ raw: true, processed: !!processedCloudBundleRef.current });
+          activateCloudDisplay('raw');
+          setStatus(`Loaded raw point cloud: ${(meta.rendered_point_count ?? 0).toLocaleString()} of ${(meta.original_point_count ?? 0).toLocaleString()} points${meta.downsampled ? ' (downsampled)' : ''}.`);
           setLoading(false);
           return;
         }
@@ -1593,12 +1833,13 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         const file = new File([blob], name, { type: blob.type });
         originalFileRef.current = file;
         await processFile(file);
+        loadedBridgeSourceShaRef.current = cloudInfo?.source_sha256 ?? null;
       } catch (err) {
         setStatus(`Load error: ${err instanceof Error ? err.message : String(err)}`);
         setLoading(false);
       }
     };
-  }, [hasBridge, bridgeStateCode, bridgeNumber, dataYear, processFile, loadIntoScene, applyAnalysisResult]);
+  }, [hasBridge, bridgeStateCode, bridgeNumber, dataYear, cloudInfo?.source_sha256, processFile, activateCloudDisplay]);
 
   // Auto-load the saved cloud once we know one exists (so the tab isn't blank).
   const autoLoadedRef = useRef('');
@@ -1837,7 +2078,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
   const runBackendClearance = useCallback(async () => {
     if (!pointsRef.current || !stats) return;
     setClearanceBusy(true);
-    setStatus('Computing a screening vertical gap on the server…');
+    setStatus('Computing clearance…');
     try {
       const url = '/api/point-cloud/clearance' + binQS({
           origin: `${stats.originX},${stats.originY},${stats.originZ}`,
@@ -1849,8 +2090,8 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       setMeasurement({ groundZ: d.ground_z, soffitZ: d.soffit_z });
       setClearanceInfo(d);
       setStatus(d.scale_known === false
-        ? `Clearance ${d.clearance_m} (relative units â€” uncalibrated reconstruction) Â· ${d.method} Â· ${d.confidence} confidence`
-        : `Clearance ${d.clearance_m} m (${d.clearance_ft} ft) Â· ${d.method} Â· ${d.confidence} confidence`);
+        ? 'Metric scale required before clearance can be reported.'
+        : `Clearance ${Number(d.clearance_m).toFixed(3)} m · ${Number(d.clearance_ft).toFixed(2)} ft`);
     } catch (err) {
       setStatus(`Clearance error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -1876,21 +2117,22 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     setAnalysisInfo(analysis);
     applyAnalysisResult(analysis);
     setClearanceInfo(analysis.clearance ?? null);
-    if (analysis.clearance) {
+    const geometryClearance = geometryClearanceCandidate(analysis.clearance);
+    if (geometryClearance) {
       setMeasurement({
-        groundZ: analysis.clearance.ground_z ?? null,
-        soffitZ: analysis.clearance.soffit_z ?? null,
+        groundZ: geometryClearance.ground_z ?? null,
+        soffitZ: geometryClearance.soffit_z ?? null,
       });
     }
     setDurableEvidence(evidence);
-    setComponentCorrections({});
     setCloudInfo(prev => ({
       ...(prev ?? { exists: true }),
       exists: true,
       accepted_result_exists: run.published,
+      legacy_processed_exists: true,
       processed_point_count: meta.rendered_point_count,
     }));
-    setStatus(`Review candidate ready: ${analysis.component_count ?? 0} components · ${(evidence.measurements || []).length} feature-bound measurement candidate(s). No value is published until accepted.`);
+    setStatus(`Analysis complete · ${analysis.component_count ?? 0} components · ${(evidence.measurements || []).length} measurements`);
   }, [applyAnalysisResult, loadIntoScene]);
 
   const pollDurableRun = useCallback(async (initial: DurablePointCloudRun, signal: AbortSignal) => {
@@ -1924,18 +2166,22 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     throw new Error('Point-cloud run exceeded the bounded polling window. It remains durable and can be resumed.');
   }, [loadDurableResult]);
 
-  // Saved bridge sources use the durable two-phase worker. Ad-hoc local clouds
-  // remain an explicitly non-persisting research preview.
+  // Metric-ready sources use the durable worker and save their automatic result.
+  // Older saved clouds still receive an immediate session analysis.
   const runAnalyze = useCallback(async () => {
     if (!pointsRef.current || !stats) return;
+    const useDurableWorkflow = Boolean(
+      hasBridge
+      && cloudInfo?.exists
+      && cloudInfo.source_profile?.metric_processing_authorized === true,
+    );
     setAnalyzing(true);
     setDurableEvidence(null);
-    setStatus(hasBridge ? 'Enqueuing an exact-revision point-cloud run…' : 'Processing an ad-hoc research preview…');
+    setStatus(useDurableWorkflow
+      ? 'Enqueuing an exact-revision point-cloud run…'
+      : 'Analyzing the loaded point cloud…');
     try {
-      if (hasBridge) {
-        if (!cloudInfo?.exists || cloudInfo.source_profile?.metric_processing_authorized !== true) {
-          throw new Error('A saved E57 source with a reviewed metric-ready source receipt is required.');
-        }
+      if (useDurableWorkflow) {
         durablePollAbortRef.current?.abort();
         const controller = new AbortController();
         durablePollAbortRef.current = controller;
@@ -1962,6 +2208,14 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       const url = '/api/point-cloud/analyze' + binQS({
         origin: `${stats.originX},${stats.originY},${stats.originZ}`,
         scale_known: cloudScaleKnownRef.current,
+        bridge_context_state_code: hasBridge ? bridgeStateCode : undefined,
+        bridge_context_bridge_number: hasBridge ? bridgeNumber : undefined,
+        save_result: hasBridge
+          && cloudDisplayMode === 'raw'
+          && !!cloudInfo?.source_sha256
+          && loadedBridgeSourceShaRef.current === cloudInfo.source_sha256,
+        source_sha256: hasBridge ? loadedBridgeSourceShaRef.current ?? undefined : undefined,
+        data_year: hasBridge && dataYear !== undefined && dataYear !== '' ? Number(dataYear) : undefined,
         use_vlm: useHostedVlm,
         use_ai_cleaning: useAiCleaning,
         use_local_sam: false,
@@ -1974,8 +2228,21 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
       setAnalysisInfo(analysis);
       applyAnalysisResult(analysis);
       setClearanceInfo(analysis.clearance);
-      if (analysis.clearance) setMeasurement({ groundZ: analysis.clearance.ground_z ?? null, soffitZ: analysis.clearance.soffit_z ?? null });
-      setStatus('Ad-hoc research preview complete. It is not persisted or publishable.');
+      const geometryClearance = geometryClearanceCandidate(analysis.clearance);
+      if (geometryClearance) setMeasurement({ groundZ: geometryClearance.ground_z ?? null, soffitZ: geometryClearance.soffit_z ?? null });
+      if (analysis.persistence?.saved === true) {
+        setCloudInfo(previous => ({
+          ...(previous ?? { exists: true }),
+          exists: true,
+          legacy_processed_exists: true,
+          processed_point_count: analysis.persistence.processed_point_count,
+        }));
+        await loadProcessedFromBridge();
+      } else {
+        setStatus(hasBridge
+          ? `Analysis complete: ${analysis.component_count ?? analysis.components?.length ?? 0} components found.`
+          : 'Point-cloud preview complete.');
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         setStatus('Point-cloud status polling stopped. The durable job state remains on the server.');
@@ -1985,7 +2252,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     } finally {
       setAnalyzing(false);
     }
-  }, [stats, hasBridge, cloudInfo, bridgeStateCode, bridgeNumber, dataYear, useHostedVlm, useAiCleaning, gatherPointsBinary, applyAnalysisResult, pollDurableRun]);
+  }, [stats, hasBridge, cloudInfo, cloudDisplayMode, bridgeStateCode, bridgeNumber, dataYear, useHostedVlm, useAiCleaning, gatherPointsBinary, applyAnalysisResult, pollDurableRun, loadProcessedFromBridge]);
 
   const cancelDurableRun = useCallback(async () => {
     if (!durableRun || !['queued', 'running', 'cancellation_requested'].includes(durableRun.status)) return;
@@ -2001,66 +2268,26 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
     }
   }, [durableRun]);
 
-  const reviewDurableRun = useCallback(async (decision: 'accept' | 'reject') => {
-    if (!durableRun || durableRun.status !== 'succeeded' || reviewBusy) return;
-    const reason = window.prompt(
-      decision === 'accept'
-        ? 'Describe the evidence reviewed before accepting this point-cloud candidate.'
-        : 'Explain why this point-cloud candidate is rejected.',
-    )?.trim();
-    if (!reason || reason.length < 3) return;
-    setReviewBusy(true);
-    try {
-      const corrections = Object.fromEntries(
-        Object.entries(componentCorrections)
-          .filter(([, value]) => value)
-          .map(([candidateId, finalClass]) => [`/components/${candidateId}/final_class`, finalClass]),
-      );
-      const response = await fetch(`/api/point-cloud/runs/${durableRun.run_id}/review`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'If-Match': durableRun.etag,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: JSON.stringify({ decision, reason, corrections }),
-      });
-      if (!response.ok) throw await responseError(response, 'Review failed');
-      const reviewed = await response.json();
-      const statusResponse = await fetch(`/api/point-cloud/runs/${durableRun.run_id}`);
-      if (!statusResponse.ok) throw await responseError(statusResponse, 'Reviewed status failed');
-      const current = await statusResponse.json() as DurablePointCloudRun;
-      setDurableRun(current);
-      const evidenceResponse = await fetch(`/api/point-cloud/runs/${durableRun.run_id}/evidence`);
-      if (evidenceResponse.ok) setDurableEvidence(await evidenceResponse.json());
-      setStatus(reviewed.published
-        ? 'Candidate accepted and published with an immutable review receipt.'
-        : 'Candidate rejected. The run evidence remains immutable and unpublished.');
-    } catch (error) {
-      setStatus(`Review error: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setReviewBusy(false);
-    }
-  }, [durableRun, reviewBusy, componentCorrections]);
-
-  const toggleSegVisibility = useCallback((i: number) => {
+  const toggleSegVisibility = useCallback((indices: number[]) => {
     if (!pointsRef.current || !segLabels) return;
-    const cls = segClasses[i];
-    if (!cls) return;
+    const validIndices = indices.filter(index => !!segClasses[index]);
+    if (!validIndices.length) return;
     const geo = pointsRef.current.geometry as THREE.BufferGeometry;
     const cnt = geo.getAttribute('position').array.length / 3;
-    const newVis = segVisible.map((v, j) => j === i ? !v : v);
+    const visible = validIndices.some(index => !(segVisible[index] ?? true));
+    const newVis = segVisible.map((value, index) => validIndices.includes(index) ? visible : value);
     setSegVisible(newVis);
     const colAttr = geo.getAttribute('color') as THREE.BufferAttribute;
     const colors  = colAttr.array as Float32Array;
-    const visible = newVis[i];
-    // hidden â†’ paint with the (light) viewer background so the class disappears
-    const [r, g, b] = visible ? cls.color_rgb : [0.957, 0.965, 0.98];
-    for (let k = 0; k < cnt; k++) {
-      if (segLabels[k] === cls.id) {
-        colors[k * 3] = r;
-        colors[k * 3 + 1] = g;
-        colors[k * 3 + 2] = b;
+    for (const index of validIndices) {
+      const cls = segClasses[index];
+      const [r, g, b] = visible ? cls.color_rgb : [0.957, 0.965, 0.98];
+      for (let k = 0; k < cnt; k++) {
+        if (segLabels[k] === cls.id) {
+          colors[k * 3] = r;
+          colors[k * 3 + 1] = g;
+          colors[k * 3 + 2] = b;
+        }
       }
     }
     colAttr.needsUpdate = true;
@@ -2083,13 +2310,48 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
   const clearance = measurement.groundZ !== null && measurement.soffitZ !== null
     ? parseFloat(Math.abs(measurement.soffitZ - measurement.groundZ).toFixed(3)) : null;
+  const geometryClearance = geometryClearanceCandidate(clearanceInfo);
+  const primaryFeatureMeasurement = geometryClearance?.feature_measurement?.primary_measurement ?? null;
+  const measuredBh12 = Number(primaryFeatureMeasurement?.bh12_raw_m);
+  const measuredBh13 = Number(primaryFeatureMeasurement?.bh13_raw_m);
+  const verticalGap = Number.isFinite(measuredBh13)
+    ? measuredBh13
+    : geometryClearance?.min_clearance_m ?? clearance;
+  const verticalGapScaleKnown = geometryClearance
+    ? geometryClearance.scale_known !== false
+    : cloudScaleKnownRef.current;
+  const clearanceRoadways: any[] = Array.isArray(geometryClearance?.roadways)
+    ? geometryClearance.roadways
+    : [];
+  const primaryClearanceRoadway = clearanceRoadways[0] ?? null;
+  const retainedClearancePlanes: any[] = Array.isArray(primaryClearanceRoadway?.measurement_planes)
+    ? primaryClearanceRoadway.measurement_planes
+    : [];
+  const selectedClearancePlane = retainedClearancePlanes.find((plane: any) => plane.plane_id === selectedClearancePlaneId)
+    ?? retainedClearancePlanes.find((plane: any) => plane.controls_global_minimum)
+    ?? retainedClearancePlanes[0]
+    ?? null;
+  const clearanceRegions: any[] = Array.isArray(primaryFeatureMeasurement?.regions)
+    ? primaryFeatureMeasurement.regions
+    : [];
+  const selectedBh12Candidate = Array.isArray(primaryFeatureMeasurement?.bh12_candidates)
+    ? primaryFeatureMeasurement.bh12_candidates.find((candidate: any) => candidate.candidate_id === primaryFeatureMeasurement.selected_bh12_candidate_id)
+    : null;
+  const snbiBh13Rows: any[] = Array.isArray(analysisInfo?.snbi_bh13)
+    ? analysisInfo.snbi_bh13
+    : [];
+  const comparisonBh13 = snbiBh13Rows.find((row: any) => row.comparison_target)
+    ?? snbiBh13Rows[0]
+    ?? null;
+  const dualClearance = (metres: number, metreDigits = 3) =>
+    `${metres.toFixed(metreDigits)} m · ${(metres * 3.28084).toFixed(2)} ft`;
+  const recordedClearance = (feet: unknown) => {
+    const value = Number(feet);
+    if (!Number.isFinite(value)) return '—';
+    if (value >= 99.9) return `≥30.480 m · ${value.toFixed(1)} ft`;
+    return dualClearance(value * 0.3048);
+  };
   const sourceUploadEligible = !!originalFileRef.current?.name.toLowerCase().endsWith('.e57');
-  const unitLabel = (unit: PointCloudSourceReview['horizontalUnit']) => ({
-    metre: 'm',
-    international_foot: 'ft',
-    us_survey_foot: 'US-ft',
-    unknown: 'source units',
-  }[unit]);
   const sourceInputStyle: React.CSSProperties = {
     width: '100%', border: '1px solid #cbd5e1', borderRadius: 6, padding: '5px 6px',
     fontSize: 11, color: SX.text, background: '#fff',
@@ -2117,20 +2379,33 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {/* Bridge save/load buttons */}
-          {hasBridge && cloudInfo?.exists && (
+          {hasBridge && (cloudInfo?.raw_exists ?? (!!cloudInfo?.exists && !!cloudInfo?.filename)) && (
             <button
-              onClick={loadFromBridge}
+              onClick={loadRawFromBridge}
               disabled={loading}
               className="pcbtn pcbtn-outline"
-              title={cloudInfo.accepted_result_exists ? 'Load the accepted, evidence-bound result' : `Load saved source: ${cloudInfo.filename}`}
+              title={`Load the exact unprocessed source: ${cloudInfo.filename ?? 'saved point cloud'}`}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4M17 9l-5 5-5-5M12 12.8V2.5"/>
               </svg>
-              {cloudInfo.accepted_result_exists ? 'Load Accepted Result' : 'Load Saved Cloud'}
+              Load Raw
             </button>
           )}
-          {hasBridge && cloudInfo?.exists && (
+          {hasBridge && cloudInfo?.legacy_processed_exists && (
+            <button
+              onClick={loadProcessedFromBridge}
+              disabled={loading}
+              className="pcbtn pcbtn-outline"
+              title="Load the processed cloud with its saved labels, measurements, and clearance planes"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19h16M4 5h16M7 9h10v6H7z"/>
+              </svg>
+              Load Processed
+            </button>
+          )}
+          {hasBridge && (cloudInfo?.raw_exists ?? (!!cloudInfo?.exists && !!cloudInfo?.filename)) && (
             <button
               onClick={deleteFromBridge}
               disabled={deleting}
@@ -2143,7 +2418,7 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
               {deleting ? 'Deleting…' : 'Delete Saved Cloud'}
             </button>
           )}
-          {hasBridge && stats && !cloudInfo?.exists && (
+          {hasBridge && stats && !(cloudInfo?.raw_exists ?? (!!cloudInfo?.exists && !!cloudInfo?.filename)) && (
             <button
               onClick={saveToBridge}
               disabled={saving || !sourceUploadEligible}
@@ -2193,11 +2468,6 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         </div>
       </div>
 
-      <div role="note" aria-label="Point-cloud result limitation"
-        style={{ padding: '7px 20px', color: '#92400e', background: '#fffbeb', borderBottom: '1px solid #fde68a', fontSize: 12, fontWeight: 600 }}>
-        Research screening only — point-cloud dimensions and clearances are not survey measurements, accepted SNBI values, or engineering determinations.
-      </div>
-
       {/* Body */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
@@ -2233,7 +2503,6 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 
                 <div style={{ fontWeight: 600, fontSize: 15, color: '#64748b' }}>No point cloud loaded</div>
                 <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 4 }}>Drag &amp; drop or click "Open File"</div>
-                <div style={{ fontSize: 12, color: '#cbd5e1', marginTop: 6 }}>.e57 source Â· other formats view-only</div>
               </div>
             </div>
           )}
@@ -2244,18 +2513,6 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
             </div>
           )}
 
-          {clearance !== null && (
-            <div style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(255,255,255,0.94)', border: '1px solid #a7f3d0', borderRadius: 10, padding: '10px 16px', zIndex: 5, backdropFilter: 'blur(6px)', boxShadow: '0 2px 10px rgba(15,23,42,0.08)' }}>
-              <div style={{ fontSize: 11, color: '#059669', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>Screening gap</div>
-              <div style={{ fontSize: 26, fontWeight: 800, color: '#047857', lineHeight: 1.1 }}>
-                {clearance.toFixed(3)} {cloudScaleKnownRef.current ? unitLabel(sourceReview.verticalUnit) : 'relative'}
-              </div>
-              {cloudScaleKnownRef.current && sourceReview.verticalUnit === 'metre' && (
-                <div style={{ fontSize: 11, color: '#64748b' }}>{(clearance * 3.28084).toFixed(2)} ft</div>
-              )}
-            </div>
-          )}
-
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(255,255,255,0.85)', padding: '4px 14px', fontSize: 12, color: '#64748b', backdropFilter: 'blur(4px)', borderTop: '1px solid #e2e8f0' }}>
             {measureStep !== 'idle' && <span style={{ color: '#d97706', marginRight: 6 }}>â—</span>}
             {status}
@@ -2263,31 +2520,58 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
         </div>
 
         {/* Right Panel */}
-        <div style={{ width: 240, display: 'flex', flexDirection: 'column', overflow: 'auto', background: '#fbfcfe', borderLeft: '1px solid ' + SX.border }}>
+        <div style={{ width: 286, display: 'flex', flexDirection: 'column', overflow: 'auto', background: '#fbfcfe', borderLeft: '1px solid ' + SX.border }}>
 
           <PanelSection title="Cloud Statistics">
             {stats ? (
               <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 3 }}>
                 <StatRow label="Points" value={stats.count.toLocaleString()} />
                 <StatRow label="File"   value={fileName} mono />
-                <div style={{ marginTop: 5, paddingTop: 6, borderTop: '1px solid ' + SX.border }}>
-                  <div style={{ fontWeight: 600, fontSize: 10, marginBottom: 5, color: SX.label, letterSpacing: 0.4 }}>BOUNDING BOX</div>
-                  <StatRow label="X span" value={`${stats.spanX.toFixed(2)} ${unitLabel(sourceReview.horizontalUnit)}`} />
-                  <StatRow label="Y span" value={`${stats.spanY.toFixed(2)} ${unitLabel(sourceReview.horizontalUnit)}`} />
-                  <StatRow label="Z span" value={`${stats.spanZ.toFixed(2)} ${unitLabel(sourceReview.verticalUnit)}`} />
-                  <StatRow label="Z min"  value={`${stats.minZ.toFixed(3)} ${unitLabel(sourceReview.verticalUnit)}`} />
-                  <StatRow label="Z max"  value={`${stats.maxZ.toFixed(3)} ${unitLabel(sourceReview.verticalUnit)}`} />
-                </div>
+                {cloudScaleKnownRef.current && (
+                  <>
+                    <StatRow label="Extent" value={`${stats.spanX.toFixed(1)} × ${stats.spanY.toFixed(1)} × ${stats.spanZ.toFixed(1)} m`} />
+                    <StatRow label="" value={`${(stats.spanX * 3.28084).toFixed(1)} × ${(stats.spanY * 3.28084).toFixed(1)} × ${(stats.spanZ * 3.28084).toFixed(1)} ft`} />
+                  </>
+                )}
+                <details style={{ marginTop: 3, borderTop: '1px solid ' + SX.border, paddingTop: 4 }}>
+                  <summary style={{ cursor: 'pointer', color: SX.label, fontSize: 10 }}>Coordinate bounds</summary>
+                  <div style={{ marginTop: 4 }}>
+                    <StatRow label="X (m)" value={`${stats.minX.toFixed(2)} … ${stats.maxX.toFixed(2)}`} />
+                    <StatRow label="Y (m)" value={`${stats.minY.toFixed(2)} … ${stats.maxY.toFixed(2)}`} />
+                    <StatRow label="Z (m)" value={`${stats.minZ.toFixed(2)} … ${stats.maxZ.toFixed(2)}`} />
+                  </div>
+                </details>
               </div>
             ) : <div style={{ fontSize: 12, color: SX.label }}>No data loaded</div>}
           </PanelSection>
 
-          <PanelSection title="Source Coordinates">
-            {!sourceUploadEligible ? (
-              <div style={{ fontSize: 11, color: '#92400e', lineHeight: 1.35 }}>
-                Local visualization only. This format has no reviewed server source parser and cannot authorize metric processing.
+          {(availableCloudLayers.raw || availableCloudLayers.processed) && (
+            <PanelSection title="Cloud View">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
+                {(['raw', 'processed', 'together'] as const).map(mode => {
+                  const enabled = mode === 'raw'
+                    ? availableCloudLayers.raw
+                    : mode === 'processed'
+                      ? availableCloudLayers.processed
+                      : availableCloudLayers.raw && availableCloudLayers.processed;
+                  return (
+                    <button key={mode} disabled={!enabled} onClick={() => activateCloudDisplay(mode)}
+                      className={`pcbtn ${cloudDisplayMode === mode ? 'pcbtn-primary' : 'pcbtn-ghost'}`}
+                      style={{ padding: '6px 4px', fontSize: 10.5, textTransform: 'capitalize' }}>
+                      {mode}
+                    </button>
+                  );
+                })}
               </div>
-            ) : (
+            </PanelSection>
+          )}
+
+          {sourceUploadEligible && (
+          <PanelSection title="Source Coordinates">
+            <details>
+              <summary style={{ cursor: 'pointer', fontSize: 11, fontWeight: 600, color: sourceReview.reviewed ? '#047857' : SX.text }}>
+                {sourceReview.reviewed ? 'Reviewed metric source' : 'Advanced source setup'}
+              </summary>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 10.5 }}>
                 <label>Horizontal units
                   <select value={sourceReview.horizontalUnit} style={sourceInputStyle}
@@ -2368,13 +2652,14 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
                   {sourceReview.reviewed ? 'Review will be stored as a hashed source receipt.' : 'Visualization only until reviewed; no metric output is authorized.'}
                 </div>
               </div>
-            )}
             {cloudInfo?.source_profile && (
               <div style={{ marginTop: 7, paddingTop: 6, borderTop: '1px solid ' + SX.border, fontSize: 10.5, color: cloudInfo.source_profile.metric_processing_authorized ? '#047857' : '#92400e' }}>
                 Saved source: {cloudInfo.source_profile.metric_processing_authorized ? 'metric-ready receipt' : 'visualization-only receipt'}
               </div>
             )}
+            </details>
           </PanelSection>
+          )}
 
           <PanelSection title="Render">
             <div style={{ fontSize: 12, marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
@@ -2389,274 +2674,123 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
           <PanelSection title="Bridge Analysis">
             {!stats ? <div style={{ fontSize: 12, color: SX.label }}>Load a point cloud first</div> : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {/* Saved bridge sources use the durable candidate-review workflow. */}
                 <button onClick={runAnalyze} disabled={analyzing}
-                  className="pcbtn pcbtn-primary pcbtn-block"
-                  title={hasBridge
-                    ? 'Creates an exact-revision candidate with immutable source, context, model-call, component and measurement receipts.'
-                    : 'Runs a non-persisting ad-hoc research preview.'}>
+                  className="pcbtn pcbtn-primary pcbtn-block">
                   {analyzing
-                    ? <>{sxSpinner('#fff')}{hasBridge ? 'Running durable analysis...' : 'Processing preview...'}</>
-                    : (hasBridge ? 'Start Durable Analysis' : 'Run Ad-hoc Preview')}
+                    ? <>{sxSpinner('#fff')}Analyzing...</>
+                    : 'Analyze Point Cloud'}
                 </button>
-                {durableRun && (
-                  <div style={{ padding: '8px 10px', borderRadius: 8, background: durableRun.published ? '#ecfdf5' : '#f8fafc', border: `1px solid ${durableRun.published ? '#a7f3d0' : SX.border}`, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                      <strong style={{ color: durableRun.published ? '#047857' : SX.text }}>
-                        {durableRun.published ? 'Accepted published result' : 'Durable review candidate'}
-                      </strong>
-                      <span style={{ color: SX.label, textTransform: 'capitalize' }}>{durableRun.status.replace(/_/g, ' ')}</span>
-                    </div>
-                    <div style={{ height: 5, borderRadius: 5, background: '#e2e8f0', overflow: 'hidden' }}>
-                      <div style={{ height: '100%', width: `${Math.min(100, 100 * Number(durableRun.progress?.completed ?? 0) / Math.max(1, Number(durableRun.progress?.total ?? 8)))}%`, background: durableRun.published ? '#10b981' : SX.indigo }} />
-                    </div>
-                    <ClrRow label="Phase" value={durableRun.phase.replace(/_/g, ' ')} />
-                    <ClrRow label="Revision" value={durableRun.snapshot_revision_id.slice(0, 12)} muted />
-                    <ClrRow label="Source receipt" value={durableRun.source_sha256.slice(0, 12)} muted />
-                    <ClrRow label="Knowledge receipt" value={durableRun.knowledge_pack_sha256.slice(0, 12)} muted />
-                    {['queued', 'running', 'cancellation_requested'].includes(durableRun.status) && (
-                      <button onClick={cancelDurableRun} className="pcbtn pcbtn-danger pcbtn-block">
-                        Cancel This Run
-                      </button>
-                    )}
-                    {(durableRun.status === 'succeeded' || durableRun.status === 'published') && (
-                      <a
-                        href={durableRun.published && hasBridge
-                          ? `/api/bridges/${bridgeStateCode}/${bridgeNumber}/point-cloud/runs/published/download?format=ply${dataYear == null || dataYear === '' ? '' : `&data_year=${Number(dataYear)}`}`
-                          : `/api/point-cloud/runs/${durableRun.run_id}/download?format=ply`}
-                        className="pcbtn pcbtn-ghost pcbtn-block"
-                        style={{ textAlign: 'center', textDecoration: 'none' }}
-                      >
-                        Download Candidate PLY
-                      </a>
-                    )}
-                  </div>
-                )}
-                {durableEvidence?.knowledge_context && (
-                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
-                    <strong>Context Used</strong>
-                    <div style={{ color: SX.label }}>
-                      Only the bounded, receipt-verified bridge context shown here was supplied. The full prompt and unrelated database records are never exposed.
-                    </div>
-                    <details>
-                      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
-                        Trusted SNBI fields ({durableEvidence.knowledge_context.trusted_snbi?.field_values?.length ?? 0})
-                      </summary>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 5, maxHeight: 180, overflow: 'auto' }}>
-                        {(durableEvidence.knowledge_context.trusted_snbi?.field_values ?? []).map((field: any, index: number) => (
-                          <div key={`${field.tag ?? field.field ?? 'field'}-${index}`} style={{ borderTop: index ? '1px solid ' + SX.border : undefined, paddingTop: index ? 3 : 0 }}>
-                            <strong>{field.tag ?? field.field ?? 'SNBI field'}</strong>
-                            {field.title ? ` - ${field.title}` : ''}: <span style={{ fontFamily: 'ui-monospace, monospace' }}>{String(field.value ?? 'null')}</span>
-                            {field.unit ? ` ${field.unit}` : ''}
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                    <details>
-                      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
-                        Cited report evidence ({durableEvidence.knowledge_context.cited_report_evidence?.chunks?.length ?? 0})
-                      </summary>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 5, maxHeight: 180, overflow: 'auto' }}>
-                        {(durableEvidence.knowledge_context.cited_report_evidence?.chunks ?? []).map((chunk: any, index: number) => (
-                          <div key={`${chunk.evidence_id ?? chunk.chunk_id ?? 'chunk'}-${index}`} style={{ borderTop: index ? '1px solid ' + SX.border : undefined, paddingTop: index ? 4 : 0 }}>
-                            <strong>{chunk.evidence_id ?? chunk.chunk_id ?? `citation ${index + 1}`}</strong>
-                            {chunk.location ? ` - ${chunk.location}` : ''}
-                            {chunk.excerpt ? <div style={{ color: SX.label }}>{String(chunk.excerpt)}</div> : null}
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  </div>
-                )}
-                {durableEvidence && durableEvidence.components.length > 0 && (
-                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 7, fontSize: 11 }}>
-                    <strong>Component Review</strong>
-                    <div style={{ color: SX.label }}>Fused candidate classifications remain provisional until a reviewer accepts this run.</div>
-                    {durableEvidence.components.map((component: any) => (
-                      <label key={component.candidate_id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(125px, 1fr)', alignItems: 'center', gap: 6 }}>
-                        <span style={{ minWidth: 0 }}>
-                          <strong>{component.candidate_id}</strong>
-                          <span style={{ display: 'block', color: SX.label }}>{component.proposed_class} - {component.disposition}</span>
-                        </span>
-                        <select
-                          aria-label={`Final class for ${component.candidate_id}`}
-                          value={componentCorrections[component.candidate_id] ?? component.final_class ?? component.proposed_class}
-                          style={sourceInputStyle}
-                          disabled={durableRun?.published || reviewBusy}
-                          onChange={event => setComponentCorrections(current => ({ ...current, [component.candidate_id]: event.target.value }))}
-                        >
-                          {POINT_CLOUD_COMPONENT_CLASSES.map(value => (
-                            <option key={value} value={value}>{value.replace(/_/g, ' ')}</option>
-                          ))}
-                        </select>
-                      </label>
-                    ))}
-                  </div>
-                )}
-                {durableEvidence && durableEvidence.measurements.length > 0 && (
-                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fffbeb', border: '1px solid #fde68a', display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11 }}>
-                    <strong style={{ color: '#92400e' }}>Feature-bound clearance candidates</strong>
-                    <div style={{ color: '#92400e' }}>
-                      These are screening candidates, not accepted BH12/BH13 values. Feature identity and evidence gates must be reviewed before publication.
-                    </div>
-                    {durableEvidence.measurements.map((measurementCandidate: any) => (
-                      <div key={measurementCandidate.candidate_id} style={{ borderTop: '1px solid #fde68a', paddingTop: 5 }}>
-                        <ClrRow label="Candidate" value={measurementCandidate.candidate_id} />
-                        <ClrRow label="Feature" value={measurementCandidate.feature_id ?? 'unbound'} />
-                        <ClrRow label="Product" value={measurementCandidate.product} />
-                        <ClrRow label="Status" value={measurementCandidate.status} />
-                        {measurementCandidate.evidence?.reason && <ClrRow label="Gate" value={String(measurementCandidate.evidence.reason)} muted />}
-                        {measurementCandidate.evidence?.feature_binding_version && <ClrRow label="Binding" value={String(measurementCandidate.evidence.feature_binding_version)} muted />}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {durableRun?.status === 'succeeded' && !durableRun.published && (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-                    <button onClick={() => reviewDurableRun('reject')} disabled={reviewBusy} className="pcbtn pcbtn-danger pcbtn-block">
-                      Reject Candidate
-                    </button>
-                    <button onClick={() => reviewDurableRun('accept')} disabled={reviewBusy} className="pcbtn pcbtn-primary pcbtn-block">
-                      Accept Reviewed Result
-                    </button>
-                  </div>
-                )}
-                {analysisInfo && (
-                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 5, fontSize: 11 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: 9.5, color: SX.indigo, fontWeight: 700, letterSpacing: 0.5 }}>
-                        {analysisInfo.component_count} COMPONENT VOLUMES
-                      </span>
-                      <span style={{ display: 'flex', gap: 4 }}>
-                        {analysisInfo.hosted_cleaning_used && (
-                          <span title="The hosted vision model reviewed candidate clutter during cleaning."
-                            style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, color: '#0369a1', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 4, padding: '1px 5px' }}>
-                            HOSTED AI-CLEANED
-                          </span>
-                        )}
-                        {false && analysisInfo.sam_used && (
-                          <span title="GPU-assisted instance segmentation removed clutter that geometry alone cannot separate."
-                            style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, color: '#0369a1', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 4, padding: '1px 5px' }}>
-                            â—ˆ GPU-CLEANED
-                          </span>
-                        )}
-                        {analysisInfo.vlm_used && (
-                          <span title="Each component was reviewed by the hosted vision model, which confirmed bridge structure and removed clutter."
-                            style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 4, padding: '1px 5px' }}>
-                            ✦ AI-ASSISTED
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    {Array.isArray(analysisInfo.warnings) && analysisInfo.warnings.length > 0 && (
-                      <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 6, padding: '5px 7px', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                        {analysisInfo.warnings.map((w: string, i: number) => (
-                          <span key={i} style={{ fontSize: 9.5, color: '#92400e' }}>âš  {w}</span>
-                        ))}
-                      </div>
-                    )}
-                    {analysisInfo.components.map((c: any, i: number) => (
-                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6 }}>
-                        <span style={{ display: 'flex', alignItems: 'flex-start', gap: 5, minWidth: 0 }}>
-                          <span style={{ width: 9, height: 9, borderRadius: 2, background: c.color, flexShrink: 0, marginTop: 2 }} />
-                          <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.label}</span>
-                            {c.vlm_label && (
-                              <span title="Vision-model identification" style={{ fontSize: 9, color: '#7c3aed', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                âœ¦ {c.vlm_label}
-                              </span>
-                            )}
-                          </span>
-                        </span>
-                        <span style={{ color: SX.label, whiteSpace: 'nowrap' }}>
-                          {c.dims_m[0]}Ã—{c.dims_m[1]}Ã—{c.dims_m[2]}m Â· <span style={{ color: c.coverage_pct >= 50 ? '#059669' : '#d97706', fontWeight: 700 }}>{c.coverage_pct}%</span>
-                        </span>
-                      </div>
-                    ))}
-                    <div style={{ display: 'flex', gap: 12, borderTop: '1px solid ' + SX.border, paddingTop: 5 }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: SX.text, cursor: 'pointer' }}>
-                        <input type="checkbox" checked={showVolumes} onChange={e => setShowVolumes(e.target.checked)} style={{ accentColor: SX.indigo }} />
-                        Fitted volumes
-                      </label>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, borderTop: '1px solid ' + SX.border, paddingTop: 5 }}
-                      title="Removed points are noise, vegetation and off-structure clutter â€” they are hidden in the view.">
-                      <ClrRow label="Kept" value={`${analysisInfo.cleaning.kept_points?.toLocaleString()} pts`} />
-                      <ClrRow label="Removed" value={`${analysisInfo.cleaning.removed_noise?.toLocaleString()} pts`} muted />
-                      {analysisInfo.cleaning.fragment_removed != null && analysisInfo.cleaning.fragment_removed > 0 && (
-                        <ClrRow label="Fragments" value={`${analysisInfo.cleaning.fragment_removed.toLocaleString()} pts`} muted />
+                {verticalGap != null && Number.isFinite(verticalGap) && verticalGapScaleKnown && (
+                  <div style={{ padding: 8, borderRadius: 8, background: '#f8fffb', border: '1px solid #86efac', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: Number.isFinite(measuredBh12) ? '1fr 1fr' : '1fr', gap: 6 }}>
+                      {Number.isFinite(measuredBh12) && (
+                        <MetricCell label="B.H.12" value={dualClearance(measuredBh12)} />
                       )}
+                      <MetricCell label={Number.isFinite(measuredBh13) ? 'B.H.13' : 'Clearance'} value={dualClearance(verticalGap)} />
                     </div>
-                    <button onClick={restoreOriginalCloud}
-                      className="pcbtn pcbtn-ghost pcbtn-block" style={{ fontSize: 11, padding: '5px 8px' }}>
-                      Show full original cloud
-                    </button>
-                  </div>
-                )}
-                {clearance !== null && (
-                  <div style={{ padding: '9px 11px', borderRadius: 8, background: '#ecfdf5', border: '1px solid #a7f3d0' }}>
-                    <div style={{ fontSize: 9.5, color: '#059669', fontWeight: 700, letterSpacing: 0.6 }}>SCREENING VERTICAL GAP</div>
-                    {cloudScaleKnownRef.current ? (
-                      <>
-                        <div style={{ fontSize: 22, fontWeight: 800, color: '#047857', lineHeight: 1.15 }}>{clearance.toFixed(3)} m</div>
-                        <div style={{ fontSize: 11, color: '#10b981', fontWeight: 600 }}>{(clearance * 3.28084).toFixed(2)} ft</div>
-                      </>
-                    ) : (
-                      <>
-                        <div style={{ fontSize: 22, fontWeight: 800, color: '#047857', lineHeight: 1.15 }}>{clearance.toFixed(3)}</div>
-                        <div style={{ fontSize: 11, color: '#b45309', fontWeight: 600 }}>relative units (uncalibrated reconstruction)</div>
-                      </>
-                    )}
-                  </div>
-                )}
-                {clearanceInfo && clearanceInfo.status === 'success' && (
-                  <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11 }}>
-                    {clearanceInfo.scale_known === false && (
-                      <div title="Photogrammetric reconstructions carry no absolute scale â€” values are relative units, not meters/feet."
-                        style={{ padding: '4px 8px', borderRadius: 6, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', fontSize: 10.5, fontWeight: 600 }}>
-                        âš  Relative units â€” uncalibrated
+                    {primaryFeatureMeasurement?.recorded_comparison && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '5px 7px', borderRadius: 6, background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                        <MetricCell label="SNBI B.H.12" value={recordedClearance(primaryFeatureMeasurement.recorded_comparison.bh12_recorded_ft)} />
+                        <MetricCell label="SNBI B.H.13" value={recordedClearance(primaryFeatureMeasurement.recorded_comparison.bh13_recorded_ft)} />
                       </div>
                     )}
-                    {clearanceInfo.waterway?.is_waterway && (
-                      <div title="Waterway under the bridge — this is an inferred water-surface gap without a controlling datum, not SNBI BN02."
-                        style={{ padding: '4px 8px', borderRadius: 6, background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af', fontSize: 10.5, fontWeight: 600 }}>
-                        Waterway — surface-gap proxy, not BN02
-                      </div>
+                    {!primaryFeatureMeasurement && comparisonBh13 && !comparisonBh13.sentinel_99_9 && (
+                      <MetricCell label="SNBI B.H.13" value={recordedClearance(comparisonBh13.bh13_ft)} />
                     )}
-                    <ClrRow label={clearanceInfo.waterway?.is_waterway ? 'Surface-gap proxy' : 'Screening minimum'} value={clearanceInfo.scale_known === false
-                      ? `${clearanceInfo.min_clearance_m?.toFixed(3)} (relative)`
-                      : `${clearanceInfo.min_clearance_m?.toFixed(3)} m / ${(clearanceInfo.min_clearance_m * 3.28084).toFixed(2)} ft`} />
-                    {!clearanceInfo.waterway?.is_waterway && (
-                      <ClrRow label="Typical (centre)" value={clearanceInfo.scale_known === false
-                        ? `${clearanceInfo.typical_clearance_m?.toFixed(3)} (relative)`
-                        : `${clearanceInfo.typical_clearance_m?.toFixed(3)} m`} />
-                    )}
-                    <ClrRow label="Method" value={`${({ roadway_sections: 'per-roadway', water_surface_proxy: 'water-surface proxy', global_fallback: 'global estimate', road_center: 'road centre' }[clearanceInfo.method as string]) || clearanceInfo.method} · ${clearanceInfo.confidence}`} muted />
-                    {clearanceInfo.roadway_count > 1 && (
-                      <div style={{ marginTop: 3, paddingTop: 5, borderTop: '1px solid ' + SX.border }}>
-                        <div style={{ color: SX.label, marginBottom: 3 }}>{clearanceInfo.roadway_count} roadways under the deck</div>
-                        {clearanceInfo.roadways.map((rw: any, i: number) => (
-                          <ClrRow key={i} label={`  roadway ${i + 1}`} muted
-                            value={clearanceInfo.scale_known === false
-                              ? `min ${rw.controlling_min_m?.toFixed(2)} Â· ctr ${rw.center_m?.toFixed(2)} (rel)`
-                              : `min ${(rw.controlling_min_m * 3.28084).toFixed(1)}â€² Â· ctr ${(rw.center_m * 3.28084).toFixed(1)}â€²`} />
-                        ))}
-                      </div>
-                    )}
-                    {clearanceInfo.noise_removed > 0 && (
-                      <ClrRow label="Cleaned" value={`${clearanceInfo.noise_removed.toLocaleString()} noise pts`} muted />
-                    )}
-                    {clearanceInfo.db_clearance_ft != null && (
-                      <div style={{ marginTop: 3, paddingTop: 5, borderTop: '1px solid ' + SX.border, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <ClrRow label="DB recorded (BH13)" value={`${clearanceInfo.db_clearance_ft.toFixed(2)} ft`} />
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ color: SX.label }}>Î” measuredâˆ’DB</span>
-                          <span style={{ fontWeight: 700, color: clearanceInfo.db_match ? '#059669' : '#d97706' }}>
-                            {clearanceInfo.db_delta_ft > 0 ? '+' : ''}{clearanceInfo.db_delta_ft?.toFixed(2)} ft {clearanceInfo.db_match ? 'âœ“' : 'âš '}
-                          </span>
+                    {clearanceRoadways.slice(0, 1).map((roadway: any, roadwayIndex: number) => {
+                      const samples = Array.isArray(selectedClearancePlane?.samples)
+                        ? selectedClearancePlane.samples
+                        : (Array.isArray(roadway.profile_samples) ? roadway.profile_samples : []);
+                      const profileClearances = samples.map((sample: any) => Number(sample.clearance)).filter(Number.isFinite);
+                      const profileMax = Math.max(1, ...profileClearances) * 1.04;
+                      const chartLeft = 8;
+                      const chartRight = 316;
+                      const chartTop = 15;
+                      const chartBottom = 108;
+                      const chartY = (value: number) => chartBottom - (value / profileMax) * (chartBottom - chartTop);
+                      const sampleOffsets = samples.map((sample: any) => Number(sample.offset)).filter(Number.isFinite);
+                      const regionOffsets = clearanceRegions.flatMap((region: any) => [Number(region.start_offset_m), Number(region.end_offset_m)]).filter(Number.isFinite);
+                      const offsetMin = Math.min(...(regionOffsets.length ? regionOffsets : sampleOffsets));
+                      const offsetMax = Math.max(...(regionOffsets.length ? regionOffsets : sampleOffsets));
+                      const offsetSpan = Math.max(1e-9, offsetMax - offsetMin);
+                      const chartX = (offset: number) => chartLeft + ((offset - offsetMin) / offsetSpan) * (chartRight - chartLeft);
+                      const bh12ControlId = selectedBh12Candidate?.controlling_sample_id;
+                      const bh13ControlId = primaryFeatureMeasurement?.bh13_controlling_sample_id;
+                      return (
+                        <div key={`roadway-${roadwayIndex}`} style={{ borderTop: '1px solid #bbf7d0', paddingTop: 6 }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px' }}>
+                            <MetricCell label="Minimum" value={dualClearance(Number(roadway.controlling_min_m))} />
+                            <MetricCell label="Centre" value={dualClearance(Number(roadway.center_m))} />
+                            <MetricCell label="Median" value={dualClearance(Number(roadway.median_m))} />
+                            <MetricCell label="Maximum" value={dualClearance(Number(roadway.max_m))} />
+                          </div>
+                          {retainedClearancePlanes.length > 1 && (
+                            <select aria-label="Visible clearance plane" value={selectedClearancePlane?.plane_id ?? ''}
+                              onChange={event => setSelectedClearancePlaneId(event.target.value)}
+                              style={{ ...sourceInputStyle, marginTop: 6, padding: '4px 5px' }}>
+                              {retainedClearancePlanes.map((plane: any, index: number) => {
+                                const roles = Array.isArray(plane.roles) ? plane.roles : [];
+                                const label = roles.length
+                                  ? roles.map((role: string) => role.toUpperCase()).join(' · ')
+                                  : `${String(plane.station_edge ?? 'section').replace(/^./, (value: string) => value.toUpperCase())} ${index + 1}`;
+                                return <option key={plane.plane_id} value={plane.plane_id}>{label}</option>;
+                              })}
+                            </select>
+                          )}
+                          {samples.length > 0 && (
+                            <div style={{ marginTop: 6, padding: 4, border: '1px solid #dbeafe', borderRadius: 6, background: '#fff' }}>
+                              <svg viewBox="0 0 324 132" role="img" aria-label="Clearance rectangles" style={{ display: 'block', width: '100%', height: 'auto' }}>
+                                {selectedBh12Candidate && (
+                                  <rect x={chartX(Number(selectedBh12Candidate.start_offset_m))} y={4}
+                                    width={Math.max(1, chartX(Number(selectedBh12Candidate.end_offset_m)) - chartX(Number(selectedBh12Candidate.start_offset_m)))}
+                                    height={chartBottom - 4} fill="#dbeafe" opacity="0.45" stroke="#2563eb" strokeWidth="1.5" />
+                                )}
+                                {samples.map((sample: any, sampleIndex: number) => {
+                                  const offset = Number(sample.offset);
+                                  const previousOffset = sampleIndex > 0 ? Number(samples[sampleIndex - 1].offset) : offset - (Number(samples[sampleIndex + 1]?.offset) - offset || offsetSpan / Math.max(1, samples.length));
+                                  const nextOffset = sampleIndex < samples.length - 1 ? Number(samples[sampleIndex + 1].offset) : offset + (offset - Number(samples[sampleIndex - 1]?.offset) || offsetSpan / Math.max(1, samples.length));
+                                  const x = chartX(Math.max(offsetMin, (previousOffset + offset) / 2));
+                                  const right = chartX(Math.min(offsetMax, (offset + nextOffset) / 2));
+                                  const barWidth = Math.max(1, right - x);
+                                  const y = chartY(Number(sample.clearance));
+                                  const sampleId = sample.measurement_sample_id;
+                                  const bh13Control = sampleId === bh13ControlId;
+                                  const bh12Control = sampleId === bh12ControlId;
+                                  const controlling = bh13Control || bh12Control || !!sample.controlling;
+                                  const contributes = sample.used_by_result !== false;
+                                  const stroke = bh13Control ? '#dc2626' : bh12Control ? '#2563eb' : contributes ? '#4f46e5' : '#94a3b8';
+                                  return (
+                                    <g key={sample.sample_id ?? sampleIndex}>
+                                      <rect x={x} y={y} width={barWidth} height={chartBottom - y} fill={controlling ? '#fee2e2' : contributes ? '#eef2ff' : '#f1f5f9'} stroke={stroke} strokeWidth={controlling ? 2 : 1.2} />
+                                      <text x={x + barWidth / 2} y={Math.max(10, y - 3)} textAnchor="middle" fontSize="8" fontWeight={controlling ? 800 : 600} fill={controlling ? '#b91c1c' : '#334155'}>{Number(sample.clearance).toFixed(2)}</text>
+                                    </g>
+                                  );
+                                })}
+                                <line x1={chartLeft} y1={chartBottom} x2={chartRight} y2={chartBottom} stroke="#475569" strokeWidth="1.5" />
+                                {clearanceRegions.map((region: any, index: number) => {
+                                  const left = chartX(Number(region.start_offset_m));
+                                  const right = chartX(Number(region.end_offset_m));
+                                  return (
+                                    <g key={region.region_id ?? index}>
+                                      <rect x={left} y={112} width={Math.max(1, right - left)} height={15} fill={index % 2 ? '#e0e7ff' : '#eef2ff'} stroke="#a5b4fc" />
+                                      <text x={(left + right) / 2} y={122.5} textAnchor="middle" fontSize="7.5" fill="#3730a3">{String(region.region_id ?? `Lane ${index + 1}`).replace(/-/g, ' ')}</text>
+                                    </g>
+                                  );
+                                })}
+                              </svg>
+                            </div>
+                          )}
                         </div>
-                      </div>
-                    )}
+                      );
+                    })}
+                  </div>
+                )}
+                {durableRun && ['queued', 'running', 'cancellation_requested'].includes(durableRun.status) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <div style={{ flex: 1, height: 5, borderRadius: 5, background: '#e2e8f0', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${Math.min(100, 100 * Number(durableRun.progress?.completed ?? 0) / Math.max(1, Number(durableRun.progress?.total ?? 8)))}%`, background: SX.indigo }} />
+                    </div>
+                    <button onClick={cancelDurableRun} className="pcbtn pcbtn-ghost">Cancel</button>
                   </div>
                 )}
                 {(measurement.groundZ !== null || measurement.soffitZ !== null) && (
@@ -2670,8 +2804,20 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
           </PanelSection>
 
           <PanelSection title="Components" last>
+            {analysisInfo && (
+              <div style={{ display: 'flex', gap: 12, marginBottom: 6 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: SX.text, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={showVolumes} onChange={e => setShowVolumes(e.target.checked)} style={{ accentColor: SX.indigo }} />
+                  Volumes
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: SX.text, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={showMesh} onChange={e => setShowMesh(e.target.checked)} style={{ accentColor: SX.indigo }} />
+                  Mesh
+                </label>
+              </div>
+            )}
             {!segDone
-              ? <div style={{ fontSize: 12, color: SX.label }}>No components yet</div>
+              ? <span style={{ color: SX.label }}>—</span>
               : <SegmentLegend classes={segClasses} segVisible={segVisible} onToggle={toggleSegVisibility} onReset={restoreOriginalCloud}/>}
           </PanelSection>
         </div>
@@ -2681,8 +2827,8 @@ const PointCloud: React.FC<PointCloudProps> = ({ onClose, bridgeStateCode, bridg
 };
 
 const PanelSection: React.FC<{ title: string; children: React.ReactNode; last?: boolean }> = ({ title, children, last }) => (
-  <section style={{ padding: '10px 12px', borderBottom: last ? 'none' : '1px solid ' + SX.border }}>
-    <div style={{ fontWeight: 700, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.7, marginBottom: 7, color: SX.title }}>{title}</div>
+  <section style={{ padding: '8px 10px', borderBottom: last ? 'none' : '1px solid ' + SX.border }}>
+    <div style={{ fontWeight: 700, fontSize: 9.5, textTransform: 'uppercase', letterSpacing: 0.7, marginBottom: 5, color: SX.title }}>{title}</div>
     {children}
   </section>
 );
@@ -2690,35 +2836,48 @@ const PanelSection: React.FC<{ title: string; children: React.ReactNode; last?: 
 interface SegmentLegendProps {
   classes: SegClass[];
   segVisible: boolean[];
-  onToggle: (idx: number) => void;
+  onToggle: (indices: number[]) => void;
   onReset: () => void;
 }
-const SegmentLegend: React.FC<SegmentLegendProps> = ({ classes, segVisible, onToggle, onReset }) => (
+const SegmentLegend: React.FC<SegmentLegendProps> = ({ classes, segVisible, onToggle, onReset }) => {
+  const grouped = new Map<string, { first: SegClass; indices: number[]; count: number; isClearance: boolean }>();
+  classes.forEach((component, index) => {
+    if (!component.count) return;
+    const name = compactComponentLabel(component.name);
+    const key = name.toLowerCase();
+    const current = grouped.get(key);
+    if (current) {
+      current.indices.push(index);
+      current.count += component.count;
+      current.isClearance ||= !!component.is_clearance;
+    } else {
+      grouped.set(key, { first: { ...component, name }, indices: [index], count: component.count, isClearance: !!component.is_clearance });
+    }
+  });
+  return (
   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-    {classes.map((c, idx) => {
-      if (!c.count) return null;
-      const vis = segVisible[idx] ?? true;
+    {[...grouped.values()].map(group => {
+      const c = group.first;
+      const vis = group.indices.every(index => segVisible[index] ?? true);
       return (
-        <button key={c.id} onClick={() => onToggle(idx)}
+        <button key={c.name} onClick={() => onToggle(group.indices)}
           style={{ display: 'flex', alignItems: 'flex-start', gap: 7, padding: '5px 7px', borderRadius: 7, border: `1px solid ${vis ? c.color_hex + '66' : SX.border}`, background: vis ? `${c.color_hex}14` : '#f8fafc', cursor: 'pointer', textAlign: 'left', width: '100%', opacity: vis ? 1 : 0.55 }}>
           <span style={{ width: 9, height: 9, borderRadius: '50%', background: c.color_hex, flexShrink: 0, display: 'inline-block', marginTop: 3 }}/>
-          <span style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
-            <span style={{ fontSize: 11, color: vis ? SX.text : SX.label, fontWeight: 500, display: 'block', lineHeight: 1.25 }}>{c.name}</span>
-            {c.material && <span style={{ fontSize: 9, color: SX.label }}>material: {c.material}</span>}
-          </span>
-          {c.is_clearance && <span style={{ fontSize: 8.5, color: '#059669', fontWeight: 700, textTransform: 'uppercase', marginTop: 2 }}>clr</span>}
-          <span style={{ fontSize: 10, color: SX.label, fontFamily: 'ui-monospace, monospace', marginTop: 1 }}>{c.count.toLocaleString()}</span>
+          <span style={{ flex: 1, minWidth: 0, textAlign: 'left', fontSize: 11, color: vis ? SX.text : SX.label, fontWeight: 500, lineHeight: 1.25 }}>{c.name}</span>
+          {group.isClearance && <span style={{ fontSize: 8.5, color: '#059669', fontWeight: 700, textTransform: 'uppercase', marginTop: 2 }}>clr</span>}
+          <span style={{ fontSize: 10, color: SX.label, fontFamily: 'ui-monospace, monospace', marginTop: 1 }}>{group.count.toLocaleString()}</span>
         </button>
       );
     })}
-    <button onClick={onReset} className="pcbtn pcbtn-ghost pcbtn-block" style={{ marginTop: 2 }}>â†© Restore Colours</button>
+    <button onClick={onReset} className="pcbtn pcbtn-ghost pcbtn-block" style={{ marginTop: 2 }}>↩ Restore Colours</button>
   </div>
-);
+  );
+};
 
-const ClrRow: React.FC<{ label: string; value: string; muted?: boolean }> = ({ label, value, muted }) => (
-  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-    <span style={{ color: SX.label }}>{label}</span>
-    <span style={{ color: muted ? '#94a3b8' : SX.text, fontFamily: muted ? undefined : 'ui-monospace, monospace', textAlign: 'right' }}>{value}</span>
+const MetricCell: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div style={{ minWidth: 0, padding: '4px 5px', borderRadius: 5, background: '#fff', border: '1px solid #dcfce7' }}>
+    <div style={{ fontSize: 9, color: SX.label }}>{label}</div>
+    <div style={{ fontSize: 10.5, fontWeight: 700, color: SX.text, lineHeight: 1.25 }}>{value}</div>
   </div>
 );
 

@@ -1,7 +1,7 @@
 // frontend/src/pages/Converter.tsx
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Upload, FileText, Download, AlertCircle, CheckCircle, ArrowRightLeft, Loader2 } from 'lucide-react';
+import { Upload, FileText, Download, AlertCircle, CheckCircle, ArrowRightLeft, ChevronDown, Loader2, Settings2 } from 'lucide-react';
 import { SectionHeader } from '../components/ui';
 
 interface ConvertResponse {
@@ -238,7 +238,7 @@ const Converter: React.FC = () => {
   const [inputFormat, setInputFormat] = useState('fhwa_fixed_445');
   const [encoding, setEncoding] = useState('ascii');
   const [issuePolicy, setIssuePolicy] = useState('reject');
-  const [bid01Policy, setBid01Policy] = useState('');
+  const [bid01Policy, setBid01Policy] = useState('preserve');
   const [csvDelimiter, setCsvDelimiter] = useState(',');
   const [csvQuotechar, setCsvQuotechar] = useState("'");
   const [forwardMode, setForwardMode] = useState<ForwardMode>('single');
@@ -472,6 +472,79 @@ const Converter: React.FC = () => {
       active ? 'bg-brand-600 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
     }`;
 
+  const forwardAdvancedOptions = (
+    <details className="rounded-2xl border border-slate-200 bg-slate-50">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-semibold text-slate-700">
+        <Settings2 className="h-4 w-4 text-slate-500" />
+        Advanced options
+        <span className="ml-1 text-xs font-normal text-slate-500">Use the defaults for standard NJDOT files.</span>
+        <ChevronDown className="ml-auto h-4 w-4" />
+      </summary>
+      <div className="border-t border-slate-200 p-4">
+        <p className="mb-4 text-xs leading-5 text-slate-600">
+          Change these only when the source uses a different agency, layout, text encoding, or bridge-number convention. Incorrect format settings can prevent records from being read correctly.
+        </p>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Source agency
+            <input value={sourceAgency} onChange={(event) => setSourceAgency(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900" maxLength={80} required />
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Source file layout
+            <select value={inputFormat} onChange={(event) => setInputFormat(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
+              <option value="fhwa_fixed_445">FHWA fixed width (445 bytes)</option>
+              <option value="fhwa_download_csv">FHWA NBI download CSV</option>
+              <option value="named_csv">CSV with named header</option>
+              <option value="legacy_positional_csv">Legacy positional CSV</option>
+            </select>
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Text encoding
+            <select value={encoding} onChange={(event) => setEncoding(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
+              <option value="ascii">ASCII</option>
+              <option value="utf-8">UTF-8</option>
+              <option value="utf-8-sig">UTF-8 with BOM</option>
+              <option value="cp1252">Windows-1252</option>
+              <option value="iso8859-1">ISO-8859-1</option>
+            </select>
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Invalid record handling
+            <select value={issuePolicy} onChange={(event) => setIssuePolicy(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
+              <option value="reject">Stop the conversion</option>
+              <option value="quarantine">Skip and report invalid records</option>
+              <option value="accept_with_issue">Convert and flag them</option>
+            </select>
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Bridge-number leading zeros
+            <select value={bid01Policy} onChange={(event) => setBid01Policy(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
+              <option value="preserve">Preserve exactly</option>
+              <option value="trim_all_leading_zeros">Remove all leading zeros</option>
+              <option value="trim_all_but_one">Keep one leading zero</option>
+            </select>
+            <span className="block text-xs font-normal text-slate-500">Preserving the source identifier is the safest default.</span>
+          </label>
+          {inputFormat !== 'fhwa_fixed_445' && (
+            <>
+              <label className="space-y-1.5 text-sm font-medium text-slate-700">
+                CSV delimiter
+                <input value={csvDelimiter} onChange={(event) => setCsvDelimiter(event.target.value.slice(0, 1))} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-mono font-normal text-slate-900" maxLength={1} required />
+              </label>
+              <label className="space-y-1.5 text-sm font-medium text-slate-700">
+                CSV quote character
+                <input value={csvQuotechar} onChange={(event) => setCsvQuotechar(event.target.value.slice(0, 1))} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-mono font-normal text-slate-900" maxLength={1} required />
+              </label>
+            </>
+          )}
+        </div>
+        <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          The converter retains source evidence for review. Its JSON output is not an FHWA submission file.
+        </p>
+      </div>
+    </details>
+  );
+
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <SectionHeader icon={<ArrowRightLeft className="w-6 h-6" />} title="Bridge Data Converter" />
@@ -490,85 +563,23 @@ const Converter: React.FC = () => {
       {activeTab === 'nbi-to-snbi' && (
         <>
           <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-6 space-y-5">
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              Strict research import with immutable source evidence. Output is for review and is not an FHWA submission file.
+            <div>
+              <p className="text-base font-semibold text-slate-900">Convert NBI source files to SNBI JSON</p>
+              <p className="mt-1 text-sm text-slate-500">Choose one year or a sequence of annual files, then upload the source. Standard NJDOT settings are already selected.</p>
             </div>
             <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
               <button type="button" onClick={() => selectForwardMode('single')} className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${forwardMode === 'single' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
-                Single annual source
+                One inventory year
               </button>
               <button type="button" onClick={() => selectForwardMode('annual-history')} className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${forwardMode === 'annual-history' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
-                Annual inspection history
+                Multiple yearly files
               </button>
             </div>
             {forwardMode === 'annual-history' && (
               <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-                Initial versus routine events require contiguous multi-year NBI sources. Each file gets an explicit inventory year; repeated dates keep every artifact lineage. Pre-2000 compatibility remains disabled.
+                Select consecutive annual files and confirm the inventory year for each one. BridgeGuard will reconstruct the inspection history for the target year.
               </div>
             )}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                Source agency
-                <input
-                  value={sourceAgency}
-                  onChange={(event) => setSourceAgency(event.target.value)}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900"
-                  maxLength={80}
-                  required
-                />
-              </label>
-              <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                Declared layout
-                <select value={inputFormat} onChange={(event) => setInputFormat(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
-                  <option value="fhwa_fixed_445">FHWA fixed width (445 bytes)</option>
-                  <option value="fhwa_download_csv">FHWA NBI download CSV (two-digit state)</option>
-                  <option value="named_csv">CSV with named header</option>
-                  <option value="legacy_positional_csv">Legacy positional CSV</option>
-                </select>
-              </label>
-              <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                Text encoding
-                <select value={encoding} onChange={(event) => setEncoding(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
-                  <option value="ascii">ASCII</option>
-                  <option value="utf-8">UTF-8</option>
-                  <option value="utf-8-sig">UTF-8 with BOM</option>
-                  <option value="cp1252">Windows-1252</option>
-                  <option value="iso8859-1">ISO-8859-1</option>
-                </select>
-              </label>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                Record issue policy
-                <select value={issuePolicy} onChange={(event) => setIssuePolicy(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
-                  <option value="reject">Reject file</option>
-                  <option value="quarantine">Quarantine bad records</option>
-                  <option value="accept_with_issue">Accept and flag</option>
-                </select>
-              </label>
-              <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                Bridge ID leading zeros
-                <select value={bid01Policy} onChange={(event) => setBid01Policy(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal text-slate-900">
-                  <option value="" disabled>Select a policy</option>
-                  <option value="preserve">Preserve exactly</option>
-                  <option value="trim_all_leading_zeros">Trim all leading zeros</option>
-                  <option value="trim_all_but_one">Keep one leading zero</option>
-                </select>
-                <span className="block text-xs font-normal text-slate-500">Required agency choice; collisions are rejected before conversion.</span>
-              </label>
-              {inputFormat !== 'fhwa_fixed_445' && (
-                <>
-                  <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                    CSV delimiter
-                    <input value={csvDelimiter} onChange={(event) => setCsvDelimiter(event.target.value.slice(0, 1))} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-mono font-normal text-slate-900" maxLength={1} required />
-                  </label>
-                  <label className="space-y-1.5 text-sm font-medium text-slate-700">
-                    CSV quote character
-                    <input value={csvQuotechar} onChange={(event) => setCsvQuotechar(event.target.value.slice(0, 1))} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-mono font-normal text-slate-900" maxLength={1} required />
-                  </label>
-                </>
-              )}
-            </div>
             {forwardMode === 'single' && (
               <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -583,6 +594,7 @@ const Converter: React.FC = () => {
                   onChange={(e) => e.target.files?.[0] && setXmlFile(e.target.files[0])} />
               </div>
             </div>
+            {forwardAdvancedOptions}
             <button onClick={handleConvert} disabled={!txtFile || !sourceAgency.trim() || !bid01Policy || loading} className={`w-full ${primaryBtn}`}>
               {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileText className="w-5 h-5" />}
               {loading ? 'Processing…' : 'Convert to SNBI JSON'}
@@ -601,7 +613,7 @@ const Converter: React.FC = () => {
                 {annualSources.length > 0 && (
                   <div className="overflow-hidden rounded-xl border border-slate-200">
                     <div className="grid grid-cols-[1fr_9rem] gap-3 bg-slate-50 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      <span>Immutable source file</span><span>Inventory year</span>
+                      <span>Source file</span><span>Inventory year</span>
                     </div>
                     {annualSources.map((item, index) => (
                       <div key={`${item.file.name}-${index}`} className="grid grid-cols-[1fr_9rem] items-center gap-3 border-t border-slate-200 px-3 py-2">
@@ -627,9 +639,10 @@ const Converter: React.FC = () => {
                   </select>
                 </label>
                 {annualHistoryProblem && annualSources.length > 0 && <p className="text-sm text-amber-700">{annualHistoryProblem}</p>}
+                {forwardAdvancedOptions}
                 <button onClick={handleHistoryConvert} disabled={Boolean(annualHistoryProblem) || !sourceAgency.trim() || !bid01Policy || loading} className={`w-full ${primaryBtn}`}>
                   {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileText className="w-5 h-5" />}
-                  {loading ? 'Reconstructingâ€¦' : 'Reconstruct history and convert target year'}
+                  {loading ? 'Converting…' : 'Convert target year to SNBI JSON'}
                 </button>
               </div>
             )}

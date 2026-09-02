@@ -1,8 +1,8 @@
-// Queue an immutable server-authoritative preflight, then explicitly commit
-// canonical SNBI snapshots as staged revisions. Publication remains separate.
+// Validate an SNBI file, then atomically import its canonical records into the
+// selected yearly inventory while retaining server-owned audit evidence.
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { AlertCircle, CheckCircle, Database, Download, FileJson, Loader2 } from 'lucide-react';
+import { AlertCircle, CheckCircle, ChevronDown, Database, Download, FileJson, Loader2, Settings2 } from 'lucide-react';
 import { SectionHeader } from '../components/ui';
 import { refreshDataGeneration, useDataGenerationEpoch } from '../lib/dataGeneration';
 
@@ -48,7 +48,6 @@ interface StagedRevision {
     issues?: ValidationIssue[];
   };
   diff?: RevisionDiff[];
-  published?: boolean;
 }
 
 interface StageResponse {
@@ -239,14 +238,12 @@ const Loader: React.FC = () => {
   const [committing, setCommitting] = useState(false);
   const [preflightPage, setPreflightPage] = useState(0);
   const [stagedRevisions, setStagedRevisions] = useState<StagedRevision[]>([]);
-  const [reviewedWarnings, setReviewedWarnings] = useState<Record<string, boolean>>({});
-  const [publishing, setPublishing] = useState<Record<string, boolean>>({});
-  const [publishErrors, setPublishErrors] = useState<Record<string, string>>({});
   const [exporting, setExporting] = useState<Record<string, boolean>>({});
   const [exportErrors, setExportErrors] = useState<Record<string, string>>({});
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [reviewDetailsOpen, setReviewDetailsOpen] = useState(false);
   const importKeys = useRef(new Map<string, string>());
   const commitKeys = useRef(new Map<string, string>());
-  const publishKeys = useRef<Record<string, string>>({});
   const pollControllerRef = useRef<AbortController | null>(null);
   const activeImportIdRef = useRef<string | null>(null);
   const dataGenerationEpoch = useDataGenerationEpoch();
@@ -256,7 +253,7 @@ const Loader: React.FC = () => {
       const response = await axios.get('/api/loaded-years', { signal });
       setLoadedYears((response.data?.years || []).slice().sort((a: number, b: number) => b - a));
     } catch {
-      // Published-year badges are informative; revision operations remain available.
+      // Loaded-year badges are informative; importing remains available.
     }
   };
 
@@ -282,7 +279,7 @@ const Loader: React.FC = () => {
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setError('The revision service is not available. Please try again shortly.');
+          setError('The inventory service is not available. Please try again shortly.');
         }
       });
     return () => controller.abort();
@@ -308,8 +305,6 @@ const Loader: React.FC = () => {
     setPreflightStale(false);
     setPreflightPage(0);
     setStagedRevisions([]);
-    setReviewedWarnings({});
-    setPublishErrors({});
     setExportErrors({});
     setError('');
     setMessage('');
@@ -565,83 +560,23 @@ const Loader: React.FC = () => {
       localStorage.removeItem('bridgeguard_active_import_id');
       activeImportIdRef.current = null;
       setMessage(
-        `Committed ${revisions.length} bridge revision${revisions.length === 1 ? '' : 's'} to staging only. Nothing was published.`,
+        `Imported ${revisions.length} bridge record${revisions.length === 1 ? '' : 's'} into the ${selectedDataYear} inventory.`,
       );
       await fetchRevisionState();
+      await fetchLoadedYears();
+      localStorage.setItem('db_last_updated', Date.now().toString());
       refreshDataGeneration();
     } catch (commitError) {
       const details = apiErrorDetails(commitError, 'The reviewed import could not be committed.');
       if (details.code === 'stale_data_generation' || details.code === 'stale_snapshot_preflight') {
         setPreflightStale(true);
         void fetchRevisionState().catch(() => undefined);
-        setError('The inventory changed after preflight. No revisions were staged; run a new preflight.');
+        setError('The inventory changed after validation. Nothing was imported; validate the file again.');
       } else {
         setError(details.message);
       }
     } finally {
       setCommitting(false);
-    }
-  };
-
-  const publishRevision = async (revision: StagedRevision) => {
-    setPublishing((current) => ({ ...current, [revision.revision_id]: true }));
-    setPublishErrors((current) => ({ ...current, [revision.revision_id]: '' }));
-    try {
-      let etag = '"none"';
-      try {
-        const current = await axios.get(
-          `/api/revisions/snapshots/${revision.state_code}/${encodeURIComponent(revision.bridge_number)}/${revision.data_year}`,
-        );
-        const currentHash = current.data?.content_hash;
-        if (typeof current.headers.etag === 'string' && current.headers.etag) {
-          etag = current.headers.etag;
-        } else if (typeof currentHash === 'string' && currentHash) {
-          etag = `"${currentHash}"`;
-        } else {
-          throw new Error('The published snapshot did not include a strong ETag.');
-        }
-      } catch (lookupError) {
-        if (!axios.isAxiosError(lookupError) || lookupError.response?.status !== 404) throw lookupError;
-      }
-
-      const generation = await fetchRevisionState();
-      const idempotencyKey =
-        publishKeys.current[revision.revision_id] ||
-        (publishKeys.current[revision.revision_id] = newOperationId());
-      const response = await axios.post(
-        `/api/revisions/${encodeURIComponent(revision.revision_id)}/publish`,
-        {
-          reason: `Publish reviewed loader batch for data year ${revision.data_year}`,
-          expected_data_generation: generation,
-          reviewed_research_warnings: Boolean(reviewedWarnings[revision.revision_id]),
-        },
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'If-Match': etag,
-            'X-Request-ID': newOperationId(),
-          },
-        },
-      );
-      setDataGeneration(Number(response.data?.data_generation ?? generation));
-      setStagedRevisions((current) =>
-        current.map((item) =>
-          item.revision_id === revision.revision_id ? { ...item, published: true } : item,
-        ),
-      );
-      localStorage.setItem('db_last_updated', Date.now().toString());
-      fetchLoadedYears();
-      refreshDataGeneration();
-    } catch (publishError) {
-      setPublishErrors((current) => ({
-        ...current,
-        [revision.revision_id]: errorMessage(
-          publishError,
-          'This revision could not be published. Refresh and retry after resolving any conflict.',
-        ),
-      }));
-    } finally {
-      setPublishing((current) => ({ ...current, [revision.revision_id]: false }));
     }
   };
 
@@ -697,8 +632,6 @@ const Loader: React.FC = () => {
     setPreflightPage(0);
     setOverrideReason('');
     setStagedRevisions([]);
-    setReviewedWarnings({});
-    setPublishErrors({});
     setExportErrors({});
     setError('');
     setMessage('');
@@ -706,21 +639,14 @@ const Loader: React.FC = () => {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      <SectionHeader icon={<Database className="w-6 h-6" />} title="Durable bridge import" />
+      <SectionHeader icon={<Database className="w-6 h-6" />} title="Import bridge inventory" />
 
       <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-6 space-y-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-sm font-semibold text-slate-800">Immutable two-phase review workflow</p>
-            <p className="text-xs text-slate-500 mt-1">
-              The server retains exact bytes, preflights them asynchronously, and stages only after your explicit commit. Publication is separate.
-            </p>
-          </div>
-          {dataGeneration !== null && (
-            <span className="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-              Data version {dataGeneration}
-            </span>
-          )}
+        <div>
+          <p className="text-base font-semibold text-slate-900">Add an SNBI file to the yearly inventory</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Select the file and inventory year. BridgeGuard will validate everything before anything is saved.
+          </p>
         </div>
 
         <label className="flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-slate-300 hover:border-brand-400 hover:bg-slate-50 transition-colors cursor-pointer py-10 px-6 text-center">
@@ -734,8 +660,7 @@ const Loader: React.FC = () => {
           <input type="file" accept=".json,application/json" onChange={handleFileChange} disabled={loading || committing} className="hidden" />
         </label>
 
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <div>
+        <div className="max-w-sm">
             <label htmlFor="inventory-year" className="block text-sm font-medium text-slate-700 mb-1.5">
               Inventory year
             </label>
@@ -749,94 +674,64 @@ const Loader: React.FC = () => {
               disabled={loading || committing}
               className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
-          </div>
-          <div>
-            <label htmlFor="state-code" className="block text-sm font-medium text-slate-700 mb-1.5">
-              State code
-            </label>
-            <input
-              id="state-code"
-              type="number"
-              min={1}
-              max={99}
-              value={stateCode}
-              onChange={(event) => setStateCode(Number(event.target.value))}
-              disabled={loading || committing}
-              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
-            />
-          </div>
-          <div>
-            <label htmlFor="agency-id" className="block text-sm font-medium text-slate-700 mb-1.5">
-              Agency ID
-            </label>
-            <input
-              id="agency-id"
-              type="text"
-              maxLength={128}
-              value={agencyId}
-              onChange={(event) => setAgencyId(event.target.value)}
-              disabled={loading || committing}
-              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
-            />
-          </div>
-          <div>
-            <label htmlFor="import-profile" className="block text-sm font-medium text-slate-700 mb-1.5">
-              Import profile
-            </label>
-            <select
-              id="import-profile"
-              value={profileId}
-              onChange={(event) => setProfileId(event.target.value as ImportProfile)}
-              disabled={loading || committing}
-              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
-            >
-              <option value="native_snbi">Native SNBI</option>
-              <option value="research_historical_import">Historical NBI transition</option>
-            </select>
-          </div>
-          <div>
-            <label htmlFor="import-action" className="block text-sm font-medium text-slate-700 mb-1.5">
-              Commit action
-            </label>
-            <select
-              id="import-action"
-              value={action}
-              onChange={(event) => setAction(event.target.value as ImportAction)}
-              disabled={loading || committing}
-              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
-            >
-              <option value="create_only">Create only</option>
-              <option value="replace_snapshot">Add revision to existing snapshot</option>
-            </select>
-          </div>
-          <div>
-            <label htmlFor="validation-policy" className="block text-sm font-medium text-slate-700 mb-1.5">
-              Validation policy
-            </label>
-            <select
-              id="validation-policy"
-              value={validationPolicy}
-              onChange={(event) => setValidationPolicy(event.target.value as ValidationPolicy)}
-              disabled={loading || committing}
-              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
-            >
-              <option value="reject_critical">Reject critical/error issues</option>
-              <option value="advisory">Advisory review</option>
-            </select>
-          </div>
-          <div>
-            <label htmlFor="atomic-mode" className="block text-sm font-medium text-slate-700 mb-1.5">
-              Atomic mode
-            </label>
-            <input
-              id="atomic-mode"
-              type="text"
-              value="Entire batch (all or nothing)"
-              readOnly
-              aria-readonly="true"
-              className="w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-slate-600"
-            />
-          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-slate-50">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((open) => !open)}
+            aria-expanded={advancedOpen}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm font-semibold text-slate-700"
+          >
+            <Settings2 className="h-4 w-4 text-slate-500" />
+            Advanced options
+            <span className="ml-1 text-xs font-normal text-slate-500">Use the defaults for standard NJDOT SNBI files.</span>
+            <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {advancedOpen && (
+            <div className="border-t border-slate-200 p-4">
+              <p className="mb-4 text-xs leading-5 text-slate-600">
+                Change these settings only when the file belongs to another agency, came from the historical NBI converter, or should replace an existing bridge/year record. Every import remains all-or-nothing.
+              </p>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <label htmlFor="state-code" className="block text-sm font-medium text-slate-700 mb-1.5">State code</label>
+                  <input id="state-code" type="number" min={1} max={99} value={stateCode} onChange={(event) => setStateCode(Number(event.target.value))} disabled={loading || committing} className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900" />
+                </div>
+                <div>
+                  <label htmlFor="agency-id" className="block text-sm font-medium text-slate-700 mb-1.5">Agency ID</label>
+                  <input id="agency-id" type="text" maxLength={128} value={agencyId} onChange={(event) => setAgencyId(event.target.value)} disabled={loading || committing} className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900" />
+                </div>
+                <div>
+                  <label htmlFor="import-profile" className="block text-sm font-medium text-slate-700 mb-1.5">Data profile</label>
+                  <select id="import-profile" value={profileId} onChange={(event) => setProfileId(event.target.value as ImportProfile)} disabled={loading || committing} className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900">
+                    <option value="native_snbi">Native SNBI</option>
+                    <option value="research_historical_import">Converted historical NBI</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="import-action" className="block text-sm font-medium text-slate-700 mb-1.5">If the bridge/year already exists</label>
+                  <select id="import-action" value={action} onChange={(event) => setAction(event.target.value as ImportAction)} disabled={loading || committing} className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900">
+                    <option value="create_only">Stop without changing it</option>
+                    <option value="replace_snapshot">Replace the bridge/year record</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="validation-policy" className="block text-sm font-medium text-slate-700 mb-1.5">Validation policy</label>
+                  <select id="validation-policy" value={validationPolicy} onChange={(event) => setValidationPolicy(event.target.value as ValidationPolicy)} disabled={loading || committing} className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900">
+                    <option value="reject_critical">Stop on errors</option>
+                    <option value="advisory">Allow review warnings</option>
+                  </select>
+                </div>
+                {dataGeneration !== null && (
+                  <div className="rounded-xl border border-slate-200 bg-white px-4 py-2.5">
+                    <p className="text-xs font-medium text-slate-500">Inventory generation</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-800">{dataGeneration}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -845,8 +740,8 @@ const Loader: React.FC = () => {
             disabled={!jsonFile || loading || committing || selectedDataYear < MIN_DATA_YEAR || selectedDataYear > MAX_DATA_YEAR || stateCode < 1 || stateCode > 99 || !agencyId.trim()}
             className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-700 text-white font-semibold py-2.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Database className="w-5 h-5" />}
-            {loading ? 'Running server preflight...' : 'Run server preflight'}
+            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <CheckCircle className="w-5 h-5" />}
+            {loading ? 'Validating file...' : 'Validate file'}
           </button>
           {loading && (
             <button
@@ -859,10 +754,10 @@ const Loader: React.FC = () => {
           )}
         </div>
 
-        {importJob && (
+        {importJob && importJob.status !== 'succeeded' && (
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-semibold text-slate-800">Import {importJob.import_id}</span>
+              <span className="font-semibold text-slate-800">Validating import</span>
               <span className="rounded-full bg-white px-2.5 py-1 font-semibold uppercase tracking-wide">
                 {importJob.status}
               </span>
@@ -901,38 +796,20 @@ const Loader: React.FC = () => {
         <section className="rounded-3xl bg-white border border-slate-200 shadow-sm p-6 space-y-5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">Server-authoritative preflight</h2>
-              <p className="mt-1 text-xs text-slate-500">
-                Receipt {importJob.preflight_digest?.slice(0, 16)}… | reviewed against data version {importJob.preflight.data_generation}
-              </p>
+              <h2 className="text-base font-semibold text-slate-900">
+                {importJob.preflight.valid && !preflightStale ? 'File is ready to import' : 'File needs attention'}
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">Review the summary, then import the whole file into the selected year.</p>
             </div>
             <span className={`rounded-full px-3 py-1 text-xs font-semibold ${importJob.preflight.valid && !preflightStale ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-              {preflightStale ? 'stale review' : importJob.preflight.valid ? 'committable' : 'blocked'}
+              {preflightStale ? 'Validate again' : importJob.preflight.valid ? 'Ready' : 'Cannot import'}
             </span>
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-            <p className="text-xs font-semibold text-slate-700">Inventory and action summary</p>
+            <p className="text-sm font-semibold text-slate-700">Validation summary</p>
             <p className="mt-1 text-xs text-slate-600">{summaryText(importJob.preflight.summary ?? {})}</p>
-            <p className="mt-2 text-xs text-slate-500">
-              Submission: state {importJob.preflight.submission?.state_code ?? 'unknown'} | year {importJob.preflight.submission?.inventory_year ?? 'unknown'} | agency {importJob.preflight.submission?.agency_id ?? 'unknown'} | profile {importJob.preflight.submission?.profile_id ?? 'unknown'}
-            </p>
-          </div>
-
-          <div className={`rounded-xl border p-3 ${importJob.preflight.field_loss_check?.status === 'passed' ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
-            <p className="text-xs font-semibold text-slate-800">
-              Field-loss check: {importJob.preflight.field_loss_check?.status ?? 'not reported'}
-            </p>
-            <p className="mt-1 text-xs text-slate-600">
-              Canonical data is authoritative. Unknown fields: {importJob.preflight.field_loss_check?.unknown_fields ?? 'not run'} | canonical-only extension documents: {importJob.preflight.field_loss_check?.extension_documents_retained_canonical_only ?? 0}
-            </p>
-            {(importJob.preflight.field_loss_check?.projection_schema_errors?.length ?? 0) > 0 && (
-              <ul className="mt-2 space-y-1 text-xs text-red-700">
-                {importJob.preflight.field_loss_check?.projection_schema_errors?.slice(0, 20).map((issue, index) => (
-                  <li key={`field-loss-${index}`}>{issue}</li>
-                ))}
-              </ul>
-            )}
+            <p className="mt-2 text-xs text-slate-500">Year {importJob.preflight.submission?.inventory_year ?? selectedDataYear} · {(importJob.preflight.bridges?.length ?? 0).toLocaleString()} bridge record(s)</p>
           </div>
 
           {(importJob.preflight.manifest_conflicts?.length ?? 0) > 0 && (
@@ -957,7 +834,31 @@ const Loader: React.FC = () => {
             </div>
           )}
 
-          <div className="space-y-3">
+          <button
+            type="button"
+            onClick={() => setReviewDetailsOpen((open) => !open)}
+            aria-expanded={reviewDetailsOpen}
+            className="flex w-full items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            <Settings2 className="h-4 w-4 text-slate-500" />
+            Advanced validation details
+            <span className="ml-1 text-xs font-normal text-slate-500">Field checks and individual bridge changes</span>
+            <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${reviewDetailsOpen ? 'rotate-180' : ''}`} />
+          </button>
+
+          {reviewDetailsOpen && (
+          <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className={`rounded-xl border p-3 ${importJob.preflight.field_loss_check?.status === 'passed' ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
+              <p className="text-xs font-semibold text-slate-800">Field compatibility: {importJob.preflight.field_loss_check?.status ?? 'not reported'}</p>
+              <p className="mt-1 text-xs text-slate-600">
+                Unknown fields: {importJob.preflight.field_loss_check?.unknown_fields ?? 'not run'} · canonical-only extensions: {importJob.preflight.field_loss_check?.extension_documents_retained_canonical_only ?? 0}
+              </p>
+              {(importJob.preflight.field_loss_check?.projection_schema_errors?.length ?? 0) > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-red-700">
+                  {importJob.preflight.field_loss_check?.projection_schema_errors?.slice(0, 20).map((issue, index) => <li key={`field-loss-${index}`}>{issue}</li>)}
+                </ul>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-slate-800">Per-bridge review</h3>
               <span className="text-xs text-slate-500">Actions, eligibility, issues, and bounded field diffs</span>
@@ -1056,16 +957,17 @@ const Loader: React.FC = () => {
               </div>
             )}
           </div>
+          )}
 
           {action === 'create_only' && (importJob.preflight.proposed_actions?.replace_snapshot_count ?? 0) > 0 && (
             <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-              This preflight contains {importJob.preflight.proposed_actions?.replace_snapshot_count} existing snapshot change(s). Choose “Add revision to existing snapshot” or the atomic commit will fail without writing anything.
+              This file changes {importJob.preflight.proposed_actions?.replace_snapshot_count} existing bridge/year record(s). Open Advanced options above and choose “Replace the bridge/year record,” or nothing will be imported.
             </p>
           )}
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <p className="flex-1 text-xs text-slate-500">
-              Commit is all-or-nothing and creates staged revisions only. It does not publish or activate bridge data.
+              The complete file is imported together. If any required check fails, no inventory record is changed.
             </p>
             <button
               type="button"
@@ -1074,21 +976,23 @@ const Loader: React.FC = () => {
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {committing && <Loader2 className="h-4 w-4 animate-spin" />}
-              {committing ? 'Committing atomically...' : 'Commit to staging only'}
+              {committing ? 'Importing inventory...' : `Import ${(importJob.preflight.bridges?.length ?? 0).toLocaleString()} record(s)`}
             </button>
           </div>
         </section>
       )}
 
       {stagedRevisions.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-4 px-1">
-            <h2 className="text-sm font-semibold text-slate-800">Staged revisions</h2>
-            <span className="text-xs text-slate-500">Publish each bridge only after reviewing its evidence.</span>
-          </div>
-          {stagedRevisions.map((revision) => {
+        <details className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-4 text-sm font-semibold text-slate-700">
+            <Settings2 className="h-4 w-4 text-slate-500" />
+            Advanced import receipt
+            <span className="text-xs font-normal text-slate-500">Audit evidence and export packages for {stagedRevisions.length} record(s)</span>
+            <ChevronDown className="ml-auto h-4 w-4" />
+          </summary>
+          <div className="space-y-3 border-t border-slate-200 p-4">
+          {stagedRevisions.slice(0, PREFLIGHT_PAGE_SIZE).map((revision) => {
             const validation = validationDetails(revision);
-            const isPublishing = Boolean(publishing[revision.revision_id]);
             return (
               <article key={revision.revision_id} className="rounded-2xl bg-white border border-slate-200 shadow-sm p-5 space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-start gap-3">
@@ -1101,11 +1005,6 @@ const Loader: React.FC = () => {
                       <span className="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-700">
                         {revision.outcome}
                       </span>
-                      {revision.published && (
-                        <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                          published
-                        </span>
-                      )}
                     </div>
                     <p className="mt-1 text-xs text-slate-500">
                       State {revision.state_code} | revision {revision.revision_number} | {revision.content_hash.slice(0, 12)}
@@ -1177,37 +1076,6 @@ const Loader: React.FC = () => {
                   </div>
                 </div>
 
-                {!revision.published && (
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                    <label className="flex flex-1 items-start gap-2 text-xs text-slate-600">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(reviewedWarnings[revision.revision_id])}
-                        onChange={(event) =>
-                          setReviewedWarnings((current) => ({
-                            ...current,
-                            [revision.revision_id]: event.target.checked,
-                          }))
-                        }
-                        className="mt-0.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                      />
-                      I reviewed the research-profile warnings and accept them for publication.
-                    </label>
-                    <button
-                      onClick={() => publishRevision(revision)}
-                      disabled={isPublishing}
-                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {isPublishing && <Loader2 className="h-4 w-4 animate-spin" />}
-                      {isPublishing ? 'Publishing...' : 'Publish revision'}
-                    </button>
-                  </div>
-                )}
-                {publishErrors[revision.revision_id] && (
-                  <p className="rounded-xl bg-red-50 p-3 text-xs text-red-700">
-                    {publishErrors[revision.revision_id]}
-                  </p>
-                )}
                 {exportErrors[revision.revision_id] && (
                   <p className="rounded-xl bg-red-50 p-3 text-xs text-red-700">
                     {exportErrors[revision.revision_id]}
@@ -1216,12 +1084,16 @@ const Loader: React.FC = () => {
               </article>
             );
           })}
-        </div>
+          {stagedRevisions.length > PREFLIGHT_PAGE_SIZE && (
+            <p className="px-1 text-xs text-slate-500">Showing the first {PREFLIGHT_PAGE_SIZE} receipts. The full batch remains recorded by the server.</p>
+          )}
+          </div>
+        </details>
       )}
 
       {loadedYears.length > 0 && (
         <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-6">
-          <p className="text-sm font-semibold text-slate-700 mb-3">Published data years</p>
+          <p className="text-sm font-semibold text-slate-700 mb-3">Loaded inventory years</p>
           <div className="flex flex-wrap gap-2">
             {loadedYears.map((year) => (
               <span key={year} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm font-medium text-slate-700">
@@ -1229,7 +1101,7 @@ const Loader: React.FC = () => {
               </span>
             ))}
           </div>
-          <p className="text-xs text-slate-400 mt-3">Historical revisions remain retained and auditable.</p>
+          <p className="text-xs text-slate-400 mt-3">Each year is available directly to BridgeGuard features.</p>
         </div>
       )}
     </div>

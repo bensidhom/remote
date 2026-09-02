@@ -1,4 +1,4 @@
-"""Exact published-revision facts used by the LCCA simulator."""
+"""Exact yearly inventory facts used by the LCCA simulator."""
 
 from __future__ import annotations
 

@@ -20,7 +20,7 @@ from .models import (
 )
 
 
-CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v1"
+CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v2-available-inventory"
 _SCOPE_FIELDS = ("workspace_id", "state_code", "bridge_number", "data_year")
 _SNAPSHOT_JOIN_FIELDS = _SCOPE_FIELDS
 
@@ -104,7 +104,7 @@ _IDENTITY_COLUMNS = (
         "snapshot_revision_id",
         SemanticDataType.TEXT,
         False,
-        "Immutable canonical revision backing this published snapshot.",
+        "Deterministic exact-year loaded-inventory row identity.",
     ),
     _column("state_code", SemanticDataType.INTEGER, False, "State FIPS code."),
     _column(
@@ -118,9 +118,19 @@ _IDENTITY_COLUMNS = (
 
 
 _BRIDGE_COLUMNS = _IDENTITY_COLUMNS + (
-    _column("published_at", SemanticDataType.DATETIME, False, "Publication timestamp."),
+    _column(
+        "published_at",
+        SemanticDataType.DATETIME,
+        True,
+        "Governed publication timestamp; null means the row is loaded legacy inventory.",
+    ),
     _column("bridge_name", SemanticDataType.TEXT, True, "Bridge or structure name."),
-    _column("county_code", SemanticDataType.INTEGER, True, "County code within the state."),
+    _column(
+        "county_code",
+        SemanticDataType.INTEGER,
+        True,
+        "County code within the state. For latest 'each county' results with names, use v_current_county_bridge_inventory instead.",
+    ),
     _column("bridge_location", SemanticDataType.TEXT, True, "Inventory location description."),
     _column("latitude", SemanticDataType.NUMBER, True, "Latitude in decimal degrees.", unit="degree"),
     _column("longitude", SemanticDataType.NUMBER, True, "Longitude in decimal degrees.", unit="degree"),
@@ -328,63 +338,72 @@ _FEATURE_COLUMNS = _IDENTITY_COLUMNS + (
 PUBLISHED_BRIDGE_SNAPSHOTS = SemanticResource(
     resource_id="v_published_bridge_snapshots",
     description=(
-        "Only canonical revisions currently published for an exact bridge and data year; "
-        "staged, superseded, archived, and unlinked projection rows are excluded."
+        "Authoritative loaded bridge inventory for an exact year. The resource id is retained "
+        "for stored-plan compatibility; it no longer implies a publication-pointer dependency."
     ),
     grain=ResourceGrain.BRIDGE_SNAPSHOT,
     columns=_BRIDGE_COLUMNS,
     time_semantics="data_year is exact; no implicit latest-year selection is applied",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_published_bridge_snapshots", "published_snapshots", "bridges"),
-    implementation_id="published_snapshot_join_v1",
+    physical_relations=(
+        "v_published_bridge_snapshots",
+        "workspace_state",
+        "bridges",
+    ),
+    implementation_id="loaded_inventory_snapshot_v3",
 )
 
 
 CURRENT_BRIDGE_SNAPSHOTS = SemanticResource(
     resource_id="v_current_bridge_snapshots",
     description=(
-        "Latest published snapshot selected independently for each bridge inside the authorized "
-        "workspace/state scope; never the database-wide maximum year."
+        "Bridge rows from the single latest available inventory year inside the authorized "
+        "workspace/state scope. All returned bridges use the same comparable year."
     ),
     grain=ResourceGrain.CURRENT_BRIDGE,
     columns=_BRIDGE_COLUMNS,
-    time_semantics="one maximum published data_year per bridge within the server-injected scope",
+    time_semantics="one global maximum available data_year within the server-injected state scope",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_current_bridge_snapshots", "published_snapshots", "bridges"),
-    implementation_id="per_bridge_latest_published_v1",
+    physical_relations=(
+        "v_current_bridge_snapshots",
+        "v_published_bridge_snapshots",
+        "workspace_state",
+        "bridges",
+    ),
+    implementation_id="global_latest_available_inventory_v2",
 )
 
 
 BRIDGE_FEATURES = SemanticResource(
     resource_id="v_bridge_features",
-    description="Feature rows belonging to published bridge snapshots only.",
+    description="Feature rows belonging to exact loaded bridge snapshots.",
     grain=ResourceGrain.BRIDGE_FEATURE,
     columns=_FEATURE_COLUMNS,
-    time_semantics="feature data_year is the exact published parent snapshot year",
+    time_semantics="feature data_year is the exact available parent inventory year",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_features", "published_snapshots", "features"),
-    implementation_id="published_feature_join_v1",
+    physical_relations=("v_bridge_features", "features"),
+    implementation_id="available_feature_join_v2",
 )
 
 
 CARRIED_HIGHWAY_FEATURES = SemanticResource(
     resource_id="v_carried_highway_features",
     description=(
-        "Published SNBI H01 carried-highway features. Use this resource for carried-route NHS, "
+        "Available SNBI H01 carried-highway features. Use this resource for carried-route NHS, "
         "traffic, lanes, and roadway-clearance questions."
     ),
     grain=ResourceGrain.BRIDGE_FEATURE,
     columns=_FEATURE_COLUMNS,
-    time_semantics="feature data_year is the exact published parent snapshot year",
+    time_semantics="feature data_year is the exact available parent inventory year",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_carried_highway_features", "published_snapshots", "features"),
-    implementation_id="published_feature_type_h01_v1",
+    physical_relations=("v_carried_highway_features", "features"),
+    implementation_id="available_feature_type_h01_v2",
 )
 
 
 BRIDGE_ROUTES = SemanticResource(
     resource_id="v_bridge_routes",
-    description="Route rows associated with a published bridge feature snapshot.",
+    description="Route rows associated with an available bridge feature snapshot.",
     grain=ResourceGrain.BRIDGE_ROUTE,
     columns=_IDENTITY_COLUMNS
     + (
@@ -395,16 +414,16 @@ BRIDGE_ROUTES = SemanticResource(
         _column("route_type", SemanticDataType.TEXT, True, "Reported route type."),
         _column("service_type", SemanticDataType.TEXT, True, "Reported service type."),
     ),
-    time_semantics="route data_year is the exact published parent snapshot year",
+    time_semantics="route data_year is the exact available parent inventory year",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_routes", "published_snapshots", "routes"),
-    implementation_id="published_route_join_v1",
+    physical_relations=("v_bridge_routes", "routes"),
+    implementation_id="available_route_join_v2",
 )
 
 
 BRIDGE_ELEMENTS = SemanticResource(
     resource_id="v_bridge_elements",
-    description="Element condition-state quantities belonging to published snapshots.",
+    description="Element condition-state quantities belonging to available inventory snapshots.",
     grain=ResourceGrain.BRIDGE_ELEMENT,
     columns=_IDENTITY_COLUMNS
     + (
@@ -416,16 +435,16 @@ BRIDGE_ELEMENTS = SemanticResource(
         _column("element_quantity_condition_state_three", SemanticDataType.INTEGER, True, "Quantity in condition state 3."),
         _column("element_quantity_condition_state_four", SemanticDataType.INTEGER, True, "Quantity in condition state 4."),
     ),
-    time_semantics="element data_year is the exact published parent snapshot year",
+    time_semantics="element data_year is the exact available parent inventory year",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_elements", "published_snapshots", "elements"),
-    implementation_id="published_element_join_v1",
+    physical_relations=("v_bridge_elements", "elements"),
+    implementation_id="available_element_join_v2",
 )
 
 
 BRIDGE_WORKS = SemanticResource(
     resource_id="v_bridge_works",
-    description="Work-history rows attached to published bridge snapshots.",
+    description="Work-history rows attached to available bridge inventory snapshots.",
     grain=ResourceGrain.BRIDGE_WORK,
     columns=_IDENTITY_COLUMNS
     + (
@@ -436,14 +455,14 @@ BRIDGE_WORKS = SemanticResource(
         "data_year identifies the inventory snapshot; year_work_performed identifies the work event"
     ),
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_works", "published_snapshots", "works"),
-    implementation_id="published_work_join_v1",
+    physical_relations=("v_bridge_works", "works"),
+    implementation_id="available_work_join_v2",
 )
 
 
 BRIDGE_POSTING_STATUSES = SemanticResource(
     resource_id="v_bridge_posting_statuses",
-    description="Load-posting status rows attached to published bridge snapshots.",
+    description="Load-posting status rows attached to available bridge inventory snapshots.",
     grain=ResourceGrain.POSTING_STATUS,
     columns=_IDENTITY_COLUMNS
     + (
@@ -459,15 +478,15 @@ BRIDGE_POSTING_STATUSES = SemanticResource(
         "data_year identifies the inventory snapshot; posting_status_change_date is an event date"
     ),
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_posting_statuses", "published_snapshots", "posting_statuses"),
-    implementation_id="published_posting_status_join_v1",
+    physical_relations=("v_bridge_posting_statuses", "posting_statuses"),
+    implementation_id="available_posting_status_join_v2",
 )
 
 
 BRIDGE_SPAN_SETS = SemanticResource(
     resource_id="v_bridge_span_sets",
     description=(
-        "SNBI span-configuration rows belonging only to published snapshots. "
+        "SNBI span-configuration rows belonging to exact loaded inventory snapshots. "
         "Use deck_material_and_type (BSP09) for deck-material questions; temporary "
         "codes CP-T and CR-T are concrete transition codes."
     ),
@@ -493,20 +512,20 @@ BRIDGE_SPAN_SETS = SemanticResource(
         _column("deck_reinforcing_protective_system", SemanticDataType.TEXT, True, "BSP12 deck reinforcing protective-system code."),
         _column("deck_stay_in_place_forms", SemanticDataType.TEXT, True, "BSP13 deck stay-in-place forms code."),
     ),
-    time_semantics="span data_year is the exact published parent snapshot year",
+    time_semantics="span data_year is the exact available parent inventory year",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_span_sets", "published_snapshots", "span_sets"),
-    implementation_id="published_span_set_join_v1",
+    physical_relations=("v_bridge_span_sets", "span_sets"),
+    implementation_id="available_span_set_join_v2",
 )
 
 
 BRIDGE_DECK_MATERIAL_SUMMARY = SemanticResource(
     resource_id="v_bridge_deck_material_summary",
     description=(
-        "One row per published bridge snapshot summarizing BSP09 deck material across all "
+        "One row per available bridge snapshot summarizing BSP09 deck material across all "
         "span configurations. A bridge has a concrete deck when any span-set BSP09 is "
         "C01, C02, C03, C04, C05, CX, CP-T, or CR-T. Percentages use all selected "
-        "published bridge snapshots as the denominator unless the user explicitly asks "
+        "available bridge snapshots as the denominator unless the user explicitly asks "
         "for only known deck materials."
     ),
     grain=ResourceGrain.BRIDGE_DECK_SUMMARY,
@@ -518,44 +537,42 @@ BRIDGE_DECK_MATERIAL_SUMMARY = SemanticResource(
         _derived_column("has_concrete_deck", SemanticDataType.BOOLEAN, False, "True when any span-set BSP09 is C01-C05, CX, CP-T, or CR-T."),
         _derived_column("has_known_deck_material", SemanticDataType.BOOLEAN, False, "True when any span set reports a nonzero deck-material code."),
     ),
-    time_semantics="summary is evaluated at the exact published data_year",
+    time_semantics="summary is evaluated at the exact available data_year",
     scope_fields=_SCOPE_FIELDS,
     physical_relations=(
         "v_bridge_deck_material_summary",
-        "published_snapshots",
         "span_sets",
     ),
-    implementation_id="published_deck_material_summary_v1",
+    implementation_id="available_deck_material_summary_v2",
 )
 
 
 CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY = SemanticResource(
     resource_id="v_current_bridge_deck_material_summary",
     description=(
-        "One row per bridge at that bridge's independently selected latest published "
-        "snapshot, summarizing BSP09 deck material. Use this resource for current or "
+        "One row per bridge in the single latest available inventory year, summarizing "
+        "BSP09 deck material. Use this resource for current or "
         "unspecified-year deck-material questions. Concrete means C01, C02, C03, C04, "
-        "C05, CX, CP-T, or CR-T; percentages use all current published bridges unless "
+        "C05, CX, CP-T, or CR-T; percentages use all bridges in that latest year unless "
         "the user explicitly requests a known-material denominator."
     ),
     grain=ResourceGrain.BRIDGE_DECK_SUMMARY,
     columns=BRIDGE_DECK_MATERIAL_SUMMARY.columns,
-    time_semantics="one independently selected latest published snapshot per bridge",
+    time_semantics="one global latest available inventory year for the authorized state",
     scope_fields=_SCOPE_FIELDS,
     physical_relations=(
         "v_current_bridge_deck_material_summary",
         "v_current_bridge_snapshots",
-        "published_snapshots",
         "span_sets",
     ),
-    implementation_id="current_published_deck_material_summary_v1",
+    implementation_id="current_available_deck_material_summary_v2",
 )
 
 
 BRIDGE_CONDITION = SemanticResource(
     resource_id="v_bridge_condition",
     description=(
-        "One deterministic condition result per published snapshot using controlling_condition_v1."
+        "One deterministic condition result per available inventory snapshot using controlling_condition_v1."
     ),
     grain=ResourceGrain.BRIDGE_CONDITION,
     columns=_IDENTITY_COLUMNS
@@ -570,9 +587,9 @@ BRIDGE_CONDITION = SemanticResource(
         _derived_column("condition_basis", SemanticDataType.TEXT, False, "Rule branch used to select the rating."),
         _derived_column("condition_conflict", SemanticDataType.BOOLEAN, False, "True when supplied ratings conflict or contain invalid evidence."),
     ),
-    time_semantics="condition is evaluated at the exact published data_year",
+    time_semantics="condition is evaluated at the exact available data_year",
     scope_fields=_SCOPE_FIELDS,
-    physical_relations=("v_bridge_condition", "v_published_bridge_snapshots", "published_snapshots", "bridges"),
+    physical_relations=("v_bridge_condition", "v_published_bridge_snapshots", "bridges"),
     implementation_id="controlling_condition_v1",
 )
 
@@ -580,7 +597,7 @@ BRIDGE_CONDITION = SemanticResource(
 COUNTY_BRIDGE_INVENTORY = SemanticResource(
     resource_id="v_county_bridge_inventory",
     description=(
-        "Published operational inventory counts grouped by workspace, state, county, and exact data year."
+        "Available operational inventory counts grouped by workspace, state, county, and exact data year."
     ),
     grain=ResourceGrain.COUNTY_INVENTORY,
     columns=(
@@ -589,7 +606,7 @@ COUNTY_BRIDGE_INVENTORY = SemanticResource(
         _column("county_code", SemanticDataType.INTEGER, True, "County code within the state."),
         _column("county_name", SemanticDataType.TEXT, True, "Reviewed county name lookup."),
         _column("data_year", SemanticDataType.INTEGER, False, "Exact inventory snapshot year."),
-        _derived_column("bridge_count", SemanticDataType.INTEGER, False, "Published bridge snapshot count.", unit="bridges"),
+        _derived_column("bridge_count", SemanticDataType.INTEGER, False, "Available bridge snapshot count.", unit="bridges"),
         _derived_column("good_bridge_count", SemanticDataType.INTEGER, False, "Operational Good bridge count.", unit="bridges"),
         _derived_column("fair_bridge_count", SemanticDataType.INTEGER, False, "Operational Fair bridge count.", unit="bridges"),
         _derived_column("poor_bridge_count", SemanticDataType.INTEGER, False, "Operational Poor bridge count.", unit="bridges"),
@@ -603,10 +620,34 @@ COUNTY_BRIDGE_INVENTORY = SemanticResource(
         "v_bridge_condition",
         "v_published_bridge_snapshots",
         "ref_counties",
-        "published_snapshots",
         "bridges",
     ),
-    implementation_id="county_published_inventory_v1",
+    implementation_id="county_available_inventory_v2",
+)
+
+
+CURRENT_COUNTY_BRIDGE_INVENTORY = SemanticResource(
+    resource_id="v_current_county_bridge_inventory",
+    description=(
+        "County names, bridge counts, condition counts, and deck area for the single "
+        "latest available state inventory year. Always use this resource for an "
+        "unspecified-year/current request asking for results in each county: use list "
+        "intent and select county_name plus the requested count/measure instead of "
+        "grouping v_published_bridge_snapshots by county_code."
+    ),
+    grain=ResourceGrain.COUNTY_INVENTORY,
+    columns=COUNTY_BRIDGE_INVENTORY.columns,
+    time_semantics="one global latest available inventory year for the authorized state",
+    scope_fields=("workspace_id", "state_code", "data_year"),
+    physical_relations=(
+        "v_current_county_bridge_inventory",
+        "v_current_bridge_snapshots",
+        "v_published_bridge_snapshots",
+        "ref_counties",
+        "workspace_state",
+        "bridges",
+    ),
+    implementation_id="current_county_available_inventory_v1",
 )
 
 
@@ -624,6 +665,7 @@ _RESOURCES = (
     CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY,
     BRIDGE_CONDITION,
     COUNTY_BRIDGE_INVENTORY,
+    CURRENT_COUNTY_BRIDGE_INVENTORY,
 )
 
 
@@ -651,69 +693,69 @@ _JOINS = (
         "published_to_condition",
         "v_bridge_condition",
         JoinCardinality.ONE_TO_ONE,
-        "Attach the single deterministic condition result for the same published snapshot.",
+        "Attach the single deterministic condition result for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_features",
         "v_bridge_features",
         JoinCardinality.ONE_TO_MANY,
-        "Attach all features for the same published snapshot.",
+        "Attach all features for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_carried_highways",
         "v_carried_highway_features",
         JoinCardinality.ONE_TO_MANY,
-        "Attach only carried H01 highway features for the same published snapshot.",
+        "Attach only carried H01 highway features for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_elements",
         "v_bridge_elements",
         JoinCardinality.ONE_TO_MANY,
-        "Attach elements for the same published snapshot.",
+        "Attach elements for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_works",
         "v_bridge_works",
         JoinCardinality.ONE_TO_MANY,
-        "Attach work records for the same published snapshot.",
+        "Attach work records for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_posting_statuses",
         "v_bridge_posting_statuses",
         JoinCardinality.ONE_TO_MANY,
-        "Attach posting statuses for the same published snapshot.",
+        "Attach posting statuses for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_span_sets",
         "v_bridge_span_sets",
         JoinCardinality.ONE_TO_MANY,
-        "Attach all span configurations for the same published snapshot.",
+        "Attach all span configurations for the same available snapshot.",
     ),
     _snapshot_join(
         "published_to_deck_material_summary",
         "v_bridge_deck_material_summary",
         JoinCardinality.ONE_TO_ONE,
-        "Attach the single reviewed deck-material summary for the same published snapshot.",
+        "Attach the single reviewed deck-material summary for the same available snapshot.",
     ),
     _snapshot_join(
         "current_to_deck_material_summary",
         "v_current_bridge_deck_material_summary",
         JoinCardinality.ONE_TO_ONE,
-        "Attach the reviewed deck-material summary to each independently selected current snapshot.",
+        "Attach the reviewed deck-material summary to each bridge in the global latest year.",
         left_resource_id="v_current_bridge_snapshots",
     ),
     _snapshot_join(
         "current_to_condition",
         "v_bridge_condition",
         JoinCardinality.ONE_TO_ONE,
-        "Attach condition only for each bridge's independently selected current snapshot.",
+        "Attach condition only for bridges in the global latest available year.",
         left_resource_id="v_current_bridge_snapshots",
     ),
     _snapshot_join(
         "current_to_carried_highways",
         "v_carried_highway_features",
         JoinCardinality.ONE_TO_MANY,
-        "Attach carried highways only for each bridge's independently selected current snapshot.",
+        "Attach carried highways only for bridges in the global latest available year.",
         left_resource_id="v_current_bridge_snapshots",
     ),
     SemanticJoin(
@@ -723,7 +765,7 @@ _JOINS = (
         left_fields=_SNAPSHOT_JOIN_FIELDS + ("feature_type",),
         right_fields=_SNAPSHOT_JOIN_FIELDS + ("feature_type",),
         cardinality=JoinCardinality.ONE_TO_MANY,
-        description="Attach routes only to their exact published parent feature.",
+        description="Attach routes only to their exact available parent feature.",
     ),
 )
 
@@ -740,6 +782,10 @@ _FUNCTIONS = (
     SafeFunction("absolute", "ABS", 1, 1, False, True, "Absolute numeric value."),
     SafeFunction("lower", "LOWER", 1, 1, False, True, "Lowercase text for a bounded comparison."),
     SafeFunction("upper", "UPPER", 1, 1, False, True, "Uppercase text for a bounded comparison."),
+    # SQLite reports the infix LIKE operator through its function-authorizer
+    # callback. The typed plan compiler emits LIKE only for validated contains
+    # and starts_with filters, so it must be explicitly allowed at execution.
+    SafeFunction("like", "LIKE", 2, 2, False, True, "Validated bounded text-pattern comparison."),
 )
 
 
@@ -793,6 +839,7 @@ __all__ = [
     "CARRIED_HIGHWAY_FEATURES",
     "CATALOG_DEFINITION_VERSION",
     "COUNTY_BRIDGE_INVENTORY",
+    "CURRENT_COUNTY_BRIDGE_INVENTORY",
     "CURRENT_BRIDGE_SNAPSHOTS",
     "CURRENT_BRIDGE_DECK_MATERIAL_SUMMARY",
     "PUBLISHED_BRIDGE_SNAPSHOTS",

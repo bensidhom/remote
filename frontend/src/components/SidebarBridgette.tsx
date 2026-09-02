@@ -12,11 +12,13 @@ import {
 import {
   bridgetteStreamPath,
   cancelBridgetteRequest,
+  clarificationDraft,
   newBridgetteRequestId,
   readBridgetteStream,
+  type BridgetteClarificationOption,
 } from '../lib/bridgetteStream';
 import { useDataGenerationEpoch } from '../lib/dataGeneration';
-import { BridgetteQueryDetails } from './BridgetteEvidence';
+import { BridgetteAnswerStatus, BridgetteQueryDetails } from './BridgetteEvidence';
 
 interface Turn {
   q: string;
@@ -39,6 +41,7 @@ const SidebarBridgette: React.FC = () => {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const dataGenerationEpoch = useDataGenerationEpoch();
@@ -118,6 +121,11 @@ const SidebarBridgette: React.FC = () => {
             });
             break;
           case 'clarification':
+            setInput((current) => current.trim() ? current : clarificationDraft(question));
+            setTimeout(() => inputRef.current?.focus(), 0);
+            answer = typeof event.message === 'string' ? event.message : 'More information is needed.';
+            update({ loading: false, a: answer, decision: event.type, evidence: event });
+            break;
           case 'abstention':
             answer = typeof event.message === 'string' ? event.message : 'More information is needed.';
             update({ loading: false, a: answer, decision: event.type, evidence: event });
@@ -196,6 +204,7 @@ const SidebarBridgette: React.FC = () => {
             {t.loading && !t.a && (
               <div className="flex items-center gap-1.5 text-slate-400 text-[12px]"><Loader2 className="w-3 h-3 animate-spin" /> thinking…</div>
             )}
+            <BridgetteAnswerStatus evidence={t.evidence} compact />
             {t.a && (
               <div className="rounded-lg rounded-tl-sm bg-slate-100 text-slate-700 px-2.5 py-1.5 text-[12px] leading-snug whitespace-pre-wrap break-words">{t.a}</div>
             )}
@@ -217,10 +226,13 @@ const SidebarBridgette: React.FC = () => {
             )}
             {t.decision && Array.isArray(t.evidence?.options) && (
               <div className="flex flex-wrap gap-1.5">
-                {(t.evidence.options as Array<{ id?: string; label?: string }>).map((option) => (
+                {(t.evidence.options as BridgetteClarificationOption[]).map((option) => (
                   <button
                     key={String(option.id ?? option.label)}
-                    onClick={() => ask(`${t.q} — ${String(option.label ?? option.id)}`)}
+                    onClick={() => {
+                      setInput(clarificationDraft(t.q, option));
+                      setTimeout(() => inputRef.current?.focus(), 0);
+                    }}
                     className="rounded-md border border-brand-300 px-2 py-1 text-left text-[11px] text-brand-600 hover:bg-brand-50"
                   >
                     {String(option.label ?? option.id)}
@@ -237,6 +249,7 @@ const SidebarBridgette: React.FC = () => {
 
       <div className="shrink-0 p-2 flex items-end gap-1.5">
         <textarea
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } }}

@@ -1,4 +1,4 @@
-"""Multi-alternative annual LCCA driven exclusively by one forecast package."""
+"""Multi-alternative annual LCCA over the exact loaded bridge history."""
 
 from __future__ import annotations
 
@@ -21,7 +21,9 @@ from app.services.analytics.treatments import (
 from app.services.conversion.canonical_json import canonical_json_text
 from app.services.forecasting_v2.estimator import (
     BridgeAnnualForecastProvider,
+    ForecastModelConfig,
     TreatmentEffectModel,
+    build_annual_markov_model,
 )
 from app.services.forecasting_v2.models import ComponentState, ForecastQualification
 from app.services.forecasting_v2.store import ForecastStoreError, deserialize_annual_markov_model
@@ -318,6 +320,8 @@ def compare_bridge_lcca_strategies(
     action_costs: Mapping[str, Decimal],
     explicit_actions: Iterable[ExplicitAction] = (),
     condition_threshold: float = 4.5,
+    rehabilitation_year: int | None = None,
+    replacement_year: int | None = None,
     enable_research_effect_assumptions: bool = False,
     require_released_forecast: bool = False,
     treatments: TreatmentLibrary = DEFAULT_BRIDGE_TREATMENT_LIBRARY,
@@ -335,11 +339,47 @@ def compare_bridge_lcca_strategies(
     if not states:
         raise SimulationInputError("no valid component states are available")
     facts = bridge_lcca_facts(snapshot)
-    package = _latest_package(database_path, history.workspace_id)
-    qualification = ForecastQualification(str(package["qualification"]))
+    final_year = snapshot.data_year + horizon
+
+    def scheduled_year(requested: int | None, strategy: str) -> int:
+        year = snapshot.data_year if requested is None else int(requested)
+        if year < snapshot.data_year or year > final_year:
+            raise SimulationInputError(
+                f"{strategy} year must be between {snapshot.data_year} and {final_year}"
+            )
+        return year
+
+    rehabilitation_action_year = (
+        scheduled_year(rehabilitation_year, "rehabilitation")
+        if "deck_and_substructure_rehabilitation" in strategy_ids
+        else snapshot.data_year
+    )
+    replacement_action_year = (
+        scheduled_year(replacement_year, "replacement")
+        if "full_replacement" in strategy_ids
+        else snapshot.data_year
+    )
+    try:
+        package = _latest_package(database_path, history.workspace_id)
+        qualification = ForecastQualification(str(package["qualification"]))
+        model = deserialize_annual_markov_model(str(package["model_json"]))
+        model_version_id = str(package["model_version_id"])
+        evaluation_run_id = str(package["evaluation_run_id"])
+        evaluation_receipt_id = str(package["evaluation_receipt_id"])
+    except ForecastStoreError as exc:
+        if exc.code != "forecast_package_not_found" or require_released_forecast:
+            raise
+        model = build_annual_markov_model(
+            [history],
+            through_year=snapshot.data_year,
+            config=ForecastModelConfig(minimum_cohort_exposure=1),
+        )
+        qualification = ForecastQualification.RESEARCH_UNVALIDATED
+        model_version_id = f"on-demand-{model.model_id}"
+        evaluation_run_id = "on-demand-loaded-inventory"
+        evaluation_receipt_id = f"loaded-inventory-on-demand:{model.source_receipt_sha256}"
     if require_released_forecast and qualification is not ForecastQualification.RELEASED:
         raise SimulationInputError("forecast package is not released for commercial LCCA")
-    model = deserialize_annual_markov_model(str(package["model_json"]))
 
     schedules: dict[str, tuple[ScheduledAction, ...]] = {}
     issues: dict[str, tuple[dict[str, object], ...]] = {}
@@ -357,7 +397,7 @@ def compare_bridge_lcca_strategies(
         )
     if "deck_and_substructure_rehabilitation" in strategy_ids:
         actions = tuple(
-            _scheduled(snapshot.data_year, action_id, action_costs, treatments)
+            _scheduled(rehabilitation_action_year, action_id, action_costs, treatments)
             for action_id in ("deck_replacement", "substructure_rehabilitation")
             if treatments.get(action_id).component in components
         )
@@ -365,7 +405,7 @@ def compare_bridge_lcca_strategies(
         issues["deck_and_substructure_rehabilitation"] = ()
     if "full_replacement" in strategy_ids:
         schedules["full_replacement"] = (
-            _scheduled(snapshot.data_year, "full_replacement", action_costs, treatments),
+            _scheduled(replacement_action_year, "full_replacement", action_costs, treatments),
         )
         issues["full_replacement"] = ()
     if "explicit_schedule" in strategy_ids:
@@ -391,7 +431,7 @@ def compare_bridge_lcca_strategies(
     provider = BridgeAnnualForecastProvider(
         model=model,
         bridge_snapshot=snapshot,
-        evaluation_receipt_id=str(package["evaluation_receipt_id"]),
+        evaluation_receipt_id=evaluation_receipt_id,
         qualification=qualification,
         treatment_effects=effects,
     )
@@ -418,7 +458,7 @@ def compare_bridge_lcca_strategies(
                 horizon_years=horizon,
                 discount_rate=economics.real_discount_rate,
                 forecast_model_id=model.model_id,
-                forecast_evaluation_receipt_id=str(package["evaluation_receipt_id"]),
+                forecast_evaluation_receipt_id=evaluation_receipt_id,
                 initial_states=states,
                 alternative=LccaAlternative(
                     alternative_id=strategy_id,
@@ -442,7 +482,7 @@ def compare_bridge_lcca_strategies(
         "snapshot_revision_id": snapshot.snapshot_revision_id,
         "canonical_sha256": snapshot.canonical_sha256,
         "model_id": model.model_id,
-        "evaluation_receipt_id": str(package["evaluation_receipt_id"]),
+        "evaluation_receipt_id": evaluation_receipt_id,
         "treatment_library_sha256": treatments.library_sha256,
         "strategies": [
             {
@@ -473,10 +513,10 @@ def compare_bridge_lcca_strategies(
     return BridgeLccaComparison(
         scenario_receipt_sha256=receipt,
         facts=facts,
-        model_version_id=str(package["model_version_id"]),
+        model_version_id=model_version_id,
         model_id=model.model_id,
-        evaluation_run_id=str(package["evaluation_run_id"]),
-        evaluation_receipt_id=str(package["evaluation_receipt_id"]),
+        evaluation_run_id=evaluation_run_id,
+        evaluation_receipt_id=evaluation_receipt_id,
         forecast_qualification=qualification,
         treatment_library_id=treatments.library_id,
         treatment_library_sha256=treatments.library_sha256,

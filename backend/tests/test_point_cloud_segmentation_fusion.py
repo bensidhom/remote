@@ -236,6 +236,46 @@ def test_point_reason_counts_reconcile_exactly():
     assert result.analysis_incomplete is False
 
 
+def test_vlm_boundary_gate_excludes_clutter_and_restrictions_from_measurement():
+    points = np.column_stack(
+        [np.arange(16, dtype=float), np.zeros(16), np.ones(16)]
+    )
+    component_ids = np.repeat(np.arange(1, 5), 4)
+    components = [
+        {"id": 1, "final_class": "deck_slab"},
+        {"id": 2, "final_class": "under_surface"},
+        {"id": 3, "final_class": "pier_column"},
+        {"id": 4, "final_class": "attached_restriction_appurtenance"},
+    ]
+    reviews = {
+        1: {"is_bridge": True, "component_class": "deck_slab", "confidence": 0.95, "abstained": False},
+        2: {"is_bridge": True, "component_class": "under_surface", "confidence": 0.95, "abstained": False},
+        3: {"is_bridge": False, "component_class": "nonstructural_clutter", "confidence": 0.98, "abstained": False},
+        4: {"is_bridge": False, "component_class": "nonstructural_clutter", "confidence": 0.98, "abstained": False},
+    }
+
+    measurement_ids, boundary_points, metadata = point_cloud_service._measurement_fusion_gate(
+        points, component_ids, components, reviews
+    )
+
+    assert measurement_ids == {1, 2}
+    assert boundary_points is not None
+    assert np.array_equal(boundary_points, points[component_ids == 2])
+    assert metadata["boundary_source"] == "vlm_reviewed_component_extents"
+    assert metadata["excluded_clutter_component_ids"] == [3, 4]
+    assert metadata["excluded_clutter_points"] == 8
+    assert metadata["excluded_restriction_component_ids"] == [4]
+    assert metadata["excluded_restriction_points"] == 4
+    assert metadata["distance_authority"] == "deterministic_geometry_only"
+
+    unreviewed_ids, _, unreviewed_metadata = point_cloud_service._measurement_fusion_gate(
+        points, component_ids, components, {}
+    )
+    assert unreviewed_ids == {1, 2, 3, 4}
+    assert unreviewed_metadata["excluded_clutter_points"] == 0
+    assert unreviewed_metadata["excluded_restriction_points"] == 0
+
+
 def test_attached_restriction_geometry_protects_connected_object_not_detached_object():
     structure = np.column_stack(
         [np.zeros(40), np.linspace(0.0, 0.4, 40), np.full(40, 2.0)]
@@ -260,6 +300,28 @@ def test_attached_restriction_geometry_protects_connected_object_not_detached_ob
     assert not mask[-len(detached) :].any()
 
 
+def test_footprint_keeps_aligned_deck_halves_but_rejects_side_clutter():
+    u_left, v_left = np.meshgrid(np.linspace(0.0, 10.0, 25), np.linspace(0.0, 2.0, 6))
+    u_right, v_right = np.meshgrid(np.linspace(12.0, 22.0, 25), np.linspace(0.0, 2.0, 6))
+    u_clutter, v_clutter = np.meshgrid(np.linspace(1.0, 1.5, 2), np.linspace(9.0, 9.5, 2))
+    u = np.concatenate([u_left.ravel(), u_right.ravel(), u_clutter.ravel()])
+    v = np.concatenate([v_left.ravel(), v_right.ravel(), v_clutter.ravel()])
+    selected = np.ones(len(u), dtype=bool)
+
+    footprint = point_cloud_service._footprint_mask(
+        u, v, selected, ncell=60, dilation=1
+    )
+    inside = point_cloud_service._in_footprint(u, v, footprint)
+    left_end = u_left.size
+    right_end = left_end + u_right.size
+
+    # Grid upper-bound points sit on the packed half-open boundary, so verify the
+    # substantial coverage rather than requiring those exact edge samples.
+    assert inside[:left_end].mean() > 0.85
+    assert inside[left_end:right_end].mean() > 0.85
+    assert not inside[right_end:].any()
+
+
 def test_active_analysis_never_calls_legacy_pre_geometry_vlm_deleters(monkeypatch):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("legacy pre-geometry remover must not run")
@@ -279,8 +341,39 @@ def test_active_analysis_never_calls_legacy_pre_geometry_vlm_deleters(monkeypatc
         use_vlm=False,
         use_sam=True,
         model_mode="structural",
+        bridge_context={
+            "schema_version": "test",
+            "knowledge_pack_sha256": "a" * 64,
+            "trusted_structured_context": {
+                "trust": "loaded_yearly_inventory",
+                "scope": {
+                    "state_code": 34,
+                    "bridge_number": "0415152",
+                    "data_year": 2025,
+                },
+            },
+            "_measurement_features": [
+                {
+                    "BF01": "H02",
+                    "BF02": "B",
+                    "BF03": "NJ 73",
+                    "BH13": 14.4,
+                }
+            ],
+        },
     )
 
     assert result["cleaning"]["clean_mode"] == "conservative_fusion"
     assert result["cleaning"]["removed_noise"] == 0
     assert result["segmentation_ontology_version"] == SEGMENTATION_ONTOLOGY_VERSION
+    assert result["snbi_bh13"] == [
+        {
+            "feature_id": "H02",
+            "feature_name": "NJ 73",
+            "relationship_code": "B",
+            "relationship": "below_bridge",
+            "bh13_ft": 14.4,
+            "sentinel_99_9": False,
+            "comparison_target": True,
+        }
+    ]

@@ -214,7 +214,7 @@ def test_restart_safe_preflight_is_owner_scoped_and_persisted_outside_job_json(h
     assert loaded["import_id"] == import_id
 
 
-def test_commit_rechecks_digest_generation_and_stages_without_publish(harness: Harness):
+def test_commit_rechecks_digest_generation_and_imports_without_publish(harness: Harness):
     created = harness.create(_raw())
     import_id = created.json()["import_id"]
     job = harness.run_worker(import_id)
@@ -270,8 +270,10 @@ def test_commit_rechecks_digest_generation_and_stages_without_publish(harness: H
         },
     )
     assert committed.status_code == 200, committed.text
-    assert committed.json()["status"] == "staged"
+    assert committed.json()["status"] == "imported"
+    assert committed.json()["imported"] is True
     assert committed.json()["published"] is False
+    assert committed.json()["data_generation"] == 1
     assert committed.json()["revisions"][0]["outcome"] == "created"
     assert get_published_snapshot(
         str(harness.database),
@@ -280,6 +282,12 @@ def test_commit_rechecks_digest_generation_and_stages_without_publish(harness: H
         "IMPORT-0001",
         2026,
     ) is None
+    with closing(sqlite3.connect(harness.database)) as connection:
+        row = connection.execute(
+            "SELECT bridge_name, data_year FROM bridges WHERE state_code=? AND bridge_number=?",
+            (34, "IMPORT-0001"),
+        ).fetchone()
+    assert row == ("Durable import", 2026)
 
     replay = harness.client.post(
         f"/api/imports/{import_id}/commit",
@@ -468,14 +476,14 @@ def test_create_only_is_enforced_inside_the_staging_transaction(harness: Harness
         },
         json={
             "preflight_digest": second_job.result["preflight_digest"],
-            "expected_data_generation": 0,
+            "expected_data_generation": second_preflight["data_generation"],
             "action": "create_only",
             "validation_policy": "advisory",
             "atomic_mode": "batch",
         },
     )
     assert blocked.status_code == 409
-    assert blocked.json()["detail"]["code"] == "snapshot_already_exists"
+    assert blocked.json()["detail"]["code"] == "inventory_record_already_exists"
     with closing(sqlite3.connect(harness.database)) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM snapshot_revisions WHERE bridge_number='CREATE-ONLY'"

@@ -124,7 +124,7 @@ def test_identifier_normalization_retains_leading_zeroes():
     assert normalize_bridge_identifier(" 01-02 151 ") == "0102151"
 
 
-def test_exact_identifier_uses_latest_published_snapshot_and_revision(tmp_path):
+def test_exact_identifier_uses_latest_loaded_inventory_snapshot(tmp_path):
     path = _database(tmp_path)
     result = resolve_bridge(
         str(path), workspace_id=WORKSPACE, state_code=34, query="Show bridge 01-02151 on map"
@@ -135,11 +135,11 @@ def test_exact_identifier_uses_latest_published_snapshot_and_revision(tmp_path):
     bridge = result["bridge"]
     assert bridge["bridge_number"] == "0102151"
     assert bridge["snapshot_year"] == 2024
-    assert bridge["snapshot_revision_id"] == "rev-34-0102151-2024"
-    assert bridge["inventory_revision"] == "rev-34-0102151-2024"
+    assert bridge["snapshot_revision_id"] == "loaded-inventory:34:0102151:2024"
+    assert bridge["inventory_revision"] == "loaded-inventory:34:0102151:2024"
     assert bridge["bridge_id"] == f"{WORKSPACE}:34:0102151"
     assert bridge["snapshot_id"] == f"{WORKSPACE}:34:0102151:2024"
-    assert bridge["identity_status"] == "published"
+    assert bridge["identity_status"] == "exact_year_loaded_inventory"
     assert bridge["coordinates"] == {"latitude": 40.11, "longitude": -74.21}
     assert bridge["county_name"] == "Atlantic"
 
@@ -151,7 +151,7 @@ def test_explicit_year_never_falls_forward(tmp_path):
     )
     assert old["status"] == "exact"
     assert old["bridge"]["snapshot_year"] == 2023
-    assert old["bridge"]["snapshot_revision_id"] == "rev-34-0102151-2023"
+    assert old["bridge"]["snapshot_revision_id"] == "loaded-inventory:34:0102151:2023"
 
     missing = resolve_bridge(
         str(path), workspace_id=WORKSPACE, state_code=34, query="Alpha Crossing", year=2022
@@ -228,7 +228,7 @@ def test_database_strings_remain_data_in_response(tmp_path):
     assert result["bridge"]["bridge_name"] == "<img src=x onerror=alert(1)>"
 
 
-def test_legacy_projection_fallback_is_explicitly_unversioned(tmp_path):
+def test_loaded_projection_row_gets_an_exact_year_identity(tmp_path):
     path = _database(tmp_path)
     connection = sqlite3.connect(path)
     connection.execute(
@@ -243,14 +243,14 @@ def test_legacy_projection_fallback_is_explicitly_unversioned(tmp_path):
     )
     assert result["status"] == "exact"
     bridge = result["bridge"]
-    assert bridge["identity_status"] == "legacy_projection_unversioned"
-    assert bridge["snapshot_revision_id"] is None
-    assert bridge["inventory_revision"] is None
+    assert bridge["identity_status"] == "exact_year_loaded_inventory"
+    assert bridge["snapshot_revision_id"] == "loaded-inventory:34:0400001:2024"
+    assert bridge["inventory_revision"] == "loaded-inventory:34:0400001:2024"
     assert bridge["canonical_sha256"] is None
-    assert result["inventory_revision"] is None
+    assert result["inventory_revision"] == "loaded-inventory:34:0400001:2024"
 
 
-def test_another_workspace_cannot_suppress_legacy_fallback(tmp_path):
+def test_publication_pointer_from_another_workspace_is_ignored(tmp_path):
     path = _database(tmp_path)
     connection = sqlite3.connect(path)
     connection.execute(
@@ -268,7 +268,7 @@ def test_another_workspace_cannot_suppress_legacy_fallback(tmp_path):
         str(path), workspace_id=WORKSPACE, state_code=34, query="0500001"
     )
     assert result["status"] == "exact"
-    assert result["bridge"]["identity_status"] == "legacy_projection_unversioned"
+    assert result["bridge"]["identity_status"] == "exact_year_loaded_inventory"
 
 
 @pytest.fixture
@@ -312,7 +312,7 @@ def test_http_route_returns_revision_header_and_forbids_extra_scope(api_client):
     )
     assert response.status_code == 200
     assert response.headers["x-bridgeguard-data-version"] == "17"
-    assert response.json()["bridge"]["snapshot_revision_id"] == "rev-34-0102151-2024"
+    assert response.json()["bridge"]["snapshot_revision_id"] == "loaded-inventory:34:0102151:2024"
     assert response.headers["cache-control"] == "private, no-store"
 
     extra = api_client.post(

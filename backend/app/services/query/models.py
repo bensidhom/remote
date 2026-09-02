@@ -45,16 +45,16 @@ class SemanticDataType(str, Enum):
 
 
 class ResourceGrain(str, Enum):
-    BRIDGE_SNAPSHOT = "one_row_per_published_bridge_snapshot"
-    CURRENT_BRIDGE = "one_row_per_bridge_latest_published_snapshot"
+    BRIDGE_SNAPSHOT = "one_row_per_available_bridge_inventory_snapshot"
+    CURRENT_BRIDGE = "one_row_per_bridge_in_latest_available_inventory_year"
     BRIDGE_FEATURE = "one_row_per_bridge_feature_snapshot"
     BRIDGE_ROUTE = "one_row_per_bridge_route_snapshot"
     BRIDGE_SPAN = "one_row_per_bridge_span_configuration_snapshot"
-    BRIDGE_DECK_SUMMARY = "one_row_per_published_bridge_snapshot_deck_material_summary"
+    BRIDGE_DECK_SUMMARY = "one_row_per_available_bridge_snapshot_deck_material_summary"
     BRIDGE_ELEMENT = "one_row_per_bridge_element_snapshot"
     BRIDGE_WORK = "one_row_per_bridge_work_record_snapshot"
     POSTING_STATUS = "one_row_per_bridge_posting_status_snapshot"
-    BRIDGE_CONDITION = "one_row_per_published_bridge_snapshot_condition"
+    BRIDGE_CONDITION = "one_row_per_available_bridge_snapshot_condition"
     COUNTY_INVENTORY = "one_row_per_county_and_snapshot_year"
 
 
@@ -341,6 +341,27 @@ class SemanticCatalog:
                 for resource in self.resources
             }
         )
+
+    @property
+    def sandbox_relation_allowlist(
+        self,
+    ) -> Mapping[str, frozenset[str] | None]:
+        """Semantic views plus reviewed implementation dependencies.
+
+        Generated SQL is independently restricted to ``query_columns_by_relation``.
+        The SQLite authorizer also sees reads performed while expanding those
+        approved views, including the loaded-inventory fallback CTE, so their
+        reviewed physical dependencies must be readable only at this final
+        execution boundary.
+        """
+
+        relations: dict[str, frozenset[str] | None] = {
+            name: columns
+            for name, columns in self.query_columns_by_relation.items()
+        }
+        for relation in self.implementation_relation_inventory:
+            relations.setdefault(relation, None)
+        return MappingProxyType(relations)
 
     @property
     def catalog_hash(self) -> str:

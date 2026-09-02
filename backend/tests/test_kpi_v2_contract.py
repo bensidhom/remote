@@ -8,6 +8,8 @@ from app.services.kpis_v2.registry import (
 )
 from app.services.kpis_v2.repository import (
     compute_age_condition_area,
+    compute_age_condition_counts,
+    compute_future_condition_scenarios,
     compute_operational_kpis,
 )
 from app.services.kpis_v2.fhwa_tpm import compute_fhwa_tpm_diagnostic
@@ -123,6 +125,12 @@ def test_operational_kpis_reconcile_counts_areas_unknowns_and_state_policy(tmp_p
     values = report["values"]
     assert values["total_bridges"] == 5
     assert values["condition_counts"] == {"Good": 2, "Fair": 1, "Poor": 1, "Unknown": 1}
+    assert values["component_condition_counts"] == [
+        {"component": "Deck", "field": "B.C.01", "Good": 2, "Fair": 1, "Poor": 1, "rated_bridges": 4, "not_applicable_or_unrated": 1},
+        {"component": "Superstructure", "field": "B.C.02", "Good": 2, "Fair": 2, "Poor": 0, "rated_bridges": 4, "not_applicable_or_unrated": 1},
+        {"component": "Substructure", "field": "B.C.03", "Good": 2, "Fair": 2, "Poor": 0, "rated_bridges": 4, "not_applicable_or_unrated": 1},
+        {"component": "Culvert", "field": "B.C.04", "Good": 0, "Fair": 0, "Poor": 0, "rated_bridges": 0, "not_applicable_or_unrated": 5},
+    ]
     assert sum(values["county_counts"].values()) == 5
     assert values["county_counts"]["Unknown county"] == 1
     assert values["total_valid_deck_area_ft2"] == 6400.0
@@ -169,6 +177,77 @@ def test_age_condition_area_uses_snapshot_age_and_reconciles_bins(tmp_path):
     assert by_bin["40-44"]["Unknown"] == 1000.0
     assert result["excluded"]["missing_or_invalid_age_count"] == 1
     assert sum(row["total_ft2"] for row in result["series"]) == 6400.0
+
+
+def test_age_condition_counts_returns_whole_bridge_records(tmp_path):
+    database = tmp_path / "kpis.db"
+    _fixture(str(database))
+
+    result = compute_age_condition_counts(
+        database_path=database,
+        workspace_id="workspace-a",
+        state_code=34,
+        year=2024,
+    )
+
+    by_bin = {row["age_bin"]: row for row in result["series"]}
+    assert by_bin["0-4"]["Good"] == 1
+    assert by_bin["20-24"]["Good"] == 1
+    assert by_bin["30-34"]["Lower Fair"] == 1
+    assert by_bin["30-34"]["Upper Fair"] == 0
+    assert by_bin["30-34"]["Fair"] == 1
+    assert result["excluded"] == {
+        "missing_or_invalid_age_count": 1,
+        "missing_condition_count": 1,
+    }
+
+
+def test_future_condition_scenarios_are_built_from_consecutive_inventory_rows(tmp_path):
+    database = tmp_path / "kpis.db"
+    _fixture(str(database))
+    connection = sqlite3.connect(database)
+    try:
+        connection.executemany(
+            "INSERT INTO bridges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                (34, "A", 2023, "A", 1, "S01", "S01", 2000, 25.0, 100.0, 30.0, 3000.0, 8, 8, 8, "N", None),
+                (34, "B", 2023, "B", 1, "S01", "S01", 1990, 25.0, 100.0, 20.0, None, 6, 6, 6, "N", None),
+                (34, "D", 2023, "D", None, "S01", "L01", None, 25.0, 100.0, None, None, 5, 6, 6, "N", None),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = compute_future_condition_scenarios(
+        database_path=database,
+        workspace_id="workspace-a",
+        state_code=34,
+        year=2024,
+        horizon_years=5,
+    )
+
+    assert result["source_transition_intervals"] == 3
+    assert [scenario["scenario_id"] for scenario in result["scenarios"]] == [
+        "historical_trend",
+        "no_rehabilitation",
+    ]
+    for scenario in result["scenarios"]:
+        assert len(scenario["series"]) == 6
+        assert scenario["series"][0]["total_bridges"] == 4.0
+        assert scenario["series"][-1]["total_bridges"] == 4.0
+        assert scenario["series"][0]["Fair"] == (
+            scenario["series"][0]["Upper Fair"]
+            + scenario["series"][0]["Lower Fair"]
+        )
+        assert len(scenario["age_series"]) == 6
+        assert scenario["age_series"][0]["rated_with_known_age"] == 3.0
+        assert scenario["age_series"][-1]["rated_with_known_age"] == 3.0
+        assert sum(
+            row["total_bridges"]
+            for row in scenario["age_series"][-1]["age_bins"]
+        ) == 3.0
+    assert result["current_rated_missing_or_invalid_age_count"] == 1
 
 
 def _tpm_fixture(path: str, year: int) -> None:

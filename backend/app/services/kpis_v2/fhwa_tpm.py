@@ -130,6 +130,18 @@ def _percentage(numerator: Decimal, denominator: Decimal) -> str | None:
     )
 
 
+def _loaded_identity(row: sqlite3.Row) -> tuple[str, str]:
+    revision_id = (
+        f"loaded-inventory:{int(row['state_code'])}:"
+        f"{str(row['bridge_number'])}:{int(row['data_year'])}"
+    )
+    payload = {key: row[key] for key in row.keys()}
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return revision_id, digest
+
+
 def compute_fhwa_tpm_diagnostic(
     *,
     database_path: str | os.PathLike[str],
@@ -152,28 +164,21 @@ def compute_fhwa_tpm_diagnostic(
             (workspace_id,),
         ).fetchone()
         rows = connection.execute(
-            "SELECT ps.snapshot_revision_id,sr.canonical_sha256,b.* "
-            "FROM published_snapshots ps JOIN snapshot_revisions sr "
-            "ON sr.workspace_id=ps.workspace_id AND sr.id=ps.snapshot_revision_id "
-            "AND sr.state_code=ps.state_code AND sr.bridge_number=ps.bridge_number AND sr.data_year=ps.data_year "
-            "JOIN bridges b ON b.state_code=ps.state_code AND b.bridge_number=ps.bridge_number AND b.data_year=ps.data_year "
-            "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.data_year=? ORDER BY ps.bridge_number",
-            (workspace_id, int(state_code), selected_year),
+            "SELECT b.* FROM bridges b WHERE b.state_code=? AND b.data_year=? ORDER BY b.bridge_number",
+            (int(state_code), selected_year),
         ).fetchall()
         feature_rows = connection.execute(
             "SELECT f.bridge_number,f.feature_type,f.feature_location,f.nhs_designation "
-            "FROM published_snapshots ps JOIN features f ON f.state_code=ps.state_code "
-            "AND f.bridge_number=ps.bridge_number AND f.data_year=ps.data_year "
-            "WHERE ps.workspace_id=? AND ps.state_code=? AND ps.data_year=? "
+            "FROM features f WHERE f.state_code=? AND f.data_year=? "
             "AND f.feature_type LIKE 'H%' ORDER BY f.bridge_number,f.feature_type,f.id",
-            (workspace_id, int(state_code), selected_year),
+            (int(state_code), selected_year),
         ).fetchall()
     except sqlite3.Error as exc:
         raise FhwaTpmDiagnosticError("FHWA TPM diagnostic projection could not be read") from exc
     finally:
         connection.close()
     if generation is None or not rows:
-        raise FhwaTpmDiagnosticError("published diagnostic population was not found")
+        raise FhwaTpmDiagnosticError("loaded diagnostic population was not found")
 
     features: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for feature in feature_rows:
@@ -233,11 +238,11 @@ def compute_fhwa_tpm_diagnostic(
         class_areas[category] += deck_area
         class_counts[category] += 1
         area_methods[method] += 1
-        included.append((str(row["snapshot_revision_id"]), str(row["canonical_sha256"])))
+        included.append(_loaded_identity(row))
 
     total_area = sum(class_areas.values(), Decimal("0"))
     revision_payload = json.dumps(
-        sorted((str(row["snapshot_revision_id"]), str(row["canonical_sha256"])) for row in rows),
+        sorted(_loaded_identity(row) for row in rows),
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -256,7 +261,7 @@ def compute_fhwa_tpm_diagnostic(
         "definition_version": profile.profile_id,
         "profile": profile.as_dict(),
         "population": {
-            "published_bridge_count": len(rows),
+            "loaded_bridge_count": len(rows),
             "included_bridge_count": len(included),
             "qualifying_feature_count": qualifying_feature_count,
             "qualifying_ramp_feature_count": ramp_feature_count,

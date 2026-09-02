@@ -440,7 +440,7 @@ def test_client_identity_and_workspace_spoof_fields_are_rejected(
         ("complete", "done"),
         ("cancelled", "stopped"),
         ("wrapped_cancelled", "stopped"),
-        ("error", "error"),
+        ("error", "done"),
     ),
 )
 def test_stream_has_exactly_one_request_owned_terminal_event(

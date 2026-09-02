@@ -259,7 +259,7 @@ def test_http_cancellation_keeps_then_releases_the_same_quota_lease():
     assert providers.finish(FIRST_REQUEST_ID) is False
 
 
-def test_http_terminal_error_releases_quota_without_leaking_details():
+def test_http_unexpected_failure_returns_alternatives_and_releases_quota():
     quotas = OperationQuotaRegistry(
         operation_limits={"ask": 1},
         workspace_limit=1,
@@ -275,12 +275,16 @@ def test_http_terminal_error_releases_quota_without_leaking_details():
         )
 
     assert response.status_code == 200
-    terminal = json.loads(response.text.splitlines()[-1])
-    assert terminal == {
-        "type": "error",
-        "request_id": FIRST_REQUEST_ID,
-        "detail": "Bridgette could not complete this request.",
-    }
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [event["type"] for event in events] == [
+        "accepted",
+        "clarification",
+        "done",
+    ]
+    decision = events[1]
+    assert decision["code"] == "query_temporarily_unavailable"
+    assert len(decision["options"]) == 3
+    assert decision["options"][0]["suggested_question"] == "Count bridges"
     assert "private provider failure" not in response.text
     assert quotas.snapshot(
         workspace_id=WORKSPACE,

@@ -2,7 +2,7 @@
 
 This module models the lane/region/station information visible in AASHTOWare
 BrM 7.2 while keeping FHWA BH12 and BH13 computations distinct.  Values remain
-raw metres here; rounding and SNBI sentinels belong to the accepted projection
+raw metres here; rounding and SNBI sentinels belong to the reporting projection
 boundary.
 """
 
@@ -200,7 +200,13 @@ class HighwayClearanceMeasurement:
             "profile_version": self.profile_version,
             "feature_id": self.feature_id,
             "regions": [region.to_dict() for region in self.regions],
-            "stations": [stations[key] for key in sorted(stations)],
+            "stations": sorted(
+                stations.values(),
+                key=lambda item: (
+                    float(item["longitudinal_m"]),
+                    str(item["station_id"]),
+                ),
+            ),
             "overall_minimum_m": self.overall_minimum_m,
             "overall_maximum_m": self.overall_maximum_m,
             "leading_edge_minimum_m": self.leading_edge_minimum_m,
@@ -387,6 +393,208 @@ def measure_highway_clearance(
     )
 
 
+def _automatic_lane_count(feature: CanonicalFeature) -> int:
+    raw = feature.raw.get("BH08")
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return 1
+    return min(12, max(1, value))
+
+
+def _automatic_regions(
+    feature: CanonicalFeature,
+    offsets: Sequence[float],
+) -> tuple[ClearanceRegion, ...]:
+    if not offsets:
+        raise ClearanceMeasurementError("automatic roadway offsets are required")
+    start = min(float(value) for value in offsets)
+    end = max(float(value) for value in offsets)
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ClearanceMeasurementError("automatic roadway offsets are invalid")
+    if end - start + 1e-9 < BH12_ENVELOPE_WIDTH_M:
+        raise ClearanceMeasurementError("no feasible 10-foot traveled-way envelope")
+    lane_count = _automatic_lane_count(feature)
+    lane_width = (end - start) / lane_count
+    return tuple(
+        ClearanceRegion(
+            region_id=f"lane-{index + 1}",
+            region_type=RegionType.TRAVELED_LANE,
+            start_offset_m=start + index * lane_width,
+            end_offset_m=(end if index == lane_count - 1 else start + (index + 1) * lane_width),
+            lane_type="through",
+            include_in_bh13=True,
+        )
+        for index in range(lane_count)
+    )
+
+
+def _region_at_offset(
+    regions: Sequence[ClearanceRegion],
+    offset: float,
+) -> ClearanceRegion:
+    for index, region in enumerate(regions):
+        if region.start_offset_m - 1e-9 <= offset and (
+            offset < region.end_offset_m - 1e-9
+            or index == len(regions) - 1
+        ):
+            return region
+    raise ClearanceMeasurementError("sample is outside the automatic roadway regions")
+
+
+def _automatic_highway_measurement(
+    *,
+    detected_id: str,
+    binding: FeatureBinding,
+    feature: CanonicalFeature,
+    roadway: Mapping[str, object],
+) -> dict[str, object]:
+    raw_planes = roadway.get("measurement_planes")
+    if not isinstance(raw_planes, Sequence) or isinstance(raw_planes, (str, bytes)):
+        raise ClearanceMeasurementError("measurement planes are required")
+    planes = [plane for plane in raw_planes if isinstance(plane, Mapping)]
+    if not planes:
+        raise ClearanceMeasurementError("measurement planes are required")
+
+    raw_offsets: list[float] = []
+    for plane in planes:
+        raw_samples = plane.get("samples")
+        if not isinstance(raw_samples, Sequence) or isinstance(raw_samples, (str, bytes)):
+            continue
+        for sample in raw_samples:
+            if not isinstance(sample, Mapping):
+                continue
+            try:
+                offset = float(sample.get("offset"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(offset):
+                raw_offsets.append(offset)
+    regions = _automatic_regions(feature, raw_offsets)
+
+    station_values = []
+    for plane in planes:
+        try:
+            station = float(plane.get("station_offset"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(station):
+            station_values.append(station)
+    if not station_values:
+        raise ClearanceMeasurementError("measurement station positions are required")
+    leading_station = min(station_values)
+    trailing_station = max(station_values)
+    edge_tolerance = max(1e-7, (trailing_station - leading_station) * 1e-7)
+
+    samples: list[ClearanceSample] = []
+    sample_plane: dict[str, str] = {}
+    plane_ids: list[str] = []
+    station_edge_by_plane: dict[str, StationEdge] = {}
+    for plane_index, plane in enumerate(planes, start=1):
+        plane_id = str(plane.get("plane_id") or f"plane-{plane_index}")
+        try:
+            station = float(plane.get("station_offset"))
+        except (TypeError, ValueError) as exc:
+            raise ClearanceMeasurementError("measurement station position is invalid") from exc
+        if math.isclose(station, leading_station, abs_tol=edge_tolerance):
+            edge = StationEdge.LEADING
+        elif math.isclose(station, trailing_station, abs_tol=edge_tolerance):
+            edge = StationEdge.TRAILING
+        else:
+            edge = StationEdge.INTERMEDIATE
+        plane_ids.append(plane_id)
+        station_edge_by_plane[plane_id] = edge
+        if isinstance(plane, dict):
+            plane["plane_id"] = plane_id
+            plane["station_edge"] = edge.value
+        raw_samples = plane.get("samples")
+        if not isinstance(raw_samples, Sequence) or isinstance(raw_samples, (str, bytes)):
+            raise ClearanceMeasurementError("measurement plane samples are required")
+        for sample_index, raw_sample in enumerate(raw_samples, start=1):
+            if not isinstance(raw_sample, Mapping):
+                continue
+            try:
+                offset = float(raw_sample.get("offset"))
+                lower_z = float(raw_sample.get("road_z"))
+                obstruction_z = float(raw_sample.get("soffit_z"))
+            except (TypeError, ValueError) as exc:
+                raise ClearanceMeasurementError("measurement sample is invalid") from exc
+            region = _region_at_offset(regions, offset)
+            sample_id = f"{detected_id}:{plane_id}:sample-{sample_index}"
+            source_sample_id = str(raw_sample.get("sample_id") or f"sample-{sample_index}")
+            samples.append(
+                ClearanceSample(
+                    sample_id=sample_id,
+                    station_id=plane_id,
+                    station_edge=edge,
+                    longitudinal_m=station,
+                    lateral_offset_m=offset,
+                    region_id=region.region_id,
+                    lower_surface_z_m=lower_z,
+                    obstruction_z_m=obstruction_z,
+                    obstruction_id=str(
+                        raw_sample.get("obstruction_id") or "local-overhead-envelope"
+                    ),
+                    evidence_ids=(
+                        f"measurement-plane:{plane_id}",
+                        f"point-cloud-cell:{source_sample_id}",
+                    ),
+                )
+            )
+            sample_plane[sample_id] = plane_id
+            if isinstance(raw_sample, dict):
+                raw_sample["measurement_sample_id"] = sample_id
+                raw_sample["region_id"] = region.region_id
+                raw_sample["region_type"] = region.region_type.value
+
+    measurement = measure_highway_clearance(
+        binding=binding,
+        feature=feature,
+        regions=regions,
+        samples=samples,
+    )
+    result = measurement.to_dict()
+    result["detected_id"] = detected_id
+    from app.services.point_cloud.snbi_projection import (
+        project_calculated_highway_clearance,
+    )
+
+    result["snbi_formatted"] = project_calculated_highway_clearance(
+        measurement
+    ).to_dict()
+    selected_bh12 = next(
+        item
+        for item in measurement.bh12_candidates
+        if item.candidate_id == measurement.selected_bh12_candidate_id
+    )
+    roles_by_plane: dict[str, list[str]] = {plane_id: [] for plane_id in plane_ids}
+    for plane_id, station_edge in station_edge_by_plane.items():
+        if station_edge is not StationEdge.INTERMEDIATE:
+            roles_by_plane[plane_id].append(station_edge.value)
+    bh12_plane_id = sample_plane[selected_bh12.controlling_sample_id]
+    bh13_plane_id = sample_plane[measurement.bh13_controlling_sample_id]
+    roles_by_plane[bh12_plane_id].append("bh12")
+    roles_by_plane[bh13_plane_id].append("bh13")
+    result["retained_plane_roles"] = {
+        plane_id: roles for plane_id, roles in roles_by_plane.items() if roles
+    }
+    for plane in planes:
+        if isinstance(plane, dict):
+            roles = roles_by_plane.get(str(plane.get("plane_id")), [])
+            plane["roles"] = roles
+            if roles and isinstance(plane.get("samples"), Sequence):
+                for raw_sample in plane["samples"]:
+                    if isinstance(raw_sample, dict):
+                        raw_sample["used_by_result"] = True
+    result["automatic_resolution"] = {
+        "lane_count": len(regions),
+        "region_method": "geometry_bounds_with_snbi_lane_count",
+        "station_method": "bridge_overlap_edges_and_clearance_extrema",
+        "obstruction_method": "conservative_local_overhead_envelope",
+    }
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class NonHighwayMeasurementDisposition:
     feature_id: str
@@ -410,7 +618,7 @@ def railroad_measurement_gate(
     return NonHighwayMeasurementDisposition(
         feature.feature_id,
         "BRR02",
-        "review_required" if not track_reference_confirmed else "measurement_profile_pending",
+        "not_measurable" if not track_reference_confirmed else "measurement_profile_pending",
         "track_reference_required" if not track_reference_confirmed else "railroad_geometry_profile_not_implemented",
     )
 
@@ -448,12 +656,7 @@ def build_feature_measurement_workflow(
     geometry_result: Mapping[str, object],
     under_feature: str | None,
 ) -> dict[str, object]:
-    """Describe the active feature-binding/reviewer gate for raw geometry.
-
-    The current automated geometry does not infer lane/shoulder boundaries.  It
-    therefore binds each detected candidate to canonical data when possible but
-    requires explicit region/station review before BH12/BH13 can be calculated.
-    """
+    """Resolve and calculate automatic feature-bound clearance measurements."""
 
     features = canonical_features({"Features": list(feature_rows)})
     kind = {
@@ -464,11 +667,13 @@ def build_feature_measurement_workflow(
     }.get(str(under_feature or "").strip().lower())
     if kind is None:
         return {
-            "status": "review_required",
+            "status": "not_measurable",
             "reason": "under_feature_type_ambiguous",
             "bindings": [],
+            "measurements": [],
             "feature_binding_version": FEATURE_BINDING_VERSION,
             "clearance_profile_version": CLEARANCE_PROFILE_VERSION,
+            "automatic": True,
         }
     roadway_rows = geometry_result.get("roadways")
     if not isinstance(roadway_rows, list):
@@ -476,6 +681,8 @@ def build_feature_measurement_workflow(
     if not isinstance(roadway_rows, list) or not roadway_rows:
         roadway_rows = [{}]
     bindings = []
+    measurements: list[dict[str, object]] = []
+    feature_by_id = {feature.feature_id: feature for feature in features}
     for index, row in enumerate(roadway_rows, start=1):
         point_count = 1
         if isinstance(row, Mapping):
@@ -492,18 +699,36 @@ def build_feature_measurement_workflow(
         )
         binding = bind_detected_feature(detected, features)
         bindings.append(binding.to_dict())
-    unresolved = [
-        binding for binding in bindings if binding["status"] != "bound"
-    ]
-    if unresolved:
-        status = "review_required"
-        reason = "canonical_feature_binding_required"
+        if (
+            kind is FeatureKind.HIGHWAY
+            and len(roadway_rows) == 1
+            and binding.status is FeatureBindingStatus.BOUND
+            and binding.feature_id in feature_by_id
+            and isinstance(row, Mapping)
+        ):
+            try:
+                measurement = _automatic_highway_measurement(
+                    detected_id=detected.detected_id,
+                    binding=binding,
+                    feature=feature_by_id[binding.feature_id],
+                    roadway=row,
+                )
+            except ClearanceMeasurementError:
+                measurement = None
+            if measurement is not None:
+                measurements.append(measurement)
+    if measurements:
+        status = "success"
+        reason = None
+    elif any(binding["status"] != "bound" for binding in bindings):
+        status = "not_measurable"
+        reason = "canonical_feature_binding_unresolved"
     elif kind is FeatureKind.HIGHWAY:
-        status = "review_required"
-        reason = "lane_shoulder_and_station_review_required"
+        status = "not_measurable"
+        reason = "automatic_highway_measurement_unavailable"
     elif kind is FeatureKind.RAILROAD:
-        status = "review_required"
-        reason = "track_reference_review_required"
+        status = "not_measurable"
+        reason = "automatic_track_reference_unavailable"
     elif kind is FeatureKind.WATERWAY:
         status = "not_measurable"
         reason = "channel_datum_timestamp_and_survey_control_required"
@@ -514,11 +739,14 @@ def build_feature_measurement_workflow(
         "status": status,
         "reason": reason,
         "bindings": bindings,
+        "measurements": measurements,
+        "primary_measurement": measurements[0] if measurements else None,
         "feature_binding_version": FEATURE_BINDING_VERSION,
         "clearance_profile_version": CLEARANCE_PROFILE_VERSION,
-        "brm_graph_ready": False,
-        "bh12_ready": False,
-        "bh13_ready": False,
+        "brm_graph_ready": bool(measurements),
+        "bh12_ready": bool(measurements),
+        "bh13_ready": bool(measurements),
+        "automatic": True,
     }
 
 

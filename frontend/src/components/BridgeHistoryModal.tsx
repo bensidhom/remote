@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { History, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { History, Loader2, RefreshCw } from 'lucide-react';
 import { Button, Modal } from './ui';
 import { useDataGenerationEpoch } from '../lib/dataGeneration';
 
@@ -53,8 +53,28 @@ interface BridgeForecast {
   evaluation_receipt_id: string;
   qualification: string;
   source_data_generation: number;
+  source_status?: 'loaded_inventory';
+  source_database?: string;
+  warnings?: string[];
   metrics: Record<string, MetricSeries>;
 }
+
+interface ComparisonSummary {
+  compared_years: number[];
+  compared_points: number;
+  mean_absolute_error: number | null;
+  condition_class_matches: number;
+  condition_class_accuracy: number | null;
+}
+
+interface BridgeBacktest extends BridgeForecast {
+  test_start_year: number;
+  latest_actual_year: number;
+  available_start_years: number[];
+  comparison: Record<string, ComparisonSummary>;
+}
+
+type HistoryView = 'future' | 'historical-test';
 
 interface Props {
   stateCode: number | string;
@@ -106,6 +126,12 @@ const BridgeHistoryModal: React.FC<Props> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [horizonYears, setHorizonYears] = useState(DEFAULT_HORIZON);
+  const [historyView, setHistoryView] = useState<HistoryView>('future');
+  const [backtestStartYear, setBacktestStartYear] = useState<number | null>(null);
+  const [backtest, setBacktest] = useState<BridgeBacktest | null>(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+  const [dataGeneration, setDataGeneration] = useState<number | null>(null);
   const dataGenerationEpoch = useDataGenerationEpoch();
 
   const loadForecast = useCallback(async () => {
@@ -115,8 +141,9 @@ const BridgeHistoryModal: React.FC<Props> = ({
       const stateResponse = await axios.get<{ data_generation: number }>('/api/revisions/state');
       const generation = Number(stateResponse.data.data_generation);
       if (!Number.isSafeInteger(generation) || generation < 0) {
-        throw new Error('The published data generation is invalid.');
+        throw new Error('The inventory data generation is invalid.');
       }
+      setDataGeneration(generation);
       const requestedYear = dataYear == null || dataYear === '' ? null : Number(dataYear);
       if (requestedYear != null && (!Number.isSafeInteger(requestedYear) || requestedYear < 1900)) {
         throw new Error('The selected inventory year is invalid.');
@@ -159,12 +186,69 @@ const BridgeHistoryModal: React.FC<Props> = ({
     void loadForecast();
   }, [loadForecast, dataGenerationEpoch]);
 
+  const availableStartYears = useMemo(() => {
+    const years = new Set<number>();
+    for (const series of Object.values(forecast?.metrics || {})) {
+      for (const point of series.observed) years.add(Number(point.year));
+    }
+    const ordered = [...years].filter(Number.isFinite).sort((left, right) => left - right);
+    return ordered.slice(0, -1);
+  }, [forecast]);
+  const latestObservedYear = useMemo(() => {
+    const years = Object.values(forecast?.metrics || {}).flatMap((series) => series.observed.map((point) => Number(point.year)));
+    return years.length ? Math.max(...years) : null;
+  }, [forecast]);
+
+  useEffect(() => {
+    if (!availableStartYears.length) {
+      setBacktestStartYear(null);
+      return;
+    }
+    if (backtestStartYear != null && availableStartYears.includes(backtestStartYear)) return;
+    const preferredYears = availableStartYears.filter((year) => latestObservedYear != null && year <= latestObservedYear - 5);
+    setBacktestStartYear(preferredYears[preferredYears.length - 1] ?? availableStartYears[0]);
+  }, [availableStartYears, backtestStartYear, latestObservedYear]);
+
+  const loadBacktest = useCallback(async () => {
+    if (backtestStartYear == null || dataGeneration == null) return;
+    setBacktestLoading(true);
+    setBacktestError(null);
+    try {
+      const response = await axios.post<BridgeBacktest>(
+        '/api/forecasts/v2/bridge/backtest',
+        {
+          state_code: Number(stateCode),
+          bridge_number: bridgeNumber,
+          start_year: backtestStartYear,
+          expected_data_generation: dataGeneration,
+        },
+      );
+      setBacktest(response.data);
+    } catch (reason: any) {
+      setBacktest(null);
+      setBacktestError(
+        reason?.response?.data?.detail?.message ||
+        reason?.response?.data?.detail ||
+        reason?.message ||
+        'The historical forecast test could not be loaded.',
+      );
+    } finally {
+      setBacktestLoading(false);
+    }
+  }, [backtestStartYear, bridgeNumber, dataGeneration, stateCode]);
+
+  useEffect(() => {
+    if (historyView === 'historical-test') void loadBacktest();
+  }, [historyView, loadBacktest, dataGenerationEpoch]);
+
+  const displayedForecast = historyView === 'historical-test' ? backtest : forecast;
+
   const chartRows = useMemo(() => {
     const rows = new Map<number, ChartRow>();
     const update = (year: number, patch: Partial<ChartRow>) => {
       rows.set(year, { ...(rows.get(year) || { year }), year, ...patch });
     };
-    const metrics = forecast?.metrics || {};
+    const metrics = displayedForecast?.metrics || {};
     for (const point of metrics.deck?.observed || []) update(point.year, { deck: point.value });
     for (const point of metrics.superstructure?.observed || []) update(point.year, { superstructure: point.value });
     for (const point of metrics.substructure?.observed || []) update(point.year, { substructure: point.value });
@@ -177,8 +261,8 @@ const BridgeHistoryModal: React.FC<Props> = ({
     for (const point of metrics.superstructure?.forecast || []) update(point.year, { superstructureForecast: point.yhat });
     for (const point of metrics.substructure?.forecast || []) update(point.year, { substructureForecast: point.yhat });
 
-    // Connect each forecast to the final observed point without changing the
-    // stored values or presenting the expected path as an observation.
+    // Connect each forecast to its as-of observation. During a historical test,
+    // later actual values remain untouched so they can be compared honestly.
     for (const [component, target] of [
       ['deck', 'deckForecast'],
       ['superstructure', 'superstructureForecast'],
@@ -186,14 +270,15 @@ const BridgeHistoryModal: React.FC<Props> = ({
     ] as const) {
       const observed = [...(metrics[component]?.observed || [])].sort((a, b) => a.year - b.year);
       if (!observed.length || !(metrics[component]?.forecast || []).length) continue;
-      const last = observed[observed.length - 1];
-      update(last.year, { [target]: last.value });
-      if (component === 'deck') update(last.year, { deckPredictionRange: [last.value, last.value] });
+      const anchor = [...observed].reverse().find((point) => point.year <= Number(displayedForecast?.as_of_year));
+      if (!anchor) continue;
+      update(anchor.year, { [target]: anchor.value });
+      if (component === 'deck') update(anchor.year, { deckPredictionRange: [anchor.value, anchor.value] });
     }
     return [...rows.values()].sort((left, right) => left.year - right.year);
-  }, [forecast]);
+  }, [displayedForecast]);
 
-  const metrics = forecast?.metrics || {};
+  const metrics = displayedForecast?.metrics || {};
   const currentRatings = [
     { label: 'Deck', value: latestObserved(metrics.deck) },
     { label: 'Superstructure', value: latestObserved(metrics.superstructure) },
@@ -202,6 +287,7 @@ const BridgeHistoryModal: React.FC<Props> = ({
   const firstForecastYear = Math.min(
     ...Object.values(metrics).flatMap((series) => series.forecast.map((point) => point.year)),
   );
+  const comparisonRows = Object.entries(backtest?.comparison || {}).filter(([, summary]) => summary.compared_points > 0);
 
   return (
     <Modal open onClose={onClose} inline={embedded} size="lg" title="Bridge History & Forecast" icon={<History className="h-5 w-5" />}>
@@ -209,39 +295,84 @@ const BridgeHistoryModal: React.FC<Props> = ({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="font-semibold text-slate-900 dark:text-white">{bridgeName || `Bridge ${bridgeNumber}`}</p>
-            <p className="text-sm text-slate-500">Bridge {bridgeNumber}{dataYear ? ` · selected inventory year ${dataYear}` : ' · latest published year'}</p>
+            <p className="text-sm text-slate-500">Bridge {bridgeNumber}{dataYear ? ` · selected inventory year ${dataYear}` : ' · latest available year'}</p>
           </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs font-semibold text-slate-500" htmlFor="history-horizon">Horizon</label>
-            <select
-              id="history-horizon"
-              value={horizonYears}
-              onChange={(event) => setHorizonYears(Number(event.target.value))}
-              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900"
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="flex rounded-xl bg-slate-100 p-1 dark:bg-slate-800" aria-label="History forecast view">
+              <button
+                type="button"
+                onClick={() => setHistoryView('future')}
+                className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition ${historyView === 'future' ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-300' : 'text-slate-600 dark:text-slate-300'}`}
+              >
+                Future forecast
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryView('historical-test')}
+                disabled={!availableStartYears.length}
+                className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${historyView === 'historical-test' ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-300' : 'text-slate-600 dark:text-slate-300'}`}
+              >
+                Test a past year
+              </button>
+            </div>
+            {historyView === 'future' ? (
+              <>
+                <label className="text-xs font-semibold text-slate-500" htmlFor="history-horizon">Horizon</label>
+                <select
+                  id="history-horizon"
+                  value={horizonYears}
+                  onChange={(event) => setHorizonYears(Number(event.target.value))}
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900"
+                >
+                  {[1, 3, 5, 10, 15, 20, 30, 50].map((years) => <option key={years} value={years}>{years} years</option>)}
+                </select>
+              </>
+            ) : (
+              <>
+                <label className="text-xs font-semibold text-slate-500" htmlFor="history-test-year">Start from</label>
+                <select
+                  id="history-test-year"
+                  value={backtestStartYear ?? ''}
+                  onChange={(event) => setBacktestStartYear(Number(event.target.value))}
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900"
+                >
+                  {availableStartYears.map((year) => <option key={year} value={year}>{year}</option>)}
+                </select>
+              </>
+            )}
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<RefreshCw className="h-4 w-4" />}
+              onClick={() => void (historyView === 'historical-test' ? loadBacktest() : loadForecast())}
+              disabled={loading || backtestLoading}
             >
-              {[1, 3, 5, 10, 15, 20, 30, 50].map((years) => <option key={years} value={years}>{years} years</option>)}
-            </select>
-            <Button size="sm" variant="secondary" icon={<RefreshCw className="h-4 w-4" />} onClick={() => void loadForecast()} disabled={loading}>
               Refresh
             </Button>
           </div>
         </div>
 
-        {loading && (
+        {(loading || (historyView === 'historical-test' && backtestLoading)) && (
           <div className="py-12 text-center text-slate-500">
             <Loader2 className="mx-auto h-9 w-9 animate-spin text-brand-500" />
-            <p className="mt-3">Loading the exact published history and annual forecast…</p>
+            <p className="mt-3">{historyView === 'historical-test' ? 'Running the past-year forecast test…' : 'Loading available bridge history and annual forecast…'}</p>
           </div>
         )}
         {error && !loading && (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
             <p className="font-semibold">Forecast unavailable</p>
             <p className="mt-1">{error}</p>
-            <p className="mt-2 text-xs">Fit and historically validate a v2 model from the Forecasts page, then retry.</p>
+            <p className="mt-2 text-xs">BridgeGuard could not find yearly inventory history for this bridge.</p>
+          </div>
+        )}
+        {backtestError && historyView === 'historical-test' && !backtestLoading && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <p className="font-semibold">Historical test unavailable</p>
+            <p className="mt-1">{backtestError}</p>
           </div>
         )}
 
-        {forecast && !loading && (
+        {displayedForecast && !loading && !backtestLoading && (
           <>
             <div className="grid gap-3 sm:grid-cols-3">
               {currentRatings.map(({ label, value }) => (
@@ -252,12 +383,23 @@ const BridgeHistoryModal: React.FC<Props> = ({
               ))}
             </div>
 
-            <div className="grid gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-xs text-slate-700 dark:border-indigo-900 dark:bg-indigo-950/20 dark:text-slate-300 md:grid-cols-2">
-              <p><span className="font-semibold">Exact source:</span> {forecast.as_of_year} · revision {forecast.snapshot_revision_id}</p>
-              <p><span className="font-semibold">Forecast package:</span> {forecast.model_version_id}</p>
-              <p><span className="font-semibold">Historical evaluation:</span> {forecast.evaluation_receipt_id}</p>
-              <p className="flex items-center gap-1.5"><ShieldCheck className="h-4 w-4 text-indigo-600" /><span className="font-semibold">Status:</span> {forecast.qualification.split('_').join(' ')}</p>
-            </div>
+            {historyView === 'historical-test' && backtest && (
+              <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-sm text-slate-700 dark:border-indigo-900 dark:bg-indigo-950/20 dark:text-slate-200">
+                <p className="font-semibold text-slate-900 dark:text-white">Historical forecast test: {backtest.test_start_year}–{backtest.latest_actual_year}</p>
+                <p className="mt-1">
+                  The Markov model uses only inventory information available through {backtest.test_start_year}. It predicts the following years, and the real observations through {backtest.latest_actual_year} are added afterward only for comparison.
+                </p>
+                {comparisonRows.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {comparisonRows.map(([component, summary]) => (
+                      <span key={component} className="rounded-full bg-white px-3 py-1 text-xs shadow-sm dark:bg-slate-800">
+                        <span className="font-semibold capitalize">{component}</span>: average error {summary.mean_absolute_error?.toFixed(2) ?? '—'} rating points
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {chartRows.length > 1 ? (
               <div className="rounded-2xl border border-slate-200 p-3 dark:border-slate-700">
@@ -268,7 +410,7 @@ const BridgeHistoryModal: React.FC<Props> = ({
                     <YAxis domain={[0, 9]} ticks={RATING_TICKS} interval={0} allowDecimals={false} tick={{ fontSize: 12, fill: '#64748b' }} />
                     <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid #cbd5e1' }} />
                     <Area dataKey="deckPredictionRange" name="Deck p10–p90 prediction range" stroke="#16a34a" fill="#22c55e" fillOpacity={0.14} connectNulls />
-                    {Number.isFinite(firstForecastYear) && <ReferenceLine x={firstForecastYear} stroke="#4f46e5" strokeDasharray="4 4" label={{ value: 'forecast', position: 'top', fill: '#4f46e5', fontSize: 10 }} />}
+                    {Number.isFinite(firstForecastYear) && <ReferenceLine x={firstForecastYear} stroke="#4f46e5" strokeDasharray="4 4" label={{ value: historyView === 'historical-test' ? 'test forecast' : 'forecast', position: 'top', fill: '#4f46e5', fontSize: 10 }} />}
                     <Line dataKey="deck" name="Deck observed" stroke="#16a34a" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
                     <Line dataKey="superstructure" name="Superstructure observed" stroke="#ca8a04" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
                     <Line dataKey="substructure" name="Substructure observed" stroke="#dc2626" strokeWidth={2.5} dot={{ r: 3 }} connectNulls />
@@ -277,10 +419,14 @@ const BridgeHistoryModal: React.FC<Props> = ({
                     <Line dataKey="substructureForecast" name="Substructure expected" stroke="#dc2626" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls />
                   </ComposedChart>
                 </ResponsiveContainer>
-                <p className="mt-2 text-xs text-slate-500">Solid lines are published observations. Dashed lines are the annual no-action expected path; the shaded band is a model prediction range, not a confidence guarantee.</p>
+                <p className="mt-2 text-xs text-slate-500">
+                  {historyView === 'historical-test'
+                    ? `Solid lines are the real yearly inventory values. Dashed lines are predictions made from the ${backtest?.test_start_year} cutoff; later real values were not used to produce them.`
+                    : 'Solid lines are exact yearly inventory observations. Dashed lines are the annual no-action expected path; the shaded band is a model prediction range, not a confidence guarantee.'}
+                </p>
               </div>
             ) : (
-              <div className="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500 dark:bg-slate-900/60">Not enough published observations are available to plot this bridge.</div>
+              <div className="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500 dark:bg-slate-900/60">Not enough available observations are present to plot this bridge.</div>
             )}
 
             <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950/20 dark:text-sky-200">

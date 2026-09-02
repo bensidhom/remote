@@ -75,6 +75,7 @@ def test_catalog_exposes_only_reviewed_columns_functions_and_exact_joins():
     )
     assert catalog.is_allowed_function("count", 1)
     assert catalog.is_allowed_function("COALESCE", 3)
+    assert catalog.is_allowed_function("like", 2)
     assert not catalog.is_allowed_function("load_extension", 1)
     assert not catalog.is_allowed_function("random", 0)
 
@@ -112,7 +113,7 @@ def test_catalog_contract_is_frozen_and_uses_tuple_members():
         catalog.resources_by_id["unsafe"] = resource  # type: ignore[index]
 
 
-def test_time_and_condition_semantics_are_not_global_latest_or_ambiguous():
+def test_time_and_condition_semantics_use_global_latest_available_inventory():
     catalog = _catalog()
     current = catalog.resources_by_id["v_current_bridge_snapshots"]
     condition = catalog.resources_by_id["v_bridge_condition"]
@@ -123,8 +124,8 @@ def test_time_and_condition_semantics_are_not_global_latest_or_ambiguous():
         "v_current_bridge_deck_material_summary"
     ]
 
-    assert "per bridge" in current.time_semantics
-    assert "database-wide maximum" in current.description
+    assert "global maximum available" in current.time_semantics
+    assert "same comparable year" in current.description
     assert condition.implementation_id == "controlling_condition_v1"
     assert {
         "bc01",
@@ -140,9 +141,9 @@ def test_time_and_condition_semantics_are_not_global_latest_or_ambiguous():
     assert "H01" in carried.description
     assert "BSP09" in spans.description
     assert "CR-T" in spans.columns_by_id["deck_material_and_type"].description
-    assert "all selected published bridge snapshots" in deck_summary.description
-    assert deck_summary.grain.value == "one_row_per_published_bridge_snapshot_deck_material_summary"
-    assert "independently selected latest" in current_deck_summary.time_semantics
+    assert "available bridge snapshots" in deck_summary.description
+    assert deck_summary.grain.value == "one_row_per_available_bridge_snapshot_deck_material_summary"
+    assert "global latest available" in current_deck_summary.time_semantics
 
 
 def test_catalog_rejects_invalid_generation_identity():

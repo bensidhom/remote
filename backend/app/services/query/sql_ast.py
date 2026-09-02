@@ -1483,24 +1483,11 @@ def _scope_scan_sql(
             f"{latest_q}.{_quote_identifier(table.state_column)} = ?",
         ]
         latest_parameters: list[Any] = [scope.workspace_id, scope.state_code]
-        if table.bridge_column is None:
-            raise SqlCompilationError(
-                "latest_requires_bridge_identity",
-                "Latest mode requires a bridge identity or a current-snapshot resource",
-                table=table.name,
-            )
-        if scope.bridge_number is not None:
-            latest_predicates.append(
-                f"{latest_q}.{_quote_identifier(table.bridge_column)} = ?"
-            )
-            latest_parameters.append(scope.bridge_number)
-        # Correlate by bridge identity so a portfolio query includes every
-        # bridge's own latest published snapshot.  A global MAX(data_year)
-        # would silently drop bridges that lack the portfolio's newest year.
-        latest_predicates.append(
-            f"{latest_q}.{_quote_identifier(table.bridge_column)} = "
-            f"{raw_q}.{_quote_identifier(table.bridge_column)}"
-        )
+        # Bridgette's default "latest" contract is one server-resolved global
+        # inventory year for the state. Every returned bridge therefore comes
+        # from the same comparable snapshot year, including bridge-specific
+        # questions. An absent bridge in that year must remain an honest zero
+        # row result instead of silently falling back to an older record.
         predicates.append(
             f"{raw_q}.{_quote_identifier(table.year_column)} = ("
             f"SELECT MAX({latest_q}.{_quote_identifier(table.year_column)}) "

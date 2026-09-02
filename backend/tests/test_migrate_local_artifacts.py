@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -35,6 +36,55 @@ def _create_attachment_database(path: Path, rows=()):
 
 
 class TestLocalArtifactMigration:
+    def test_catalog_repair_hashes_confined_legacy_attachment(self, test_workspace):
+        destination = test_workspace / "destination"
+        cloud = (
+            destination
+            / "attachments"
+            / "point_clouds"
+            / "34_0413152"
+            / "0413152.e57"
+        )
+        cloud.parent.mkdir(parents=True)
+        cloud.write_bytes(b"ASTM-E57legacy-cloud")
+        with closing(sqlite3.connect(destination / "snbi_bridges.db")) as connection:
+            connection.execute(
+                """
+                CREATE TABLE bridge_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    state_code TEXT, bridge_number TEXT, attachment_type TEXT,
+                    filename TEXT, filepath TEXT, size_bytes INTEGER,
+                    sha256 TEXT, workspace_id TEXT, uploaded_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO bridge_attachments
+                    (state_code,bridge_number,attachment_type,filename,filepath,
+                     size_bytes,sha256,workspace_id)
+                VALUES ('34','0413152','point_cloud','0413152.e57',?,?,NULL,NULL)
+                """,
+                (
+                    r"C:\old\bridgeguard\data\attachments\point_clouds\34_0413152\0413152.e57",
+                    cloud.stat().st_size,
+                ),
+            )
+            connection.commit()
+
+        repaired = migration.repair_attachment_catalog(destination)
+
+        with closing(sqlite3.connect(destination / "snbi_bridges.db")) as connection:
+            row = connection.execute(
+                "SELECT filepath,sha256,workspace_id FROM bridge_attachments"
+            ).fetchone()
+        assert repaired["repaired"] == 1
+        assert row == (
+            "attachments/point_clouds/34_0413152/0413152.e57",
+            hashlib.sha256(cloud.read_bytes()).hexdigest(),
+            "shared-research-workspace",
+        )
+
     def test_old_nomic_vectors_are_removed_but_parsed_content_is_kept(
         self, test_workspace
     ):

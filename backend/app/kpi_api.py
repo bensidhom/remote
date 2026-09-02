@@ -1,4 +1,4 @@
-"""Publication-scoped operational KPI HTTP API."""
+"""Operational KPI HTTP API over exact loaded yearly inventory rows."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from . import revision_api
 from .services.kpis_v2.repository import (
     KpiComputationError,
     compute_age_condition_area,
+    compute_age_condition_counts,
+    compute_future_condition_scenarios,
     compute_operational_kpis,
 )
 from .services.kpis_v2.registry import ACCEPTABLE_DEFINITION_VERSION
@@ -45,6 +47,7 @@ class KpiExportBody(BaseModel):
     year: int = Field(ge=1900, le=2100)
     population: str = Field(default="statewide", max_length=64)
     include_unknown: bool = True
+    horizon_years: int = Field(default=10, ge=1, le=30)
 
 
 class ProgramApprovalBody(BaseModel):
@@ -129,15 +132,15 @@ async def published_kpi_years(
         years = [
             int(item[0])
             for item in connection.execute(
-                "SELECT DISTINCT data_year FROM published_snapshots "
-                "WHERE workspace_id=? AND state_code=? ORDER BY data_year DESC",
-                (revision_api.SHARED_WORKSPACE_ID, int(state_code)),
+                "SELECT DISTINCT data_year FROM bridges "
+                "WHERE state_code=? ORDER BY data_year DESC",
+                (int(state_code),),
             ).fetchall()
         ]
     except sqlite3.Error:
         return JSONResponse(
             status_code=422,
-            content={"detail": {"code": "kpi_population_unavailable", "message": "Published KPI years could not be read."}},
+            content={"detail": {"code": "kpi_population_unavailable", "message": "Loaded KPI years could not be read."}},
             headers={"Cache-Control": "no-store"},
         )
     finally:
@@ -219,6 +222,46 @@ async def age_condition_area_kpis(
             year=year,
             population=population,
             include_unknown=include_unknown,
+        )
+        return _response(payload)
+    except KpiComputationError as exc:
+        return _error(exc)
+
+
+@router.get("/api/analytics/kpis/age-condition-counts")
+async def age_condition_count_kpis(
+    state_code: int = Query(default=34, ge=1, le=99),
+    year: int | None = Query(default=None, ge=1900, le=2100),
+    population: str = Query(default="statewide"),
+):
+    try:
+        payload = await run_in_threadpool(
+            compute_age_condition_counts,
+            database_path=revision_api._database_path(),
+            workspace_id=revision_api.SHARED_WORKSPACE_ID,
+            state_code=state_code,
+            year=year,
+            population=population,
+        )
+        return _response(payload)
+    except KpiComputationError as exc:
+        return _error(exc)
+
+
+@router.get("/api/analytics/kpis/future-condition")
+async def future_condition_kpis(
+    state_code: int = Query(default=34, ge=1, le=99),
+    year: int | None = Query(default=None, ge=1900, le=2100),
+    horizon_years: int = Query(default=10, ge=1, le=30),
+):
+    try:
+        payload = await run_in_threadpool(
+            compute_future_condition_scenarios,
+            database_path=revision_api._database_path(),
+            workspace_id=revision_api.SHARED_WORKSPACE_ID,
+            state_code=state_code,
+            year=year,
+            horizon_years=horizon_years,
         )
         return _response(payload)
     except KpiComputationError as exc:
@@ -380,6 +423,15 @@ async def export_kpis(body: KpiExportBody):
                 population=body.population,
                 include_unknown=body.include_unknown,
             )
+        elif kind == "age_condition_counts":
+            report = await run_in_threadpool(
+                compute_age_condition_counts,
+                database_path=revision_api._database_path(),
+                workspace_id=revision_api.SHARED_WORKSPACE_ID,
+                state_code=body.state_code,
+                year=body.year,
+                population=body.population,
+            )
         elif kind == "program":
             report = await run_in_threadpool(
                 list_program_kpis,
@@ -393,6 +445,15 @@ async def export_kpis(body: KpiExportBody):
                 workspace_id=revision_api.SHARED_WORKSPACE_ID,
                 state_code=body.state_code,
                 year=body.year,
+            )
+        elif kind == "future_condition":
+            report = await run_in_threadpool(
+                compute_future_condition_scenarios,
+                database_path=revision_api._database_path(),
+                workspace_id=revision_api.SHARED_WORKSPACE_ID,
+                state_code=body.state_code,
+                year=body.year,
+                horizon_years=body.horizon_years,
             )
         else:
             raise ValueError("unsupported KPI export kind")

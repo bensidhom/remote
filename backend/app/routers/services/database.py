@@ -3,6 +3,7 @@
 import sqlite3
 import pandas as pd
 import json
+import math
 import os
 import re
 from datetime import datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from .constants import mapping, STATE_MAP, REVERSE_MAPPING
 from .editor_metadata import build_editor_metadata
+from .snbi_rules import CODE_LISTS
 from .snbi_schema import (
     ALL_NESTED_ARRAY_NAMES,
     NESTED_ARRAY_SPECS,
@@ -1081,6 +1083,30 @@ def _decode_projection_value(value: Any) -> Any:
     if value == _SQL_BOOL_TRUE:
         return True
     return value
+
+
+def _decode_canonical_projection_value(tag: str, value: Any) -> Any:
+    """Restore SQLite-affinity code values to their canonical SNBI spelling.
+
+    Several one-character SNBI code fields are projected into historical REAL
+    columns. SQLite therefore returns a valid code such as ``"6"`` as ``6.0``.
+    Only collapse an integer-like numeric value when that exact integer is in
+    the field's reviewed code list; measurements and invalid decimal codes are
+    deliberately left unchanged for validation and editor review.
+    """
+
+    decoded = _decode_projection_value(value)
+    if (
+        tag in CODE_LISTS
+        and isinstance(decoded, (int, float))
+        and not isinstance(decoded, bool)
+    ):
+        numeric = float(decoded)
+        if math.isfinite(numeric) and numeric.is_integer():
+            candidate = str(int(numeric))
+            if candidate in CODE_LISTS[tag]:
+                return candidate
+    return decoded
 
 
 def _preflight_snbi_batch(data: Any) -> List[str]:
@@ -2697,6 +2723,75 @@ def get_bridge_details(
     return result
 
 
+def get_loaded_bridge_snbi_snapshot(
+    db_path: str,
+    state_code: int,
+    bridge_number: str,
+    year: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return one efficient, same-year SNBI document from the loaded inventory.
+
+    This is a read-only projection for bridge-scoped analysis context.  It avoids
+    exporting the full state inventory and never mixes child rows across years.
+    """
+
+    ensure_schema(db_path)
+    conn = get_connection(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if year is None:
+            selected = conn.execute(
+                "SELECT MAX(data_year) AS data_year FROM bridges "
+                "WHERE state_code=? AND bridge_number=?",
+                (int(state_code), str(bridge_number)),
+            ).fetchone()
+            effective_year = selected["data_year"] if selected else None
+        else:
+            effective_year = int(year)
+        if effective_year is None:
+            return None
+
+        def fetch(table: str) -> List[Dict[str, Any]]:
+            rows = conn.execute(
+                f'SELECT * FROM "{table}" WHERE state_code=? AND bridge_number=? '
+                'AND data_year=? ORDER BY rowid',
+                (int(state_code), str(bridge_number), int(effective_year)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+        def remap(rows: List[Dict[str, Any]], allowed: set[str]) -> List[Dict[str, Any]]:
+            output: List[Dict[str, Any]] = []
+            for row in rows:
+                mapped: Dict[str, Any] = {}
+                for column, value in row.items():
+                    tag = REVERSE_MAPPING.get(column)
+                    if tag not in allowed or value is None:
+                        continue
+                    cleaned = _decode_canonical_projection_value(tag, value)
+                    if cleaned not in (None, ""):
+                        mapped[tag] = cleaned
+                if mapped:
+                    output.append(mapped)
+            return output
+
+        bridge_rows = remap(fetch("bridges"), set(TOP_LEVEL_FIELDS))
+        if not bridge_rows:
+            return None
+        document = dict(bridge_rows[0])
+        for table, container in (
+            ("features", "Features"),
+            ("span_sets", "SpanSets"),
+            ("substructure_sets", "SubstructureSets"),
+            ("elements", "Elements"),
+        ):
+            rows = remap(fetch(table), set(NESTED_ARRAY_SPECS[container]["fields"]))
+            if rows:
+                document[container] = rows
+        return {"data_year": int(effective_year), "document": document}
+    finally:
+        conn.close()
+
+
 def get_bridge_field_metadata(db_path: str, state_code: int, bridge_number: str, year: Optional[int] = None) -> Dict[str, Any]:
     """Return editor-only metadata computed on demand for one bridge.
 
@@ -2783,7 +2878,12 @@ def get_bridge_field_metadata(db_path: str, state_code: int, bridge_number: str,
     return result
 
 
-def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] = None) -> List[Dict]:
+def export_all_bridges_snbi(
+    db_path: str,
+    state_code: int,
+    year: Optional[int] = None,
+    bridge_number: Optional[str] = None,
+) -> List[Dict]:
     """Bulk-export bridges for a state as SNBI-coded dicts.
 
     ``data_year`` is internal DB metadata. It is used only to choose the
@@ -2809,16 +2909,28 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
 
             if "data_year" in col_names:
                 if year is not None:
+                    bridge_filter = " AND bridge_number=?" if bridge_number is not None else ""
+                    parameters: tuple[Any, ...] = (
+                        state_code,
+                        year,
+                        *((str(bridge_number),) if bridge_number is not None else ()),
+                    )
                     cur.execute(
-                        f'SELECT * FROM "{table}" WHERE state_code=? AND data_year=? ORDER BY {order_sql}',
-                        (state_code, year),
+                        f'SELECT * FROM "{table}" WHERE state_code=? AND data_year=?{bridge_filter} ORDER BY {order_sql}',
+                        parameters,
                     )
                 elif table == "bridges":
+                    bridge_filter = " AND b.bridge_number=?" if bridge_number is not None else ""
+                    parameters = (
+                        state_code,
+                        *((str(bridge_number),) if bridge_number is not None else ()),
+                    )
                     cur.execute(
                         f"""
                         SELECT *
                         FROM bridges b
                         WHERE state_code=?
+                          {bridge_filter}
                           AND (data_year IS NULL OR data_year = (
                               SELECT MAX(b2.data_year)
                               FROM bridges b2
@@ -2827,12 +2939,17 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                           ))
                         ORDER BY {order_sql}
                         """,
-                        (state_code,),
+                        parameters,
                     )
                 else:
                     qualified_order = ", ".join(
                         f't."{column}" COLLATE BINARY' if column == "bridge_number" else f't."{column}"'
                         for column in order_columns
+                    )
+                    bridge_filter = " AND t.bridge_number=?" if bridge_number is not None else ""
+                    parameters = (
+                        state_code,
+                        *((str(bridge_number),) if bridge_number is not None else ()),
                     )
                     cur.execute(
                         f"""
@@ -2843,6 +2960,7 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                          AND b.bridge_number = t.bridge_number
                          AND b.data_year = t.data_year
                         WHERE t.state_code=?
+                          {bridge_filter}
                           AND (t.data_year IS NULL OR t.data_year = (
                               SELECT MAX(b2.data_year)
                               FROM bridges b2
@@ -2851,12 +2969,17 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                           ))
                         ORDER BY {qualified_order}
                         """,
-                        (state_code,),
+                        parameters,
                     )
             else:
+                bridge_filter = " AND bridge_number=?" if bridge_number is not None and "bridge_number" in col_names else ""
+                parameters = (
+                    state_code,
+                    *((str(bridge_number),) if bridge_filter else ()),
+                )
                 cur.execute(
-                    f'SELECT * FROM "{table}" WHERE state_code=? ORDER BY {order_sql}',
-                    (state_code,),
+                    f'SELECT * FROM "{table}" WHERE state_code=?{bridge_filter} ORDER BY {order_sql}',
+                    parameters,
                 )
             cols = [description[0] for description in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -2874,7 +2997,7 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
                 tag = REVERSE_MAPPING[col]
                 if allowed_tags is not None and tag not in allowed_tags:
                     continue
-                cleaned = _decode_projection_value(val)
+                cleaned = _decode_canonical_projection_value(tag, val)
                 if cleaned is None or cleaned == "":
                     continue
                 mapped[tag] = cleaned
@@ -2925,7 +3048,7 @@ def export_all_bridges_snbi(db_path: str, state_code: int, year: Optional[int] =
             tag = REVERSE_MAPPING[col]
             if tag not in TOP_LEVEL_FIELDS:
                 continue
-            cleaned = _decode_projection_value(val)
+            cleaned = _decode_canonical_projection_value(tag, val)
             if cleaned is None or cleaned == "":
                 continue
             snbi[tag] = cleaned

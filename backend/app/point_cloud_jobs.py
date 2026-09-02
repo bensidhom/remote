@@ -263,7 +263,7 @@ def _verify_frozen_scope(database_path: str | Path, job: OperationJob):
 def verify_point_cloud_job_scope(
     *, database_path: str | Path, job: OperationJob
 ) -> None:
-    """Revalidate every frozen source/context receipt before human acceptance."""
+    """Revalidate every frozen source/context receipt."""
 
     _verify_frozen_scope(database_path, job)
 
@@ -337,8 +337,31 @@ def _evidence_request(
     clearance = result.get("clearance")
     workflow = clearance.get("feature_measurement") if isinstance(clearance, Mapping) else None
     bindings = workflow.get("bindings") if isinstance(workflow, Mapping) else []
+    calculated = workflow.get("measurements") if isinstance(workflow, Mapping) else []
     measurements = []
-    if isinstance(bindings, list) and bindings:
+    if isinstance(calculated, list) and calculated:
+        for index, measurement in enumerate(calculated, start=1):
+            if not isinstance(measurement, Mapping):
+                continue
+            measurements.append(
+                PointCloudMeasurementEvidence(
+                    candidate_id=str(
+                        measurement.get("detected_id") or f"measurement-{index}"
+                    ),
+                    feature_id=(
+                        str(measurement.get("feature_id"))
+                        if measurement.get("feature_id")
+                        else None
+                    ),
+                    product="BH12_BH13",
+                    status="measured",
+                    payload={
+                        **dict(measurement),
+                        "artifact_manifest_sha256": manifest_sha256,
+                    },
+                )
+            )
+    elif isinstance(bindings, list) and bindings:
         for index, binding in enumerate(bindings, start=1):
             if not isinstance(binding, Mapping):
                 continue
@@ -347,7 +370,7 @@ def _evidence_request(
                     candidate_id=str(binding.get("detected_id") or f"measurement-{index}"),
                     feature_id=(str(binding.get("feature_id")) if binding.get("feature_id") else None),
                     product="BH12_BH13",
-                    status=str(workflow.get("status") or "review_required"),
+                    status=str(workflow.get("status") or "not_measurable"),
                     payload={
                         "binding": dict(binding),
                         "reason": workflow.get("reason"),
@@ -466,7 +489,7 @@ def process_point_cloud_analysis_job(
             analysis_profile=dict(profile),
             snapshot_identity=context.identity.public_payload(),
             knowledge_pack_json=pack.canonical_json,
-            publish_pointer=False,
+            publish_pointer=True,
         )
     except Exception as exc:
         raise PointCloudJobError("point_cloud_candidate_persistence_failed", retry=True) from exc
@@ -493,14 +516,14 @@ def process_point_cloud_analysis_job(
             run.run_id,
             "running",
             "succeeded",
-            "review_required",
+            "complete",
             {
                 "completed": 8,
                 "total": 8,
                 "source_generation": persistence.get("source_generation"),
                 "artifact_sha256": persistence.get("artifact_sha256"),
                 "manifest_sha256": manifest_sha256,
-                "publication_status": "candidate_not_published",
+                "publication_status": "saved_automatic_result",
             },
             manifest_sha256,
         ),
@@ -511,7 +534,8 @@ def process_point_cloud_analysis_job(
         "source_generation": persistence.get("source_generation"),
         "component_count": completed.component_count,
         "measurement_count": completed.measurement_count,
-        "review_required": True,
+        "review_required": False,
+        "saved": True,
     }
 
 
@@ -598,8 +622,9 @@ def public_point_cloud_job(job: OperationJob, run: Any) -> dict[str, object]:
             "measurements": run.measurement_count,
             "reviews": run.review_count,
         },
-        "review_required": run.status == "succeeded" and run.published_review_id is None,
+        "review_required": False,
         "published": run.published_review_id is not None,
+        "saved": run.status == "succeeded",
         "etag": run.etag,
     }
 

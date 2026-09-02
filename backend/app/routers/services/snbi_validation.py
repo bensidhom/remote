@@ -9,6 +9,7 @@ rules from FHWA SNBI Data Validation Logic v1.1.
 from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
+import math
 import re
 
 from .snbi_rules import CODE_LISTS, FIELD_GUIDANCE, TEMPORARY_CODES
@@ -114,10 +115,25 @@ def _pattern_match(value: Any, pattern: str) -> bool:
     return text == pattern
 
 
+def _canonical_code_text(value: Any) -> str:
+    """Return the code spelling represented by a JSON/SQLite scalar.
+
+    JSON numbers and SQLite REAL columns can represent the valid one-character
+    code ``6`` as ``6.0``. This normalization is intentionally limited to
+    finite integer-like numerics; a value such as ``6.5`` remains invalid.
+    """
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+        if math.isfinite(numeric) and numeric.is_integer():
+            return str(int(numeric))
+    return str(value).strip()
+
+
 def _valid_code(tag: str, value: Any) -> bool:
     if tag not in CODE_LISTS or _blank(value):
         return True
-    text = str(value).strip()
+    text = _canonical_code_text(value)
     if "|" in text:
         return all(
             any(_pattern_match(part, pattern) for pattern in CODE_LISTS[tag])

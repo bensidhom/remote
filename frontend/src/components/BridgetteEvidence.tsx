@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database } from 'lucide-react';
+import { CheckCircle2, Database, TriangleAlert } from 'lucide-react';
 
 type Evidence = Record<string, unknown>;
 
@@ -43,6 +43,52 @@ const queryDetails = (evidence?: Evidence, fallbackSql?: string) => {
   return {
     logicalSql: text(plan?.logical_sql) ?? text(fallbackSql),
   };
+};
+
+export const BridgetteAnswerStatus: React.FC<{
+  evidence?: Evidence;
+  compact?: boolean;
+}> = ({ evidence, compact = false }) => {
+  const mode = text(evidence?.answer_mode);
+  if (mode === 'verified_semantic_plan') {
+    return (
+      <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700/70 dark:bg-emerald-950/40 dark:text-emerald-200`}>
+        <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span><strong>Verified semantic answer.</strong> Reviewed field mappings and a validated query plan were used.</span>
+      </div>
+    );
+  }
+  if (mode === 'validated_sql_fallback') {
+    const warnings = Array.isArray(evidence?.warnings)
+      ? evidence.warnings.filter((warning): warning is string => typeof warning === 'string')
+      : [];
+    const fallbackNote = warnings.find((warning) => warning.includes('SQL-assisted'));
+    return (
+      <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/70 dark:bg-amber-950/40 dark:text-amber-100`}>
+        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span>
+          <strong>SQL-assisted answer.</strong>{' '}
+          {fallbackNote ?? 'Planning could not complete this request, so bounded SQL was generated against the reviewed semantic catalog and its returned values were evidence-checked.'}
+        </span>
+      </div>
+    );
+  }
+  if (mode === 'guarded_raw_sql_fallback') {
+    const warnings = Array.isArray(evidence?.warnings)
+      ? evidence.warnings.filter((warning): warning is string => typeof warning === 'string')
+      : [];
+    const fallbackNote = warnings.find((warning) => warning.includes('guarded raw-schema SQL'));
+    return (
+      <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-orange-300 bg-orange-50 text-orange-950 dark:border-orange-700/70 dark:bg-orange-950/40 dark:text-orange-100`}>
+        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span>
+          <strong>Provisional raw-SQL answer.</strong>{' '}
+          {fallbackNote ?? 'The reviewed planning paths could not answer, so guarded raw-schema SQL was used. Time scope and returned values were checked, but field interpretation should be reviewed.'}
+        </span>
+      </div>
+    );
+  }
+  return null;
 };
 
 export const BridgetteResultTable: React.FC<{

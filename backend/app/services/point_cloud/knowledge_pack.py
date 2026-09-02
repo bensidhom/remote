@@ -399,6 +399,141 @@ def build_point_cloud_knowledge_pack(
     )
 
 
+def build_loaded_inventory_prompt_context(
+    document: Mapping[str, Any],
+    *,
+    state_code: int,
+    bridge_number: str,
+    data_year: int,
+) -> dict[str, Any]:
+    """Build bounded bridge-specific SNBI context from the loaded yearly DB.
+
+    This context is deliberately labelled as loaded inventory rather than a
+    published canonical revision.  It is a semantic prior for naming and
+    retaining plausible components; scan geometry remains the spatial source of
+    truth and the context cannot remove points by itself.
+    """
+
+    def loaded_value(
+        *,
+        container: str,
+        pointer: str,
+        row: Mapping[str, Any],
+        tag: str,
+    ) -> dict[str, Any]:
+        definition = DEFAULT_SNBI_DICTIONARY.get(tag)
+        info = DEFAULT_SNBI_INFORMATION.get(tag)
+        raw = _bounded_scalar(row[tag])
+        source_pointer = f"{pointer}/{tag}"
+        return {
+            "evidence_id": f"loaded-snbi:{int(data_year)}:{source_pointer}",
+            "tag": tag,
+            "title": definition.title,
+            "raw_value": raw,
+            "decoded_value": _decoded_value(tag, raw),
+            "unit": definition.unit,
+            "container": container,
+            "container_key": _container_key(container, row),
+            "source_pointer": source_pointer,
+            "definition_locator": info.specification_locator,
+            "evidence_status": "loaded_yearly_inventory",
+        }
+
+    field_candidates: list[tuple[int, str, dict[str, Any]]] = []
+    for container, pointer, row in _iter_rows(document):
+        if container == "Elements":
+            continue
+        for tag in sorted(set(row) & _ALLOWED_TAGS):
+            field_candidates.append(
+                (
+                    _FIELD_PRIORITY_INDEX[tag],
+                    f"{pointer}/{tag}",
+                    loaded_value(
+                        container=container,
+                        pointer=pointer,
+                        row=row,
+                        tag=tag,
+                    ),
+                )
+            )
+    field_candidates.sort(key=lambda item: (item[0], item[1]))
+    field_values = [item[2] for item in field_candidates[:MAX_FIELD_VALUES]]
+
+    raw_elements = document.get("Elements", [])
+    raw_elements = raw_elements if isinstance(raw_elements, list) else []
+    element_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(raw_elements[:MAX_ELEMENT_ROWS]):
+        if not isinstance(row, Mapping):
+            continue
+        values = [
+            loaded_value(
+                container="Elements",
+                pointer=f"/Elements/{index}",
+                row=row,
+                tag=tag,
+            )
+            for tag in _ELEMENT_TAGS
+            if tag in row
+        ]
+        if values:
+            element_rows.append(
+                {
+                    "source_pointer": f"/Elements/{index}",
+                    "container_key": _container_key("Elements", row),
+                    "values": values,
+                }
+            )
+
+    payload: dict[str, Any] = {
+        "schema_version": "bridgeguard-point-cloud-loaded-inventory-context-v1",
+        "trusted_structured_context": {
+            "trust": "loaded_yearly_inventory",
+            "scope": {
+                "state_code": int(state_code),
+                "bridge_number": str(bridge_number),
+                "data_year": int(data_year),
+            },
+            "dictionary": {
+                "snbi_dictionary_version": DEFAULT_SNBI_DICTIONARY.definition_version,
+                "snbi_dictionary_sha256": DEFAULT_SNBI_DICTIONARY.dictionary_hash,
+                "snbi_information_version": DEFAULT_SNBI_INFORMATION.dataset_version,
+                "snbi_information_sha256": DEFAULT_SNBI_INFORMATION.dataset_sha256,
+            },
+            "field_values": field_values,
+            "element_rows": element_rows,
+        },
+        "untrusted_report_evidence": {
+            "chunks": [],
+            "included_count": 0,
+            "trust": "no_report_evidence",
+        },
+        "omissions": {
+            "field_values": max(0, len(field_candidates) - len(field_values)),
+            "element_rows": max(0, len(raw_elements) - len(element_rows)),
+            "report_chunks": 0,
+        },
+        "policy_notes": [
+            "Loaded SNBI values are semantic priors, not scan coordinates or detected geometry.",
+            "Retain an uncertain visible structural region even when inventory evidence is incomplete.",
+            "Never delete points merely because a component is absent from the loaded inventory.",
+        ],
+    }
+    _assert_private_keys_absent(payload)
+    while len(_stable_json(payload).encode("utf-8")) > MAX_PACK_BYTES:
+        if payload["trusted_structured_context"]["element_rows"]:
+            payload["trusted_structured_context"]["element_rows"].pop()
+            payload["omissions"]["element_rows"] += 1
+        elif payload["trusted_structured_context"]["field_values"]:
+            payload["trusted_structured_context"]["field_values"].pop()
+            payload["omissions"]["field_values"] += 1
+        else:
+            raise PointCloudKnowledgePackIntegrityError(
+                "Loaded bridge context metadata exceeds its byte limit."
+            )
+    payload["knowledge_pack_sha256"] = _canonical_sha256(payload)
+    return payload
+
+
 __all__ = [
     "KNOWLEDGE_PACK_VERSION",
     "MAX_ELEMENT_ROWS",
@@ -407,5 +542,6 @@ __all__ = [
     "PointCloudKnowledgePack",
     "PointCloudKnowledgePackError",
     "PointCloudKnowledgePackIntegrityError",
+    "build_loaded_inventory_prompt_context",
     "build_point_cloud_knowledge_pack",
 ]

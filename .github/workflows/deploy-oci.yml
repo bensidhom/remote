@@ -79,13 +79,15 @@ jobs:
             recover_quiesced_release=false
             cleanup_deploy() {
               status="$?"
-              cleanup_compose_env
               if [ "$status" -ne 0 ] && [ "$recover_quiesced_release" = true ]; then
                 printf 'deploy failed after quiescing; restarting application and tunnel\n' >&2
                 compose up -d --remove-orphans embeddings app || true
                 sh deploy/oci/wait-ready.sh "$compose_file" </dev/null || true
                 compose up -d --remove-orphans cloudflared || true
               fi
+              # Recovery still needs the generated Compose env file. Remove it
+              # only after all restart attempts have completed.
+              cleanup_compose_env
               exit "$status"
             }
             trap cleanup_deploy EXIT
@@ -110,7 +112,6 @@ jobs:
               BRIDGEGUARD_BACKUP_REUSE_SECONDS=3600 \
               sh deploy/oci/backup.sh </dev/null
             recover_quiesced_release=true
-            sh deploy/oci/publish-legacy-data.sh </dev/null
             compose up \
               -d --remove-orphans embeddings app
             sh deploy/oci/wait-ready.sh "$compose_file" </dev/null

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import sqlite3
 from typing import Any, Literal
@@ -21,7 +22,12 @@ from .services.analytics.projection import (
     load_state_analysis_histories,
 )
 from .services.conversion.revision_store import get_workspace_state
-from .services.forecasting_v2.estimator import ForecastModelConfig, build_annual_markov_model
+from .services.forecasting_v2.estimator import (
+    BridgeAnnualForecastProvider,
+    ForecastModelConfig,
+    build_annual_markov_model,
+)
+from .services.forecasting_v2.models import ComponentState, ForecastQualification
 from .services.forecasting_v2.evaluation import (
     ForecastReleasePolicy,
     evaluate_historical_hindcasts,
@@ -75,6 +81,15 @@ class BridgeForecastBody(BaseModel):
     horizon_years: int = Field(default=10, ge=1, le=100)
     expected_data_generation: int = Field(ge=0)
     mode: Literal["no_action"] = "no_action"
+
+
+class BridgeBacktestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state_code: int = Field(default=34, ge=1, le=99)
+    bridge_number: str = Field(min_length=1, max_length=64)
+    start_year: int = Field(ge=1900, le=2100)
+    expected_data_generation: int = Field(ge=0)
 
 
 def _database_path() -> str:
@@ -160,8 +175,243 @@ def _run_payload(run: BridgeForecastRun) -> dict[str, object]:
         "evaluation_receipt_id": run.evaluation_receipt_id,
         "qualification": run.qualification.value,
         "source_data_generation": run.source_data_generation,
+        "source_status": "loaded_inventory",
+        "source_database": "snbi_bridges.db",
+        "warnings": [],
         "metrics": metrics,
     }
+
+
+def _loaded_forecast_payload(
+    body: BridgeForecastBody,
+    *,
+    history,
+    source_data_generation: int,
+) -> dict[str, object] | None:
+    """Build a research forecast directly from the exact loaded bridge history."""
+
+    snapshots = tuple(history.snapshots)
+    if not snapshots:
+        return None
+    latest_observed_year = snapshots[-1].data_year
+    requested_year = int(body.as_of_year) if body.as_of_year is not None else latest_observed_year
+    as_of_year = min(requested_year, latest_observed_year)
+    final_forecast_year = as_of_year + int(body.horizon_years)
+    eligible = tuple(snapshot for snapshot in snapshots if snapshot.data_year <= as_of_year)
+    if not eligible:
+        return None
+    as_of_snapshot = eligible[-1]
+    model = build_annual_markov_model(
+        [history],
+        through_year=as_of_year,
+        config=ForecastModelConfig(minimum_cohort_exposure=1),
+    )
+    receipt = f"loaded-inventory-on-demand:{model.source_receipt_sha256}"
+    provider = BridgeAnnualForecastProvider(
+        model=model,
+        bridge_snapshot=as_of_snapshot,
+        evaluation_receipt_id=receipt,
+        qualification=ForecastQualification.RESEARCH_UNVALIDATED,
+    )
+    normalized_metrics: dict[str, dict[str, list[dict[str, object]]]] = {}
+    fields = {"deck": "bc01", "superstructure": "bc02", "substructure": "bc03", "culvert": "bc04"}
+    for component, attribute in fields.items():
+        observed = [
+            {
+                "year": snapshot.data_year,
+                "value": float(value),
+                "snapshot_revision_id": snapshot.snapshot_revision_id,
+            }
+            for snapshot in eligible
+            if (value := getattr(snapshot.condition, attribute)) is not None
+        ]
+        if not observed:
+            continue
+        state = ComponentState.certain(component, int(round(float(observed[-1]["value"]))))
+        forecast: list[dict[str, object]] = []
+        for year in range(as_of_year + 1, final_forecast_year + 1):
+            transition = provider.transition(year=year, component=component, state=state, action_id=None)
+            state = transition.state
+            cumulative = 0.0
+            quantiles: dict[float, int] = {}
+            for rating, probability in enumerate(state.distribution):
+                cumulative += probability
+                for threshold in (0.1, 0.5, 0.9):
+                    if threshold not in quantiles and cumulative >= threshold:
+                        quantiles[threshold] = rating
+            deviation = math.sqrt(
+                math.fsum(
+                    probability * ((rating - state.expected_rating) ** 2)
+                    for rating, probability in enumerate(state.distribution)
+                )
+            )
+            forecast.append({
+                "year": year,
+                "yhat": state.expected_rating,
+                "p10": quantiles.get(0.1, 0),
+                "p50": quantiles.get(0.5, state.most_likely_rating),
+                "p90": quantiles.get(0.9, 9),
+                "standard_deviation": deviation,
+                "probabilities": list(state.distribution),
+                "fallback_level": transition.fallback_level,
+                "action_id": None,
+            })
+        normalized_metrics[component] = {"observed": observed, "forecast": forecast}
+
+    warnings = [
+        "This research forecast was fitted on demand from this bridge's exact loaded yearly inventory history.",
+        "Train and evaluate a fleet model from the Forecasts page for stronger cohort evidence and release qualification.",
+    ]
+    if requested_year > latest_observed_year:
+        warnings.append(
+            f"The requested inventory year {requested_year} was newer than the latest loaded observation; {latest_observed_year} was used."
+        )
+    return {
+        "run_id": f"loaded-on-demand-{model.model_id}",
+        "workspace_id": revision_api.SHARED_WORKSPACE_ID,
+        "state_code": int(body.state_code),
+        "bridge_number": str(body.bridge_number).strip(),
+        "snapshot_revision_id": (
+            f"loaded-inventory:{int(body.state_code)}:"
+            f"{str(body.bridge_number).strip()}:{as_of_year}"
+        ),
+        "as_of_year": as_of_year,
+        "horizon_years": int(body.horizon_years),
+        "forecast_mode": "no_action",
+        "model_version_id": f"on-demand-{model.model_id}",
+        "model_id": model.model_id,
+        "evaluation_run_id": "on-demand-loaded-inventory",
+        "evaluation_receipt_id": receipt,
+        "qualification": ForecastQualification.RESEARCH_UNVALIDATED.value,
+        "source_data_generation": int(source_data_generation),
+        "source_status": "loaded_inventory",
+        "source_database": "snbi_bridges.db",
+        "warnings": warnings,
+        "metrics": normalized_metrics,
+    }
+
+
+def _condition_class(value: float) -> str:
+    if value >= 7:
+        return "good"
+    if value >= 5:
+        return "fair"
+    return "poor"
+
+
+def _loaded_backtest_payload(
+    body: BridgeBacktestBody,
+    *,
+    history,
+    source_data_generation: int,
+) -> dict[str, object] | None:
+    """Forecast from a past cutoff and expose later observations only for scoring."""
+
+    snapshots = tuple(history.snapshots)
+    if len(snapshots) < 2:
+        return None
+    latest_actual_year = int(snapshots[-1].data_year)
+    eligible = tuple(snapshot for snapshot in snapshots if snapshot.data_year <= int(body.start_year))
+    if not eligible:
+        raise ForecastApiError(
+            422,
+            "backtest_start_year_unavailable",
+            "Choose a test year that has an inventory observation for this bridge.",
+        )
+    start_year = int(eligible[-1].data_year)
+    if start_year >= latest_actual_year:
+        raise ForecastApiError(
+            422,
+            "backtest_start_year_not_historical",
+            f"Choose a test year before the latest real inventory year, {latest_actual_year}.",
+        )
+
+    forecast_body = BridgeForecastBody(
+        state_code=body.state_code,
+        bridge_number=body.bridge_number,
+        as_of_year=start_year,
+        horizon_years=latest_actual_year - start_year,
+        expected_data_generation=body.expected_data_generation,
+    )
+    payload = _loaded_forecast_payload(
+        forecast_body,
+        history=history,
+        source_data_generation=source_data_generation,
+    )
+    if payload is None:
+        return None
+
+    attributes = {
+        "deck": "bc01",
+        "superstructure": "bc02",
+        "substructure": "bc03",
+        "culvert": "bc04",
+    }
+    comparison: dict[str, dict[str, object]] = {}
+    metrics = payload["metrics"]
+    assert isinstance(metrics, dict)
+    for component, attribute in attributes.items():
+        series = metrics.get(component)
+        if not isinstance(series, dict):
+            continue
+        actual = [
+            {
+                "year": snapshot.data_year,
+                "value": float(value),
+                "snapshot_revision_id": snapshot.snapshot_revision_id,
+            }
+            for snapshot in snapshots
+            if (value := getattr(snapshot.condition, attribute)) is not None
+        ]
+        series["observed"] = actual
+        actual_by_year = {
+            int(point["year"]): float(point["value"])
+            for point in actual
+            if int(point["year"]) > start_year
+        }
+        predicted_by_year = {
+            int(point["year"]): float(point["yhat"])
+            for point in series.get("forecast", [])
+        }
+        compared_years = sorted(set(actual_by_year) & set(predicted_by_year))
+        absolute_errors = [
+            abs(predicted_by_year[year] - actual_by_year[year])
+            for year in compared_years
+        ]
+        class_matches = sum(
+            _condition_class(predicted_by_year[year]) == _condition_class(actual_by_year[year])
+            for year in compared_years
+        )
+        comparison[component] = {
+            "compared_years": compared_years,
+            "compared_points": len(compared_years),
+            "mean_absolute_error": (
+                math.fsum(absolute_errors) / len(absolute_errors)
+                if absolute_errors
+                else None
+            ),
+            "condition_class_matches": class_matches,
+            "condition_class_accuracy": (
+                class_matches / len(compared_years)
+                if compared_years
+                else None
+            ),
+        }
+
+    payload.update(
+        {
+            "run_id": f"historical-test-{payload['model_id']}",
+            "test_start_year": start_year,
+            "latest_actual_year": latest_actual_year,
+            "available_start_years": [
+                int(snapshot.data_year)
+                for snapshot in snapshots[:-1]
+            ],
+            "comparison": comparison,
+            "warnings": [],
+        }
+    )
+    return payload
 
 
 def _assert_job_not_cancelled(job: OperationJob, job_database_path: str | Path) -> None:
@@ -306,31 +556,114 @@ async def create_bridge_forecast(
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
+    database_path = _database_path()
+    workspace_state = get_workspace_state(database_path, revision_api.SHARED_WORKSPACE_ID)
+    if workspace_state.data_generation != int(body.expected_data_generation):
+        return _error(
+            ForecastApiError(409, "stale_data_generation", "Available bridge data changed; refresh and retry")
+        )
+    try:
+        history = None
+        try:
+            history = await run_in_threadpool(
+                load_bridge_analysis_history,
+                database_path=database_path,
+                workspace_id=revision_api.SHARED_WORKSPACE_ID,
+                state_code=body.state_code,
+                bridge_number=body.bridge_number,
+                through_year=body.as_of_year,
+            )
+            run = await run_in_threadpool(
+                create_bridge_forecast_run,
+                database_path,
+                history=history,
+                horizon_years=body.horizon_years,
+                idempotency_key=_key(idempotency_key),
+                created_by=_actor(request),
+                created_at=_now(),
+                expected_data_generation=body.expected_data_generation,
+                require_released=False,
+            )
+            return JSONResponse(content=_run_payload(run), headers={"Cache-Control": "no-store"})
+        except AnalyticalProjectionError:
+            pass
+        except ForecastStoreError as exc:
+            if exc.code != "forecast_package_not_found":
+                return _error(ForecastApiError(exc.status, exc.code, str(exc)))
+
+        if history is None:
+            return _error(
+                ForecastApiError(404, "forecast_history_not_found", "No loaded inventory history was found for this bridge")
+            )
+        loaded_payload = await run_in_threadpool(
+            _loaded_forecast_payload,
+            body,
+            history=history,
+            source_data_generation=workspace_state.data_generation,
+        )
+        if loaded_payload is None:
+            return _error(
+                ForecastApiError(
+                    404,
+                    "forecast_history_not_found",
+                    "No loaded inventory history was found for this bridge",
+                )
+            )
+        return JSONResponse(
+            content=loaded_payload,
+            headers={
+                "Cache-Control": "no-store",
+                "X-BridgeGuard-Forecast-Source": "loaded-inventory",
+            },
+        )
+    except ForecastStoreError as exc:
+        return _error(ForecastApiError(exc.status, exc.code, str(exc)))
+    except ForecastApiError as exc:
+        return _error(exc)
+
+
+@router.post("/api/forecasts/v2/bridge/backtest")
+async def create_bridge_backtest(body: BridgeBacktestBody):
+    database_path = _database_path()
+    workspace_state = get_workspace_state(database_path, revision_api.SHARED_WORKSPACE_ID)
+    if workspace_state.data_generation != int(body.expected_data_generation):
+        return _error(
+            ForecastApiError(409, "stale_data_generation", "Available bridge data changed; refresh and retry")
+        )
     try:
         history = await run_in_threadpool(
             load_bridge_analysis_history,
-            database_path=_database_path(),
+            database_path=database_path,
             workspace_id=revision_api.SHARED_WORKSPACE_ID,
             state_code=body.state_code,
             bridge_number=body.bridge_number,
-            through_year=body.as_of_year,
+            through_year=None,
         )
-        run = await run_in_threadpool(
-            create_bridge_forecast_run,
-            _database_path(),
+        payload = await run_in_threadpool(
+            _loaded_backtest_payload,
+            body,
             history=history,
-            horizon_years=body.horizon_years,
-            idempotency_key=_key(idempotency_key),
-            created_by=_actor(request),
-            created_at=_now(),
-            expected_data_generation=body.expected_data_generation,
-            require_released=False,
+            source_data_generation=workspace_state.data_generation,
         )
-        return JSONResponse(content=_run_payload(run), headers={"Cache-Control": "no-store"})
-    except (ForecastStoreError, AnalyticalProjectionError) as exc:
-        if isinstance(exc, ForecastStoreError):
-            return _error(ForecastApiError(exc.status, exc.code, str(exc)))
-        return _error(ForecastApiError(404, "forecast_history_not_found", str(exc)))
+        if payload is None:
+            return _error(
+                ForecastApiError(
+                    404,
+                    "forecast_history_not_found",
+                    "At least two yearly inventory observations are required for a historical forecast test.",
+                )
+            )
+        return JSONResponse(
+            content=payload,
+            headers={
+                "Cache-Control": "no-store",
+                "X-BridgeGuard-Forecast-Source": "historical-test",
+            },
+        )
+    except AnalyticalProjectionError:
+        return _error(
+            ForecastApiError(404, "forecast_history_not_found", "No loaded inventory history was found for this bridge")
+        )
     except ForecastApiError as exc:
         return _error(exc)
 
@@ -363,14 +696,11 @@ def forecast_v2_summary():
             (revision_api.SHARED_WORKSPACE_ID,),
         ).fetchone()
         years = connection.execute(
-            "SELECT DISTINCT data_year FROM published_snapshots WHERE workspace_id=? "
-            "ORDER BY data_year",
-            (revision_api.SHARED_WORKSPACE_ID,),
+            "SELECT DISTINCT data_year FROM bridges ORDER BY data_year"
         ).fetchall()
         counts = connection.execute(
             "SELECT COUNT(*) AS observations,COUNT(DISTINCT bridge_number) AS bridges "
-            "FROM published_snapshots WHERE workspace_id=?",
-            (revision_api.SHARED_WORKSPACE_ID,),
+            "FROM bridges"
         ).fetchone()
         latest = connection.execute(
             "SELECT m.id AS model_version_id,m.model_id,m.engine_version,m.qualification,"
@@ -387,8 +717,8 @@ def forecast_v2_summary():
         content={
             "data_generation": int(state["data_generation"]) if state else 0,
             "schema_generation": int(state["schema_generation"]) if state else 0,
-            "published_observations": int(counts["observations"]) if counts else 0,
-            "published_bridges": int(counts["bridges"]) if counts else 0,
+            "loaded_observations": int(counts["observations"]) if counts else 0,
+            "loaded_bridges": int(counts["bridges"]) if counts else 0,
             "available_years": [int(row["data_year"]) for row in years],
             "latest_package": (
                 {
@@ -419,13 +749,13 @@ def forecast_v2_bridges(limit: int = 1000):
         rows = connection.execute(
             "WITH observations AS ("
             "SELECT state_code,bridge_number,COUNT(DISTINCT data_year) AS observation_years,"
-            "MAX(data_year) AS latest_year FROM published_snapshots "
-            "WHERE workspace_id=? GROUP BY state_code,bridge_number) "
+            "MAX(data_year) AS latest_year FROM bridges "
+            "GROUP BY state_code,bridge_number) "
             "SELECT o.state_code,o.bridge_number,o.observation_years,o.latest_year,b.bridge_name "
             "FROM observations o LEFT JOIN bridges b ON b.state_code=o.state_code "
             "AND b.bridge_number=o.bridge_number AND b.data_year=o.latest_year "
             "ORDER BY o.bridge_number LIMIT ?",
-            (revision_api.SHARED_WORKSPACE_ID, maximum),
+            (maximum,),
         ).fetchall()
     finally:
         connection.close()

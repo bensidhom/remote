@@ -1,5 +1,12 @@
 export type BridgetteSurface = 'full' | 'sidebar';
 
+export interface BridgetteClarificationOption {
+  id: string;
+  label: string;
+  value?: string;
+  suggested_question?: string;
+}
+
 export interface BridgetteStreamEvent {
   type: 'accepted' | 'evidence' | 'clarification' | 'abstention' | 'token' | 'done' | 'stopped' | 'error';
   request_id: string;
@@ -13,10 +20,22 @@ export interface BridgetteStreamEvent {
   truncated?: boolean;
   code?: string;
   message?: string;
-  options?: Array<{ id: string; label: string }>;
+  options?: BridgetteClarificationOption[];
   warnings?: string[];
   [key: string]: unknown;
 }
+
+export const clarificationDraft = (
+  originalQuestion: string,
+  option?: BridgetteClarificationOption,
+): string => {
+  const suggestedQuestion = option?.suggested_question?.trim();
+  if (suggestedQuestion) return suggestedQuestion;
+  const original = originalQuestion.trim();
+  const additionalContext = option?.label?.trim() ?? '';
+  if (!additionalContext) return original;
+  return `${original}\n\nAdditional context: ${additionalContext}`;
+};
 
 export const newBridgetteRequestId = (): string => {
   if (typeof crypto.randomUUID !== 'function') {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import sqlite3
 from datetime import datetime
@@ -812,58 +813,90 @@ def get_forecast_bridges(limit: int = 500, forecast_db: str = FORECAST_DB) -> Li
         conn.close()
 
 
+def _bridge_forecast_from_connection(
+    conn: sqlite3.Connection,
+    state_code: int,
+    bridge_number: str,
+) -> Dict[str, Any]:
+    # Resolve the latest run that actually contains THIS bridge. Per-bridge
+    # training creates a run holding only that bridge, so keying off the
+    # global latest successful run would hide every other bridge's forecast.
+    latest_run = conn.execute(
+        "SELECT MAX(run_id) FROM forecast_predictions WHERE state_code=? AND bridge_number=?",
+        (state_code, bridge_number),
+    ).fetchone()[0]
+    if latest_run is None:
+        latest_run = conn.execute("SELECT MAX(id) FROM forecast_runs WHERE status='success'").fetchone()[0]
+    observed_rows = conn.execute(
+        """
+        SELECT data_year AS year, metric, observed_value AS value
+        FROM training_series
+        WHERE state_code=? AND bridge_number=?
+        ORDER BY data_year, metric
+        """,
+        (state_code, bridge_number),
+    ).fetchall()
+    if latest_run:
+        pred_rows = conn.execute(
+            """
+            SELECT forecast_year AS year, metric, yhat, yhat_lower, yhat_upper,
+                   confidence, observation_count, trend_direction, model_engine
+            FROM forecast_predictions
+            WHERE run_id=? AND state_code=? AND bridge_number=?
+            ORDER BY forecast_year, metric
+            """,
+            (latest_run, state_code, bridge_number),
+        ).fetchall()
+    else:
+        pred_rows = []
+
+    by_metric: Dict[str, Dict[str, Any]] = {}
+    for metric in METRICS:
+        metric_observed = [dict(row) for row in observed_rows if row["metric"] == metric]
+        metric_forecast = [dict(row) for row in pred_rows if row["metric"] == metric]
+        by_metric[metric] = {"observed": metric_observed, "forecast": metric_forecast}
+
+    engine = pred_rows[0]["model_engine"] if pred_rows else None
+    return {
+        "state_code": state_code,
+        "bridge_number": bridge_number,
+        "run_id": latest_run,
+        "engine": engine,
+        "metrics": by_metric,
+    }
+
+
 def get_bridge_forecast(state_code: int, bridge_number: str, forecast_db: str = FORECAST_DB) -> Dict[str, Any]:
     init_forecast_db(forecast_db)
     conn = _connect(forecast_db)
     conn.row_factory = sqlite3.Row
     try:
-        # Resolve the latest run that actually contains THIS bridge. Per-bridge
-        # training creates a run holding only that bridge, so keying off the
-        # global latest successful run would hide every other bridge's forecast.
-        latest_run = conn.execute(
-            "SELECT MAX(run_id) FROM forecast_predictions WHERE state_code=? AND bridge_number=?",
-            (state_code, bridge_number),
-        ).fetchone()[0]
-        if latest_run is None:
-            latest_run = conn.execute("SELECT MAX(id) FROM forecast_runs WHERE status='success'").fetchone()[0]
-        observed_rows = conn.execute(
-            """
-            SELECT data_year AS year, metric, observed_value AS value
-            FROM training_series
-            WHERE state_code=? AND bridge_number=?
-            ORDER BY data_year, metric
-            """,
-            (state_code, bridge_number),
-        ).fetchall()
-        if latest_run:
-            pred_rows = conn.execute(
-                """
-                SELECT forecast_year AS year, metric, yhat, yhat_lower, yhat_upper,
-                       confidence, observation_count, trend_direction, model_engine
-                FROM forecast_predictions
-                WHERE run_id=? AND state_code=? AND bridge_number=?
-                ORDER BY forecast_year, metric
-                """,
-                (latest_run, state_code, bridge_number),
-            ).fetchall()
-        else:
-            pred_rows = []
+        return _bridge_forecast_from_connection(conn, state_code, bridge_number)
+    finally:
+        conn.close()
 
-        by_metric: Dict[str, Dict[str, Any]] = {}
-        for metric in METRICS:
-            metric_observed = [dict(row) for row in observed_rows if row["metric"] == metric]
-            metric_forecast = [dict(row) for row in pred_rows if row["metric"] == metric]
-            by_metric[metric] = {"observed": metric_observed, "forecast": metric_forecast}
 
-        engine = pred_rows[0]["model_engine"] if pred_rows else None
+def get_bridge_forecast_readonly(
+    state_code: int,
+    bridge_number: str,
+    forecast_db: str = FORECAST_DB,
+) -> Dict[str, Any]:
+    """Read existing loaded forecasts without creating or migrating the store."""
 
-        return {
-            "state_code": state_code,
-            "bridge_number": bridge_number,
-            "run_id": latest_run,
-            "engine": engine,
-            "metrics": by_metric,
-        }
+    resolved = Path(forecast_db).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
+    conn = sqlite3.connect(
+        f"file:{resolved.as_posix()}?mode=ro",
+        uri=True,
+        timeout=2.0,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA trusted_schema=OFF")
+    try:
+        return _bridge_forecast_from_connection(conn, state_code, bridge_number)
     finally:
         conn.close()
 

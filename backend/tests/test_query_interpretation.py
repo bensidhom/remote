@@ -61,16 +61,45 @@ def test_unqualified_current_requires_calendar_vs_inventory_choice() -> None:
             "id": "latest_published_inventory",
             "label": "Latest published inventory per bridge",
             "value": "latest_published_inventory",
+            "suggested_question": (
+                "How many current bridges are in Bergen County?\n\nAdditional "
+                "context: Use the latest published inventory snapshot selected "
+                "independently for each bridge."
+            ),
         },
         {
             "id": "current_calendar_time",
             "label": "Current calendar date or year",
             "value": "current_calendar_time",
+            "suggested_question": (
+                "How many current bridges are in Bergen County?\n\nAdditional "
+                "context: Use the current calendar date or year."
+            ),
         },
     ]
     assert [(item.name, item.county_fips) for item in result.normalized_counties] == [
         ("Bergen", "003")
     ]
+
+
+def test_latest_server_scope_resolves_unqualified_current() -> None:
+    result = interpret_bridge_query(
+        "How many current bridges are in Bergen County?",
+        time_mode="latest",
+    )
+
+    assert result.should_query
+    assert result.code == "ready_for_planning"
+
+
+def test_bridge_number_output_phrase_is_not_misread_as_an_identity() -> None:
+    result = interpret_bridge_query(
+        "List bridges including bridge number and owner",
+        time_mode="latest",
+    )
+
+    assert result.should_query
+    assert result.unresolved_bridge_reference is None
 
 
 @pytest.mark.parametrize(
@@ -107,6 +136,11 @@ def test_unqualified_nhs_has_three_stable_meanings() -> None:
         "federal_performance_nhs",
     ]
     assert "SNBI BH03" in first.options[1].label
+    assert all(
+        option.suggested_question is not None
+        and interpret_bridge_query(option.suggested_question).should_query
+        for option in first.options
+    )
 
 
 @pytest.mark.parametrize(
@@ -141,6 +175,11 @@ def test_vague_condition_requires_a_definition(question: str) -> None:
         "component_condition",
         "federal_condition_measure",
     ]
+    assert all(
+        option.suggested_question is not None
+        and interpret_bridge_query(option.suggested_question).should_query
+        for option in result.options
+    )
 
 
 @pytest.mark.parametrize(
@@ -238,6 +277,9 @@ def test_unknown_nj_county_requires_correction_without_guessing() -> None:
         "choose_nj_county",
         "remove_county_filter",
     ]
+    remove_county = result.options[1].suggested_question
+    assert remove_county is not None
+    assert interpret_bridge_query(remove_county, time_mode="latest").should_query
 
 
 def test_multiple_nj_counties_have_deterministic_per_county_and_group_choices() -> None:
@@ -256,6 +298,23 @@ def test_multiple_nj_counties_have_deterministic_per_county_and_group_choices() 
         "counties_separate",
         "counties_combined",
     ]
+    for option in result.options:
+        assert option.suggested_question is not None
+        follow_up = interpret_bridge_query(
+            option.suggested_question,
+            time_mode="latest",
+        )
+        assert follow_up.should_query, option.option_id
+
+
+def test_named_bridge_recovery_options_route_to_map_resolution() -> None:
+    result = interpret_bridge_query("Tell me everything about the Pulaski Skyway")
+
+    assert result.code == "unresolved_bridge_identity"
+    assert result.options[0].suggested_question == (
+        "Show bridge [type the exact agency bridge number] on the map."
+    )
+    assert result.options[1].suggested_question == "Show Pulaski Skyway on the map."
 
 
 def test_generic_county_grouping_and_sql_word_union_are_not_county_names() -> None:
@@ -292,6 +351,11 @@ def test_original_paint_color_abstains_and_never_substitutes_material() -> None:
     assert {
         field.query_availability for field in result.nearby_supported_fields
     } == {"semantic_catalog"}
+    assert [option.option_id for option in result.options] == [
+        "use_supported_snbi_fields",
+        "ask_supported_inventory_question",
+    ]
+    assert all(option.suggested_question for option in result.options)
 
 
 @pytest.mark.parametrize(

@@ -28,7 +28,7 @@ TEST_RUN_ROOT = (
     REPO_ROOT
     / "backend"
     / ".test-artifacts"
-    / f"run-{os.getpid()}-{uuid4().hex}"
+    / f"run-{os.getpid()}-{uuid4().hex[:8]}"
 )
 TEST_DATA_ROOT = TEST_RUN_ROOT / "data"
 
@@ -94,7 +94,9 @@ def forbid_production_database_access(monkeypatch: pytest.MonkeyPatch):
 def test_workspace() -> Path:
     """Create a writable, per-test artifact directory outside source tests."""
 
-    path = TEST_RUN_ROOT / "cases" / uuid4().hex
+    # Keep the path short enough for immutable-artifact temp filenames on
+    # Windows installations where long-path support is not enabled.
+    path = TEST_RUN_ROOT / "cases" / uuid4().hex[:8]
     path.mkdir(parents=True, exist_ok=False)
     try:
         yield path
@@ -113,7 +115,7 @@ def tmp_path() -> Path:
     deterministic and preserves the production-data guard above.
     """
 
-    path = TEST_RUN_ROOT / "tmp-path" / uuid4().hex
+    path = TEST_RUN_ROOT / "tmp-path" / uuid4().hex[:8]
     path.mkdir(parents=True, exist_ok=False)
     try:
         yield path

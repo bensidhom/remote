@@ -123,7 +123,7 @@ def test_query_boundary_migration_is_manifest_owned_and_seeded(test_workspace):
         connection.close()
 
 
-def test_semantic_views_expose_only_published_rows_and_latest_is_per_bridge(test_workspace):
+def test_semantic_views_ignore_publication_pointers_and_latest_is_one_global_year(test_workspace):
     database_path = test_workspace / "query-view-behavior.sqlite3"
     ensure_schema(str(database_path))
     connection = sqlite3.connect(database_path)
@@ -142,11 +142,37 @@ def test_semantic_views_expose_only_published_rows_and_latest_is_per_bridge(test
         assert connection.execute(
             "SELECT bridge_number,data_year FROM v_published_bridge_snapshots "
             "ORDER BY bridge_number,data_year"
+        ).fetchall() == [("A", 2024), ("A", 2025), ("B", 2023), ("STAGED-ONLY", 2026)]
+        assert connection.execute(
+            "SELECT bridge_number,data_year FROM v_current_bridge_snapshots "
+            "ORDER BY bridge_number"
+        ).fetchall() == [("STAGED-ONLY", 2026)]
+    finally:
+        connection.close()
+
+
+def test_semantic_views_use_loaded_inventory_when_workspace_has_no_publications(test_workspace):
+    database_path = test_workspace / "query-view-loaded-fallback.sqlite3"
+    ensure_schema(str(database_path))
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _insert_workspace(connection)
+        connection.executemany(
+            "INSERT INTO bridges (state_code,bridge_number,data_year,county_code) "
+            "VALUES (34,?,?,3)",
+            (("A", 2024), ("A", 2025), ("B", 2023)),
+        )
+        connection.commit()
+
+        assert connection.execute(
+            "SELECT bridge_number,data_year FROM v_published_bridge_snapshots "
+            "ORDER BY bridge_number,data_year"
         ).fetchall() == [("A", 2024), ("A", 2025), ("B", 2023)]
         assert connection.execute(
             "SELECT bridge_number,data_year FROM v_current_bridge_snapshots "
             "ORDER BY bridge_number"
-        ).fetchall() == [("A", 2025), ("B", 2023)]
+        ).fetchall() == [("A", 2025)]
     finally:
         connection.close()
 
@@ -173,9 +199,9 @@ def test_condition_precedence_and_county_aggregation_are_deterministic(test_work
             revision_id="condition-b",
             bridge_number="B",
             year=2025,
-            bc01=None,
-            bc02=None,
-            bc03=None,
+            bc01="N",
+            bc02="N",
+            bc03="N",
             bc04=4,
         )
         connection.execute(
@@ -196,7 +222,7 @@ def test_condition_precedence_and_county_aggregation_are_deterministic(test_work
             "ORDER BY bridge_number"
         ).fetchall()
         assert rows == [
-            ("A", 5.0, "Fair", "reported_bc13", 1),
+            ("A", 6.0, "Fair", "derived_primary_min", 1),
             ("B", 4.0, "Poor", "culvert_only", 0),
         ]
         assert connection.execute(

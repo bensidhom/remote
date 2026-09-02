@@ -595,7 +595,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
 
   const cleanValue = (value: any): any => {
     if (typeof value !== 'string') return value;
-    // Preserve exact published/editor text. Only an all-whitespace input means
+    // Preserve exact inventory/editor text. Only an all-whitespace input means
     // "clear this field"; canonical validation owns any further coercion.
     return value.trim() === '' ? '' : value;
   };
@@ -619,8 +619,8 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
   };
 
   const buildCanonicalBridgeDocument = () => {
-    if (!publishedDocument) throw new Error('Published canonical revision is unavailable.');
-    // Start from the exact published object so fields outside the current UI,
+    if (!publishedDocument) throw new Error('Loaded inventory snapshot is unavailable.');
+    // Start from the exact loaded object so fields outside the current UI,
     // including namespaced extensions, cannot be lost by an unrelated edit.
     const mainBridge: Record<string, any> = deepCopy(publishedDocument);
     const originalRows = editorRowsFromCanonical(publishedDocument);
@@ -687,40 +687,30 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
 
   const downloadPublishedRevisionPackage = async () => {
     if (!publishedRevisionId || !selectedBridge) {
-      setMessage({ type: 'error', text: 'Reload the exact published revision before exporting.' });
+      setMessage({ type: 'error', text: 'Reload the exact inventory snapshot before exporting.' });
       return;
     }
     setDownloadingRevision(true);
     try {
-      const response = await axios.post(
-        `/api/revisions/${encodeURIComponent(publishedRevisionId)}/exports`,
-        {
-          export_kind: 'canonical_profile',
-          profile_id: 'research_snbi_export_v1',
-          agency_id: 'NJDOT',
-          exported_at: new Date().toISOString(),
-        },
-        { responseType: 'blob' },
+      const payload = new Blob(
+        [JSON.stringify([publishedDocument], null, 2)],
+        { type: 'application/json' },
       );
-      const disposition = String(response.headers['content-disposition'] || '');
-      const match = disposition.match(/filename="([^"\r\n]+)"/i);
-      const fallback = `${buildBaseFileName()}_${selectedExportYear ?? selectedBridge.data_year}_published.zip`;
-      triggerFileDownload(response.data, match?.[1] || fallback);
+      const fileName = `${buildBaseFileName()}_${selectedExportYear ?? selectedBridge.data_year}_inventory.json`;
+      triggerFileDownload(payload, fileName);
       setMessage({
         type: 'success',
-        text: 'Downloaded the immutable published revision package with its server manifest.',
+        text: 'Downloaded the exact loaded inventory snapshot as SNBI JSON.',
       });
     } catch (err: any) {
-      console.error('Failed to download revision export:', err);
-      setMessage({ type: 'error', text: 'Failed to download the published revision package.' });
+      console.error('Failed to download inventory snapshot:', err);
+      setMessage({ type: 'error', text: 'Failed to download the inventory snapshot.' });
     } finally {
       setDownloadingRevision(false);
     }
   };
 
-  // Load the bridge selector only from active canonical publication pointers.
-  // Pages are generation-bound by the server, preventing a mixed selector if
-  // another editor publishes while this bounded list is being assembled.
+  // Load the selector directly from exact yearly inventory rows.
   useEffect(() => {
     if (!selectedStateCode || selectedExportYear === null) {
       setBridges([]);
@@ -731,51 +721,18 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     const fetchBridges = async () => {
       setLoading(true);
       try {
-        const rows: Bridge[] = [];
-        let cursor: string | null = null;
-        let generation: number | null = null;
-        const seenCursors = new Set<string>();
-        for (let page = 0; page < 20; page += 1) {
-          const response: AxiosResponse<any> = await axios.get('/api/revisions/snapshots', {
-            params: {
-              state_code: selectedStateCode,
-              data_year: selectedExportYear,
-              limit: 500,
-              cursor: cursor || undefined,
-            },
-          });
-          const responseGeneration = Number(response.data?.data_generation);
-          const headerGeneration = Number(response.headers['x-bridgeguard-data-version']);
-          if (
-            !Number.isSafeInteger(responseGeneration)
-            || responseGeneration < 0
-            || responseGeneration !== headerGeneration
-            || (generation !== null && generation !== responseGeneration)
-          ) {
-            throw new Error('Published snapshot generation changed while loading. Retry the selector.');
-          }
-          generation = responseGeneration;
-          const pageRows = Array.isArray(response.data?.snapshots) ? response.data.snapshots : [];
-          rows.push(...pageRows);
-          const next: unknown = response.data?.next_cursor;
-          if (!next) {
-            if (!cancelled) setBridges(rows);
-            return;
-          }
-          if (typeof next !== 'string' || seenCursors.has(next)) {
-            throw new Error('Published snapshot pagination metadata is invalid.');
-          }
-          seenCursors.add(next);
-          cursor = next;
-        }
-        throw new Error('More than 10,000 published bridges matched this selector. Narrow the state/year scope.');
+        const response: AxiosResponse<any> = await axios.get('/api/bridge-snapshots', {
+          params: { state_code: selectedStateCode, year: selectedExportYear, limit: 10000 },
+        });
+        const rows = Array.isArray(response.data?.snapshots) ? response.data.snapshots : [];
+        if (!cancelled) setBridges(rows);
       } catch (err) {
         console.error(err);
         if (!cancelled) {
           setBridges([]);
           setMessage({
             type: 'error',
-            text: err instanceof Error ? err.message : 'Failed to load published bridges',
+            text: err instanceof Error ? err.message : 'Failed to load inventory bridges',
           });
         }
       } finally {
@@ -787,19 +744,17 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     return () => { cancelled = true; };
   }, [selectedStateCode, selectedExportYear]);
 
-  // Year facets come from the same workspace-scoped publication registry.
+  // Year facets come directly from the loaded bridge snapshots.
   useEffect(() => {
     if (!selectedStateCode) {
       setAvailableYears([]);
       setSelectedExportYear(null);
       return;
     }
-    axios.get('/api/revisions/snapshots', {
-      params: { state_code: selectedStateCode, limit: 1 },
-    })
+    axios.get(`/api/available-years/${selectedStateCode}`)
       .then((res) => {
-        const years = Array.isArray(res.data?.available_data_years)
-          ? res.data.available_data_years.filter((year: unknown) => Number.isSafeInteger(year))
+        const years = Array.isArray(res.data?.years)
+          ? res.data.years.filter((year: unknown) => Number.isSafeInteger(year))
           : [];
         setAvailableYears(years);
         setSelectedExportYear(years[0] ?? null);
@@ -835,22 +790,21 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
         throw new Error('Select an exact inventory year before editing.');
       }
       const response = await axios.get(
-        `/api/revisions/snapshots/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}/${snapshotYear}`,
+        `/api/bridge-document/${bridge.state_code}/${encodeURIComponent(bridge.bridge_number)}/${snapshotYear}`,
       );
       if (requestId !== loadRequestIdRef.current) return;
       const canonical = response.data?.canonical_document;
-      if (!isPlainObject(canonical)) throw new Error('Published canonical revision is unavailable.');
-      const revisionId = String(response.data?.revision_id || '');
+      if (!isPlainObject(canonical)) throw new Error('Loaded inventory snapshot is unavailable.');
+      const revisionId = String(response.data?.snapshot_id || '');
       const etag = String(response.headers.etag || '');
-      const generation = Number(response.headers['x-bridgeguard-data-version']);
+      const generation = Number(response.data?.data_generation);
       if (
         !revisionId
-        || (bridge.revision_id && revisionId !== bridge.revision_id)
         || !/^"[^"\r\n]+"$/.test(etag)
         || !Number.isSafeInteger(generation)
         || generation < 0
       ) {
-        throw new Error('Published revision concurrency metadata is unavailable.');
+        throw new Error('Inventory snapshot concurrency metadata is unavailable.');
       }
       const editorRows = editorRowsFromCanonical(canonical);
       setPublishedDocument(deepCopy(canonical));
@@ -860,7 +814,11 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       setBridgeData(editorRows.main);
       setChildData(editorRows.children);
       setBridgeValidation(
-        revisionValidationForEditor(bridge, canonical, response.data?.validation_issues),
+        revisionValidationForEditor(
+          bridge,
+          canonical,
+          response.data?.validation?.issues || response.data?.validation?.validation_issues,
+        ),
       );
       await fetchFieldMetadata(bridge, snapshotYear, requestId);
 
@@ -895,13 +853,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
 
   const handleSaveMainBridge = async () => {
     if (!selectedBridge || !bridgeData || !publishedDocument || !publishedEtag || dataGeneration === null || selectedExportYear === null) {
-      setMessage({ type: 'error', text: 'Reload the exact published revision before staging edits.' });
-      return;
-    }
-
-    const reason = window.prompt('Briefly describe why this revision is being staged:')?.trim();
-    if (!reason) {
-      setMessage({ type: 'info', text: 'No revision was staged because a change reason is required.' });
+      setMessage({ type: 'error', text: 'Reload the exact inventory snapshot before saving edits.' });
       return;
     }
 
@@ -922,34 +874,38 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
     setLastRevisionDiff([]);
     setStagedValidation(null);
     setStagedValidationIssues([]);
-    setMessage({ type: 'info', text: 'Validating and staging the complete canonical bridge revision...' });
+    setMessage({ type: 'info', text: 'Validating and saving the complete yearly inventory snapshot...' });
     try {
-      const requestId = crypto.randomUUID();
-      const response = await axios.patch(
-        `/api/revisions/snapshots/${selectedBridge.state_code}/${encodeURIComponent(selectedBridge.bridge_number)}/${selectedExportYear}`,
-        { patch, reason, expected_data_generation: dataGeneration },
+      const response = await axios.put(
+        `/api/bridge-document/${selectedBridge.state_code}/${encodeURIComponent(selectedBridge.bridge_number)}/${selectedExportYear}`,
+        { canonical_document: canonicalDocument, expected_data_generation: dataGeneration },
         {
           headers: {
             'If-Match': publishedEtag,
-            'Idempotency-Key': crypto.randomUUID(),
-            'X-Request-ID': requestId,
           },
         },
       );
-      const diff = Array.isArray(response.data?.diff) ? response.data.diff : [];
-      const issues = Array.isArray(response.data?.validation_issues) ? response.data.validation_issues : [];
-      setLastRevisionDiff(diff);
+      const savedDocument = response.data?.canonical_document;
+      const issues = response.data?.validation?.issues || response.data?.validation?.validation_issues || [];
+      if (isPlainObject(savedDocument)) {
+        const editorRows = editorRowsFromCanonical(savedDocument);
+        setPublishedDocument(deepCopy(savedDocument));
+        setBridgeData(editorRows.main);
+        setChildData(editorRows.children);
+      }
+      setPublishedEtag(String(response.headers.etag || publishedEtag));
+      setDataGeneration(Number(response.data?.data_generation ?? dataGeneration));
       setStagedValidation(response.data?.validation || { status: 'unknown' });
-      setStagedValidationIssues(issues);
+      setStagedValidationIssues(Array.isArray(issues) ? issues : []);
       setMessage({
         type: 'success',
-        text: `Staged revision ${response.data?.revision_number ?? ''} with ${diff.length} canonical change${diff.length === 1 ? '' : 's'}. It is not published; review its validation evidence and publish it from the revision workflow.`,
+        text: `Saved the ${selectedExportYear} inventory snapshot directly to snbi_bridges.db. History, forecasts, LCCA, KPIs, maps, and Bridgette now read this updated row.`,
       });
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       const text = typeof detail === 'string'
         ? detail
-        : detail?.message || detail?.code || err.message || 'Failed to stage the revision';
+        : detail?.message || detail?.code || err.message || 'Failed to save the inventory snapshot';
       setMessage({ type: 'error', text });
     } finally {
       setSaving(false);
@@ -971,7 +927,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
   };
 
   // Append a canonical SNBI row for the active collection. It remains local
-  // until the complete bridge document is staged through the revision API.
+  // until the complete exact-year bridge document is saved.
   const addChildRow = () => {
     const template = Object.fromEntries(
       Array.from(TABLE_ALLOWED_SNBI_KEYS[activeTab] || []).map((tag) => [tag, '']),
@@ -1086,7 +1042,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
               </p>
             </div>
             <div className="max-w-md rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-800 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-200">
-              Bulk legacy-projection downloads are disabled. Select a bridge to download its immutable published revision package and server-generated manifest.
+              Select a bridge to edit or download its exact yearly SNBI inventory snapshot.
             </div>
           </div>
         </div>
@@ -1167,7 +1123,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                     className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800 disabled:opacity-50"
                   >
                     {downloadingRevision ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    {downloadingRevision ? 'Preparing Package…' : 'Published Package'}
+                    {downloadingRevision ? 'Preparing JSON…' : 'Inventory JSON'}
                   </button>
                   <button
                     onClick={handleSaveMainBridge}
@@ -1175,7 +1131,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                     className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white px-5 py-2 rounded-xl font-semibold shadow-sm disabled:opacity-70 transition-all"
                   >
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    {saving ? "Staging…" : "Stage All Edits"}
+                    {saving ? "Saving…" : "Save All Edits"}
                   </button>
                 </div>
               </div>
@@ -1245,7 +1201,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                     className="flex items-center gap-2 text-sm text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-3 py-2 rounded-xl border border-violet-200 dark:border-violet-800 disabled:opacity-50"
                   >
                     {downloadingRevision ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    {downloadingRevision ? 'Preparing Package…' : 'Published Package'}
+                    {downloadingRevision ? 'Preparing JSON…' : 'Inventory JSON'}
                   </button>
                   <button
                     onClick={addChildRow}
@@ -1259,7 +1215,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
                     className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-xl font-semibold shadow-sm disabled:opacity-70"
                   >
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    {saving ? 'Staging…' : 'Stage All Edits'}
+                    {saving ? 'Saving…' : 'Save All Edits'}
                   </button>
                 </div>
               </div>
@@ -1388,7 +1344,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       )}
       {lastRevisionDiff.length > 0 && (
         <div className="rounded-2xl border border-violet-200 bg-violet-50 p-5 text-violet-900 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-100">
-          <p className="font-semibold">Staged canonical diff</p>
+          <p className="font-semibold">Saved snapshot changes</p>
           <ul className="mt-2 max-h-48 space-y-1 overflow-auto text-xs font-mono">
             {lastRevisionDiff.slice(0, 100).map((change, index) => (
               <li key={`${change.path || 'change'}-${index}`}>

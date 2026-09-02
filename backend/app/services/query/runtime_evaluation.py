@@ -804,7 +804,7 @@ def _run_case(
             request_id=new_request_id(),
             owner_id=f"benchmark-{case.category}",
             workspace_id=case.scope.workspace_id,
-            allowed_relations=catalog.query_columns_by_relation,
+            allowed_relations=catalog.sandbox_relation_allowlist,
             allowed_functions=(
                 function.sql_name.casefold() for function in catalog.functions
             ),
@@ -1024,7 +1024,7 @@ def _run_security_probes(
             request_id=new_request_id(),
             owner_id="row-cap-owner",
             workspace_id=stress_scope.workspace_id,
-            allowed_relations=catalog.query_columns_by_relation,
+            allowed_relations=catalog.sandbox_relation_allowlist,
             allowed_functions=(function.sql_name for function in catalog.functions),
             policy=SandboxPolicy(max_rows=7, fetch_size=4),
             registry=RequestRegistry(),
@@ -1046,7 +1046,7 @@ def _run_security_probes(
                 request_id=new_request_id(),
                 owner_id="byte-cap-owner",
                 workspace_id=case.scope.workspace_id,
-                allowed_relations=catalog.query_columns_by_relation,
+                allowed_relations=catalog.sandbox_relation_allowlist,
                 allowed_functions=(function.sql_name for function in catalog.functions),
                 policy=SandboxPolicy(max_cell_bytes=1024, max_serialized_bytes=64),
                 registry=RequestRegistry(),
@@ -1070,7 +1070,7 @@ def _run_security_probes(
                 request_id=new_request_id(),
                 owner_id="vm-cap-owner",
                 workspace_id="stress-workspace",
-                allowed_relations=catalog.query_columns_by_relation,
+                allowed_relations=catalog.sandbox_relation_allowlist,
                 allowed_functions=(function.sql_name for function in catalog.functions),
                 policy=SandboxPolicy(
                     deadline_seconds=2,
@@ -1098,7 +1098,7 @@ def _run_security_probes(
                 request_id=new_request_id(),
                 owner_id="deadline-owner",
                 workspace_id="stress-workspace",
-                allowed_relations=catalog.query_columns_by_relation,
+                allowed_relations=catalog.sandbox_relation_allowlist,
                 allowed_functions=(function.sql_name for function in catalog.functions),
                 policy=SandboxPolicy(
                     deadline_seconds=0.001,
@@ -1134,7 +1134,7 @@ def _run_security_probes(
                     request_id=request_id,
                     owner_id="cancellation-owner",
                     workspace_id="stress-workspace",
-                    allowed_relations=catalog.query_columns_by_relation,
+                    allowed_relations=catalog.sandbox_relation_allowlist,
                     allowed_functions=(function.sql_name for function in catalog.functions),
                     policy=SandboxPolicy(
                         deadline_seconds=2,
@@ -1230,7 +1230,7 @@ def _run_security_probes(
                 request_id=new_request_id(),
                 owner_id=f"concurrent-owner-{index}",
                 workspace_id=workspace,
-                allowed_relations=scoped_catalog.query_columns_by_relation,
+                allowed_relations=scoped_catalog.sandbox_relation_allowlist,
                 allowed_functions=(
                     function.sql_name for function in scoped_catalog.functions
                 ),

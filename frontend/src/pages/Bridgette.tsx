@@ -11,11 +11,13 @@ import {
 import {
   bridgetteStreamPath,
   cancelBridgetteRequest,
+  clarificationDraft,
   newBridgetteRequestId,
   readBridgetteStream,
+  type BridgetteClarificationOption,
 } from '../lib/bridgetteStream';
 import { useDataGenerationEpoch } from '../lib/dataGeneration';
-import { BridgetteQueryDetails } from '../components/BridgetteEvidence';
+import { BridgetteAnswerStatus, BridgetteQueryDetails } from '../components/BridgetteEvidence';
 
 interface Turn {
   question: string;
@@ -44,6 +46,7 @@ const Bridgette: React.FC = () => {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const dataGenerationEpoch = useDataGenerationEpoch();
@@ -122,6 +125,11 @@ const Bridgette: React.FC = () => {
             });
             break;
           case 'clarification':
+            setInput((current) => current.trim() ? current : clarificationDraft(question));
+            setTimeout(() => inputRef.current?.focus(), 0);
+            answer = typeof event.message === 'string' ? event.message : 'More information is needed.';
+            update({ loading: false, answer, decision: event.type, evidence: event });
+            break;
           case 'abstention':
             answer = typeof event.message === 'string' ? event.message : 'More information is needed.';
             update({ loading: false, answer, decision: event.type, evidence: event });
@@ -205,6 +213,7 @@ const Bridgette: React.FC = () => {
                 {t.stale && <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-600">Outdated inventory answer</div>}
                 {t.loading && <div className="flex items-center gap-2 text-slate-500 text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Querying the database…</div>}
                 {t.error && <div className="rounded-2xl bg-red-500/10 text-red-500 px-4 py-2.5 text-sm">{t.error}</div>}
+                <BridgetteAnswerStatus evidence={t.evidence} />
                 {t.answer && (
                   <div className="rounded-2xl rounded-tl-sm glass border border-slate-200/70 dark:border-slate-700/70 px-4 py-2.5 text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap">{t.answer}</div>
                 )}
@@ -226,10 +235,13 @@ const Bridgette: React.FC = () => {
                 )}
                 {t.decision && Array.isArray(t.evidence?.options) && (
                   <div className="flex flex-wrap gap-2">
-                    {(t.evidence.options as Array<{ id?: string; label?: string }>).map((option) => (
+                    {(t.evidence.options as BridgetteClarificationOption[]).map((option) => (
                       <button
                         key={String(option.id ?? option.label)}
-                        onClick={() => ask(`${t.question} — ${String(option.label ?? option.id)}`)}
+                        onClick={() => {
+                          setInput(clarificationDraft(t.question, option));
+                          setTimeout(() => inputRef.current?.focus(), 0);
+                        }}
                         className="text-xs px-3 py-1.5 rounded-lg border border-brand-300 text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-500/10"
                       >
                         {String(option.label ?? option.id)}
@@ -248,6 +260,7 @@ const Bridgette: React.FC = () => {
       {/* Composer */}
       <div className="shrink-0 mt-4 flex items-end gap-2">
         <textarea
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(input); } }}

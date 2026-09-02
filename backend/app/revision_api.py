@@ -414,6 +414,7 @@ def _stage_server_documents(
     write_mode: Literal["create_only", "replace_snapshot"] = "replace_snapshot",
     request_metadata: Mapping[str, Any] | None = None,
     expected_latest_by_key: Mapping[tuple[int, str, int], str | None] | None = None,
+    project_to_inventory: bool = False,
 ):
     """Build server validation/evidence and atomically stage canonical documents."""
 
@@ -486,6 +487,7 @@ def _stage_server_documents(
             revisions=tuple(revisions),
             write_mode=write_mode,
             request_metadata=request_metadata,
+            project_to_inventory=project_to_inventory,
         ),
     )
 
@@ -504,6 +506,7 @@ def stage_server_documents(
     write_mode: Literal["create_only", "replace_snapshot"] = "replace_snapshot",
     request_metadata: Mapping[str, Any] | None = None,
     expected_latest_by_key: Mapping[tuple[int, str, int], str | None] | None = None,
+    project_to_inventory: bool = False,
 ):
     """Internal adapter used by non-HTTP compatibility ingestion paths."""
 
@@ -526,6 +529,7 @@ def stage_server_documents(
         write_mode=write_mode,
         request_metadata=request_metadata,
         expected_latest_by_key=expected_latest_by_key,
+        project_to_inventory=project_to_inventory,
     )
 
 

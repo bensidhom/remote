@@ -47,6 +47,8 @@ class LccaSimulationBody(BaseModel):
     nominal_discount_rate: Decimal | None = Field(default=None, gt=Decimal("-1"), le=Decimal("1"))
     inflation_rate: Decimal | None = Field(default=None, gt=Decimal("-1"), le=Decimal("1"))
     condition_threshold: float = Field(default=4.5, ge=0, le=9)
+    rehabilitation_year: int | None = Field(default=None, ge=1900, le=2200)
+    replacement_year: int | None = Field(default=None, ge=1900, le=2200)
     action_costs: dict[str, Decimal] = Field(default_factory=dict)
     explicit_actions: list[ExplicitActionBody] = Field(default_factory=list, max_length=200)
     enable_research_effect_assumptions: bool = False
@@ -190,7 +192,7 @@ async def simulate_bridge_lcca(body: LccaSimulationBody):
             through_year=body.as_of_year,
         )
         if history.snapshots[-1].identity.data_generation != body.expected_data_generation:
-            raise SimulationInputError("published data changed; refresh and retry")
+            raise SimulationInputError("inventory data changed; refresh and retry")
         mode = EconomicMode(body.economic_mode)
         economics = EconomicAssumptions(
             mode=mode,
@@ -215,6 +217,8 @@ async def simulate_bridge_lcca(body: LccaSimulationBody):
                 for item in body.explicit_actions
             ),
             condition_threshold=body.condition_threshold,
+            rehabilitation_year=body.rehabilitation_year,
+            replacement_year=body.replacement_year,
             enable_research_effect_assumptions=body.enable_research_effect_assumptions,
             require_released_forecast=_commercial_required(),
         )

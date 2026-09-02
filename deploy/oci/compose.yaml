@@ -38,11 +38,14 @@ services:
       - path: ${BRIDGEGUARD_ENV_FILE:-/etc/bridgeguard/bridgeguard.env}
     environment:
       BRIDGEGUARD_ENV: production
-      # This repository and OCI stack are research-only. Keep commercial and
-      # scientific-publication interlocks out of the deploy path while the UI
-      # continues to label derived outputs as screening/research evidence.
+      # This repository and OCI stack are research-only. Exact yearly rows in
+      # snbi_bridges.db are the application snapshots; derived model outputs
+      # remain explicitly labeled as screening/research evidence.
       BRIDGEGUARD_DEPLOYMENT_MODE: research_shared
       BRIDGEGUARD_REQUIRE_COMMERCIAL_READY: "false"
+      # Bridgette uses the reviewed typed planner in OCI. This service-level
+      # value intentionally overrides stale raw-schema settings in env files.
+      BRIDGEGUARD_QUERY_MODE: hybrid
       # Workspace identity, worker count, and role lists come only
       # from BRIDGEGUARD_ENV_FILE. Service-level environment values override
       # env_file values, so do not mirror those values here with host-shell

@@ -20,7 +20,11 @@ def test_program_approval_note_is_a_strict_json_body_not_a_query_parameter():
     assert [item["name"] for item in operation.get("parameters", [])] == ["source_id"]
 
     frontend = (ROOT / "frontend/src/pages/Kpis.tsx").read_text(encoding="utf-8")
-    assert "{ review_note: reviewNote.trim() }" in frontend
+    # Program Delivery is intentionally absent from the SNBI-derived KPI UI.
+    # Keep the server-side body contract above, but do not require a removed
+    # approval form or its request payload in the current dashboard.
+    assert "review_note: reviewNote.trim()" not in frontend
+    assert "/api/analytics/kpis/program/sources/" not in frontend
     assert "params: { review_note" not in frontend
 
 
@@ -29,4 +33,3 @@ def test_program_import_is_bounded_before_multipart_spooling_and_kpi_header_is_e
     assert MAX_PROGRAM_KPI_BYTES == 5 * 1024 * 1024
     assert '"/api/analytics/kpis/program/import": MAX_PROGRAM_KPI_BYTES + (2 * 1024 * 1024)' in main
     assert '"X-BridgeGuard-KPI-Definition"' in main
-

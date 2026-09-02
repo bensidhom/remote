@@ -944,6 +944,68 @@ def _migration_0013_create_current_deck_material_query_view(
     )
 
 
+def _migration_0014_allow_loaded_inventory_in_planning(
+    connection: sqlite3.Connection,
+) -> None:
+    # Rebuild the reviewed query boundary as one coherent dependency graph.
+    # The compatibility resource names remain stable for stored plans, while
+    # their rows now prefer governed publication pointers and fill any gaps
+    # from the loaded bridge projection.
+    for view in reversed(QUERY_SEMANTIC_VIEWS):
+        connection.execute(f'DROP VIEW IF EXISTS "{view.name}"')
+    for view in QUERY_SEMANTIC_VIEWS:
+        connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (14,),
+    )
+
+
+def _migration_0015_make_loaded_inventory_authoritative(
+    connection: sqlite3.Connection,
+) -> None:
+    """Rebuild compatibility views from exact yearly inventory rows only."""
+
+    for view in reversed(QUERY_SEMANTIC_VIEWS):
+        connection.execute(f'DROP VIEW IF EXISTS "{view.name}"')
+    for view in QUERY_SEMANTIC_VIEWS:
+        connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (15,),
+    )
+
+
+def _migration_0016_finalize_loaded_inventory_views(
+    connection: sqlite3.Connection,
+) -> None:
+    """Finalize named synthetic identities in the loaded-only view graph."""
+
+    for view in reversed(QUERY_SEMANTIC_VIEWS):
+        connection.execute(f'DROP VIEW IF EXISTS "{view.name}"')
+    for view in QUERY_SEMANTIC_VIEWS:
+        connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (16,),
+    )
+
+
+def _migration_0017_apply_snbi_component_condition_semantics(
+    connection: sqlite3.Connection,
+) -> None:
+    """Rebuild condition views using the minimum applicable B.C.01--B.C.04."""
+
+    for view in reversed(QUERY_SEMANTIC_VIEWS):
+        connection.execute(f'DROP VIEW IF EXISTS "{view.name}"')
+    for view in QUERY_SEMANTIC_VIEWS:
+        connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (17,),
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -1106,6 +1168,49 @@ MIGRATIONS: tuple[Migration, ...] = (
             "advance schema generation without changing data generation",
         ),
         operation=_migration_0013_create_current_deck_material_query_view,
+    ),
+    Migration(
+        version=14,
+        name="allow_loaded_inventory_in_planning",
+        descriptor=(
+            "prefer governed published snapshot pointers when the workspace state has them",
+            "include all loaded legacy bridge rows when the workspace state has no publication pointers",
+            "expose child, condition, county, span, and deck data through the same reviewed semantic boundary",
+            "define latest as the single global latest available inventory year for the authorized state",
+            "preserve stable semantic resource identifiers and advance schema generation without changing data generation",
+        ),
+        operation=_migration_0014_allow_loaded_inventory_in_planning,
+    ),
+    Migration(
+        version=15,
+        name="make_loaded_inventory_authoritative",
+        descriptor=(
+            "treat every exact state, bridge, and inventory-year row as an authoritative application snapshot",
+            "remove published snapshot pointers from active semantic-view selection",
+            "preserve stable semantic resource identifiers for query-plan compatibility",
+            "define current data from the latest loaded inventory year and advance schema generation",
+        ),
+        operation=_migration_0015_make_loaded_inventory_authoritative,
+    ),
+    Migration(
+        version=16,
+        name="finalize_loaded_inventory_views",
+        descriptor=(
+            "rebuild the loaded-only semantic view graph with explicitly named synthetic row identities",
+            "keep exact state, bridge, and inventory-year rows authoritative",
+            "advance schema generation without changing inventory data",
+        ),
+        operation=_migration_0016_finalize_loaded_inventory_views,
+    ),
+    Migration(
+        version=17,
+        name="apply_snbi_component_condition_semantics",
+        descriptor=(
+            "treat SNBI N condition codes as not applicable",
+            "calculate bridge condition from the minimum applicable B.C.01 through B.C.04 rating",
+            "use FHWA-calculated B.C.13 only when component ratings are unavailable",
+        ),
+        operation=_migration_0017_apply_snbi_component_condition_semantics,
     ),
 )
 

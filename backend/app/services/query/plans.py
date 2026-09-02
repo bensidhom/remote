@@ -989,12 +989,14 @@ def validate_bridge_query_plan(
             "current_resource_requires_latest",
             "Current-snapshot resources can only be used with latest time mode",
         )
-    if resource.grain is ResourceGrain.COUNTY_INVENTORY and plan.time_scope.mode is TimeMode.LATEST:
+    if (
+        resource.resource_id == "v_county_bridge_inventory"
+        and plan.time_scope.mode is TimeMode.LATEST
+    ):
         raise PlanValidationError(
-            "latest_requires_bridge_identity",
-            "Exact-year aggregate resources cannot infer per-bridge latest semantics",
+            "latest_county_requires_current",
+            "Latest county summaries must use v_current_county_bridge_inventory",
         )
-
     for dimension in dimensions:
         for metric in metrics:
             if dimension.qualified_id not in metric.allowed_dimensions:

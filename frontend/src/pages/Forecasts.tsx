@@ -23,8 +23,8 @@ interface EvaluationSummary {
 interface ForecastSummary {
   data_generation: number;
   schema_generation: number;
-  published_observations: number;
-  published_bridges: number;
+  loaded_observations: number;
+  loaded_bridges: number;
   available_years: number[];
   latest_package: null | {
     model_version_id: string;
@@ -125,7 +125,7 @@ const Forecasts: React.FC = () => {
       setSummary(summaryResponse.data);
       setBridges(bridgeResponse.data.bridges || []);
     } catch (error: any) {
-      setMessage({ type: 'error', text: detailText(error, 'Could not load published forecast data.') });
+      setMessage({ type: 'error', text: detailText(error, 'Could not load inventory forecast data.') });
     } finally {
       setLoading(false);
     }
@@ -161,7 +161,7 @@ const Forecasts: React.FC = () => {
     const throughYear = Math.max(...summary.available_years);
     const origins = summary.available_years.filter((year) => year < throughYear).slice(-6);
     if (!origins.length) {
-      setMessage({ type: 'error', text: 'At least two published inventory years are required for historical validation.' });
+      setMessage({ type: 'error', text: 'At least two loaded inventory years are required for historical validation.' });
       return;
     }
     setLoading(true);
@@ -278,20 +278,20 @@ const Forecasts: React.FC = () => {
       <SectionHeader
         icon={<BrainCircuit className="w-6 h-6" />}
         title="Bridge Forecasts"
-        subtitle="Annual action-aware Markov v2 · published snapshots only · LCCA deterioration source"
+        subtitle="Annual action-aware Markov v2 · exact yearly inventory snapshots · LCCA deterioration source"
       />
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
         <section className="glass rounded-3xl p-6 border border-gray-200 dark:border-gray-700">
           <div className="flex justify-between items-center mb-4">
-            <h2 className="font-semibold text-lg">Published source</h2>
+            <h2 className="font-semibold text-lg">Inventory source</h2>
             <button onClick={refresh} className="p-2 rounded-xl hover:bg-gray-100" aria-label="Refresh forecast data">
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <Stat label="Bridge-years" value={summary?.published_observations || 0} />
-            <Stat label="Bridges" value={summary?.published_bridges || 0} />
+            <Stat label="Bridge-years" value={summary?.loaded_observations || 0} />
+            <Stat label="Bridges" value={summary?.loaded_bridges || 0} />
             <Stat label="Data generation" value={summary?.data_generation || 0} />
             <div className="rounded-2xl bg-slate-50 dark:bg-slate-900 p-4">
               <p className="text-xs text-slate-500">Years</p>
