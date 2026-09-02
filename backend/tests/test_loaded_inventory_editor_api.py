@@ -36,6 +36,7 @@ def test_editor_reads_and_replaces_one_exact_yearly_inventory_document(tmp_path,
     loaded = main.get_loaded_bridge_document(34, "EDIT-1", 2025)
     payload = json.loads(bytes(loaded.body))
     assert payload["snapshot_id"] == "loaded-inventory:34:EDIT-1:2025"
+    assert payload["etag"] == loaded.headers["etag"]
     assert payload["canonical_document"]["BID02"] == "Original"
     assert payload["canonical_document"]["BC01"] == "6"
     assert payload["validation"]["summary"]["legacy_bridges"] == 1
@@ -61,6 +62,7 @@ def test_editor_reads_and_replaces_one_exact_yearly_inventory_document(tmp_path,
     )
     saved_payload = json.loads(bytes(saved.body))
     assert saved_payload["canonical_document"]["BID02"] == "Updated"
+    assert saved_payload["etag"] == saved.headers["etag"]
     assert saved.headers["etag"] != loaded.headers["etag"]
 
     connection = sqlite3.connect(database)

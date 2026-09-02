@@ -796,7 +796,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
       const canonical = response.data?.canonical_document;
       if (!isPlainObject(canonical)) throw new Error('Loaded inventory snapshot is unavailable.');
       const revisionId = String(response.data?.snapshot_id || '');
-      const etag = String(response.headers.etag || '');
+      const etag = String(response.data?.etag || response.headers.etag || '');
       const generation = Number(response.data?.data_generation);
       if (
         !revisionId
@@ -893,7 +893,7 @@ const Editor: React.FC<{ initialStateCode?: number; initialBridgeNumber?: string
         setBridgeData(editorRows.main);
         setChildData(editorRows.children);
       }
-      setPublishedEtag(String(response.headers.etag || publishedEtag));
+      setPublishedEtag(String(response.data?.etag || response.headers.etag || publishedEtag));
       setDataGeneration(Number(response.data?.data_generation ?? dataGeneration));
       setStagedValidation(response.data?.validation || { status: 'unknown' });
       setStagedValidationIssues(Array.isArray(issues) ? issues : []);

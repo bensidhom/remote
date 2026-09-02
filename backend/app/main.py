@@ -3517,6 +3517,11 @@ def get_loaded_bridge_document(state_code: int, bridge_number: str, year: int):
         content={
             "canonical_document": document,
             "snapshot_id": f"loaded-inventory:{int(state_code)}:{str(bridge_number)}:{int(year)}",
+            # Keep the concurrency token in the body as well as the HTTP
+            # header. Reverse proxies may weaken or rewrite entity-tag
+            # headers, but the Editor must send the original strong token
+            # back in If-Match when saving.
+            "etag": etag,
             "data_generation": int(state[0]) if state else 0,
             "schema_generation": int(state[1]) if state else 0,
             "validation": clean_nan_values(

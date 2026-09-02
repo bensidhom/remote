@@ -20,6 +20,7 @@ def test_editor_loads_one_exact_inventory_document_and_its_version_headers():
     source = _source()
     assert "/api/bridge-document/${bridge.state_code}/" in source
     assert "response.data?.canonical_document" in source
+    assert "response.data?.etag || response.headers.etag" in source
     assert "response.headers.etag" in source
     assert "response.data?.data_generation" in source
     assert "setPublishedDocument(deepCopy(canonical))" in source
