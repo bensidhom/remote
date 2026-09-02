@@ -54,6 +54,25 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(role_for_email(email), "editor")
         self.assertIsNone(role_for_email("stranger@example.net"))
 
+    def test_authenticated_user_fallback_can_grant_editor_access(self):
+        with patch.dict(
+            os.environ,
+            {**ENV, "BRIDGEGUARD_AUTHENTICATED_USER_ROLE": "editor"},
+            clear=True,
+        ):
+            self.assertEqual(role_for_email("stranger@example.net"), "editor")
+            self.assertEqual(role_for_email("owner@example.com"), "admin")
+
+    def test_authenticated_user_fallback_rejects_privileged_or_unknown_roles(self):
+        for invalid_role in ("admin", "operator"):
+            with patch.dict(
+                os.environ,
+                {**ENV, "BRIDGEGUARD_AUTHENTICATED_USER_ROLE": invalid_role},
+                clear=True,
+            ):
+                with self.assertRaises(RuntimeError):
+                    role_for_email("stranger@example.net")
+
     def test_session_round_trip_and_tamper_rejection(self):
         token = issue_session(AuthUser("admin@example.com", "admin"), now=100)
         self.assertEqual(verify_session(token, now=101), AuthUser("admin@example.com", "admin"))
@@ -251,6 +270,43 @@ class AuthTests(unittest.TestCase):
             self.assertIn("nbf", required)
             self.assertIn("type", required)
             self.assertIn("sub", required)
+
+    def test_cloudflare_authenticated_user_receives_configured_fallback_role(self):
+        cloudflare_env = {
+            **ENV,
+            "BRIDGEGUARD_AUTH_MODE": "cloudflare",
+            "BRIDGEGUARD_AUTHENTICATED_USER_ROLE": "editor",
+            "CLOUDFLARE_ACCESS_TEAM_DOMAIN": "bridgeguard.cloudflareaccess.com",
+            "CLOUDFLARE_ACCESS_AUD": "test-audience",
+        }
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/api/auth/me",
+            "headers": [(b"cf-access-jwt-assertion", b"signed-token")],
+        })
+
+        class FakeKey:
+            key = "public-key"
+
+        class FakeClient:
+            def get_signing_key_from_jwt(self, token):
+                return FakeKey()
+
+        with patch.dict(os.environ, cloudflare_env, clear=True), \
+             patch("app.auth._jwks_client", return_value=FakeClient()), \
+             patch(
+                 "app.auth.jwt.decode",
+                 return_value={
+                     "email": "new.operator@example.net",
+                     "type": "app",
+                     "sub": "identity-subject",
+                 },
+             ):
+            self.assertEqual(
+                verify_cloudflare_request(request),
+                AuthUser("new.operator@example.net", "editor"),
+            )
 
     def test_cloudflare_rejects_global_or_service_identity_tokens(self):
         cloudflare_env = {

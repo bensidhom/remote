@@ -73,6 +73,7 @@ jobs:
       - name: Run release-critical backend tests
         run: >-
           python -m pytest
+          backend/tests/test_auth.py
           backend/tests/test_backup.py
           backend/tests/test_bridge_query_plan.py
           backend/tests/test_bridgette_snbi_question_bank.py

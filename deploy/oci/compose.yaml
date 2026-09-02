@@ -46,6 +46,9 @@ services:
       # Bridgette uses the reviewed typed planner in OCI. This service-level
       # value intentionally overrides stale raw-schema settings in env files.
       BRIDGEGUARD_QUERY_MODE: hybrid
+      # Temporary pilot policy: every identity authenticated by Cloudflare
+      # Access may use the shared editor. Explicit administrators stay admins.
+      BRIDGEGUARD_AUTHENTICATED_USER_ROLE: editor
       # Workspace identity, worker count, and role lists come only
       # from BRIDGEGUARD_ENV_FILE. Service-level environment values override
       # env_file values, so do not mirror those values here with host-shell

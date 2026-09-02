@@ -64,6 +64,19 @@ def _builtin_pilot_roles_enabled() -> bool:
     )
 
 
+def _authenticated_user_role() -> str | None:
+    """Optional fallback role for any identity verified by the auth provider."""
+
+    role = os.getenv("BRIDGEGUARD_AUTHENTICATED_USER_ROLE", "").strip().lower()
+    if not role:
+        return None
+    if role not in {"viewer", "editor"}:
+        raise RuntimeError(
+            "BRIDGEGUARD_AUTHENTICATED_USER_ROLE must be 'viewer' or 'editor'"
+        )
+    return role
+
+
 @dataclass(frozen=True)
 class AuthUser:
     email: str
@@ -120,6 +133,9 @@ def role_for_email(email: str) -> str | None:
         builtins_enabled and email in BUILTIN_EDITOR_EMAILS
     ):
         return "editor"
+    authenticated_role = _authenticated_user_role()
+    if authenticated_role is not None:
+        return authenticated_role
     allowed_emails = _csv("BRIDGEGUARD_ALLOWED_EMAILS")
     allowed_domains = {domain.lstrip("@") for domain in _csv("BRIDGEGUARD_ALLOWED_DOMAINS")}
     domain = email.rsplit("@", 1)[1]
