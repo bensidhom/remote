@@ -43,6 +43,7 @@ class _Snapshot:
     nbis_length: float | None
     total_length: float | None
     width: float | None
+    approach_width: float | None
     reported_area: float | None
     deck_condition_class: str | None
     superstructure_condition_class: str | None
@@ -101,6 +102,16 @@ def _rounded(value: float | None, quantum: str = "0.1") -> float | None:
     return float(Decimal(str(value)).quantize(Decimal(quantum), rounding=ROUND_HALF_UP))
 
 
+def _rounded_deck_area_product(length: float, width: float) -> float:
+    """Match SQLite ROUND(..., 1) used by the governed BG16 query view."""
+
+    return float(
+        Decimal.from_float(length * width).quantize(
+            Decimal("0.1"), rounding=ROUND_HALF_UP
+        )
+    )
+
+
 def _component_condition_class(value: object) -> str | None:
     rating = _number(value)
     if rating is None or not 0 <= rating <= 9:
@@ -130,13 +141,15 @@ def _detailed_condition_class(value: object) -> str | None:
 def _deck_area(snapshot: _Snapshot) -> tuple[float | None, str]:
     if snapshot.reported_area is not None and snapshot.reported_area > 0:
         return snapshot.reported_area, "reported_bg15"
-    if (
-        snapshot.total_length is not None
-        and snapshot.total_length > 0
-        and snapshot.width is not None
-        and snapshot.width > 0
-    ):
-        return snapshot.total_length * snapshot.width, "derived_bg02_times_bg05"
+    if snapshot.total_length is not None and snapshot.total_length > 0:
+        if snapshot.width is not None and snapshot.width > 0:
+            return _rounded_deck_area_product(
+                snapshot.total_length, snapshot.width
+            ), "derived_bg02_times_bg05"
+        if snapshot.approach_width is not None and snapshot.approach_width > 0:
+            return _rounded_deck_area_product(
+                snapshot.total_length, snapshot.approach_width
+            ), "derived_bg02_times_bg09"
     return None, "missing_or_invalid_geometry"
 
 
@@ -239,6 +252,11 @@ def _load(
                 nbis_length=_number(row["nbis_bridge_length"]),
                 total_length=_number(row["total_bridge_length"]),
                 width=_number(row["bridge_width_out_to_out"]),
+                approach_width=(
+                    _number(row["approach_roadway_width"])
+                    if "approach_roadway_width" in row.keys()
+                    else None
+                ),
                 reported_area=_number(row["calculated_deck_area"]),
                 deck_condition_class=_component_condition_class(row["deck_condition_rating"]),
                 superstructure_condition_class=_component_condition_class(row["superstructure_condition_rating"]),
@@ -289,7 +307,12 @@ def compute_operational_kpis(
     ages: list[int] = []
     older = 0
     areas: list[tuple[_Snapshot, float, str]] = []
-    area_methods = {"reported_bg15": 0, "derived_bg02_times_bg05": 0, "missing_or_invalid_geometry": 0}
+    area_methods = {
+        "reported_bg15": 0,
+        "derived_bg02_times_bg05": 0,
+        "derived_bg02_times_bg09": 0,
+        "missing_or_invalid_geometry": 0,
+    }
     aadt_complete = 0
     aadt_ambiguous = 0
     high_traffic = 0

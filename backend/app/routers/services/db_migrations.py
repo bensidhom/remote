@@ -1006,6 +1006,21 @@ def _migration_0017_apply_snbi_component_condition_semantics(
     )
 
 
+def _migration_0018_calculate_bg16_deck_area(
+    connection: sqlite3.Connection,
+) -> None:
+    """Expose governed BG16 deck area with its source method in query views."""
+
+    for view in reversed(QUERY_SEMANTIC_VIEWS):
+        connection.execute(f'DROP VIEW IF EXISTS "{view.name}"')
+    for view in QUERY_SEMANTIC_VIEWS:
+        connection.execute(view.sql)
+    connection.execute(
+        "UPDATE workspace_state SET schema_generation=?",
+        (18,),
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -1211,6 +1226,17 @@ MIGRATIONS: tuple[Migration, ...] = (
             "use FHWA-calculated B.C.13 only when component ratings are unavailable",
         ),
         operation=_migration_0017_apply_snbi_component_condition_semantics,
+    ),
+    Migration(
+        version=18,
+        name="calculate_bg16_deck_area",
+        descriptor=(
+            "preserve the raw reported BG16 deck area as separate query evidence",
+            "calculate missing BG16 from total bridge length and out-to-out width rounded to one decimal place",
+            "fall back to approach roadway width only when out-to-out width is unavailable",
+            "expose the selected deck-area calculation method and advance schema generation",
+        ),
+        operation=_migration_0018_calculate_bg16_deck_area,
     ),
 )
 

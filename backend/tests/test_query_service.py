@@ -642,6 +642,14 @@ def test_plan_context_has_all_snbi_fields_metrics_and_no_executable_sql():
         "planning_rule"
     ]
     assert "county_name" in payload["reference_mappings"]["planning_rule"]
+    assert "maximum_span_length" in payload["reference_mappings"][
+        "field_selection_rules"
+    ]
+    scalar_filter_rule = payload["reference_mappings"]["scalar_filter_rule"]
+    assert "selected_fields or dimensions" in scalar_filter_rule
+    assert "inventory.current_concrete_deck_bridge_count" in scalar_filter_rule
+    assert "v_current_bridge_snapshots.county_code" in scalar_filter_rule
+    assert "leading zeroes are removed" in scalar_filter_rule
     assert "workspace_id" in payload["plan_contract"]["forbidden_root_fields"]
     assert "sql" in payload["plan_contract"]["forbidden_root_fields"]
     assert "bridge_number" in payload["plan_contract"]["server_scope_filter_fields"]

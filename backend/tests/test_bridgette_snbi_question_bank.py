@@ -15,10 +15,21 @@ QUESTION_BANK_PATH = (
     / "query"
     / "bridgette_snbi_question_bank_v1.json"
 )
+DECK_AREA_QUESTION_BANK_PATH = (
+    Path(__file__).parents[1]
+    / "app"
+    / "data"
+    / "query"
+    / "bridgette_deck_area_question_bank_v1.json"
+)
 
 
 def _load_question_bank() -> dict[str, object]:
     return json.loads(QUESTION_BANK_PATH.read_text(encoding="utf-8"))
+
+
+def _load_deck_area_question_bank() -> dict[str, object]:
+    return json.loads(DECK_AREA_QUESTION_BANK_PATH.read_text(encoding="utf-8"))
 
 
 def test_snbi_question_bank_has_100_unique_sequential_cases() -> None:
@@ -40,6 +51,17 @@ def test_snbi_question_bank_behavior_distribution_is_intentional() -> None:
 
     assert dict(actual_counts) == payload["expected_behavior_counts"]
     assert actual_counts == {"answer": 81, "clarification": 14, "abstention": 5}
+
+
+def test_deck_area_question_bank_covers_nine_answer_phrasings() -> None:
+    cases = _load_deck_area_question_bank()["cases"]
+
+    assert [case["id"] for case in cases] == [
+        f"deck.{index:03d}" for index in range(1, 10)
+    ]
+    assert len({case["question"] for case in cases}) == 9
+    assert {case["expected_behavior"] for case in cases} == {"answer"}
+    assert {case["expected_code"] for case in cases} == {"ready_for_planning"}
 
 
 def test_snbi_question_bank_contract_fields_are_complete() -> None:
@@ -78,7 +100,6 @@ def test_uhpc_case_preserves_fhwa_errata_boundary() -> None:
 
 
 def test_answer_targets_resolve_to_reviewed_catalog_and_active_metrics() -> None:
-    payload = _load_question_bank()
     catalog = build_semantic_catalog(
         database_identity="question-bank-test",
         workspace_id="question-bank-test",
@@ -88,7 +109,11 @@ def test_answer_targets_resolve_to_reviewed_catalog_and_active_metrics() -> None
     resources = catalog.resources_by_id
     metrics = {metric.metric_id: metric for metric in DEFAULT_METRIC_REGISTRY.metrics}
 
-    for case in payload["cases"]:
+    cases = [
+        *_load_question_bank()["cases"],
+        *_load_deck_area_question_bank()["cases"],
+    ]
+    for case in cases:
         target_resource_id = case["target_resource"]
         if target_resource_id is not None:
             assert target_resource_id in resources, case["id"]

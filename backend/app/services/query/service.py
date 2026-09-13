@@ -89,7 +89,7 @@ from .sql_ast import (
 
 
 PROMPT_VERSION = "bridgette-semantic-query-v1"
-PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v2"
+PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v3"
 MAX_GENERATION_ATTEMPTS = 2
 MAX_QUERY_CONTEXT_BYTES = 256 * 1024
 # Keep planning prompts bounded while retaining the complete 154-field SNBI
@@ -249,11 +249,19 @@ def _plan_repair_instruction(code: str) -> str:
     guidance = {
         "client_scope_override": (
             "Remove every workspace, state, bridge, revision, and inventory-year "
-            "filter; the server already injected that scope."
+            "filter; the server already injected that scope. A named county is not "
+            "server scope: retain it only as the exact reviewed county_code field."
         ),
         "invalid_field_reference": (
             "Replace every field reference with an exact field_id or "
-            "resource_id.field_id from semantic_catalog columns."
+            "resource_id.field_id from semantic_catalog columns. Select only fields "
+            "that answer the question; maximum span length is maximum_span_length, "
+            "not span_continuity."
+        ),
+        "unknown_field": (
+            "Replace invented field names with exact semantic_catalog field_ids. For a "
+            "county FIPS restriction, use the reviewed county_code field (qualified by "
+            "the joined bridge resource when necessary), not county_fips or state_code."
         ),
         "unknown_resource": (
             "Choose resource_id exactly from semantic_catalog.resources[].id."
@@ -272,15 +280,19 @@ def _plan_repair_instruction(code: str) -> str:
             "Order only by a field or metric already present in the plan output."
         ),
         "aggregate_grain_error": (
-            "For an aggregate plan, make selected_fields exactly equal dimensions "
-            "and avoid joins that multiply the base-resource grain."
+            "For a scalar aggregate or count, keep selected_fields and dimensions "
+            "empty and put restrictions only in filters. For a requested breakdown, "
+            "make selected_fields exactly equal dimensions. Avoid joins that multiply "
+            "the base-resource grain."
         ),
         "intent_shape_mismatch": (
             "For list or lookup use selected_fields with empty metric_ids and "
             "dimensions; for aggregate intents use metrics and approved dimensions."
         ),
         "metric_required": (
-            "Select at least one active metric for count, aggregate, trend, or compare."
+            "Select at least one active metric whose source_resource equals resource_id "
+            "for count, aggregate, trend, or compare. For a scalar filtered result, keep "
+            "selected_fields and dimensions empty."
         ),
         "selected_field_required": (
             "Select at least one reviewed field for a list or lookup plan."
@@ -1032,6 +1044,20 @@ def build_plan_context(
         "planning_rule": (
             "For a latest/current question asking for results in each county, use "
             "v_current_county_bridge_inventory and return county_name, not only county_code."
+        ),
+        "field_selection_rules": (
+            "Match the requested semantic field exactly. 'Maximum span' means "
+            "maximum_span_length (BG03); span_continuity (BSP05) is a different fact."
+        ),
+        "scalar_filter_rule": (
+            "A field used only to restrict a scalar metric belongs in filters, not in "
+            "selected_fields or dimensions. For a current concrete-deck bridge count "
+            "filtered by a bridge attribute such as county_code, use resource_id "
+            "v_current_bridge_deck_material_summary, metric "
+            "inventory.current_concrete_deck_bridge_count, and the qualified filter "
+            "v_current_bridge_snapshots.county_code. County FIPS is stored in county_code "
+            "as an integer, so leading zeroes are removed; never add state_code because "
+            "the server already applies New Jersey scope."
         ),
     }
     selected_tags = dictionary_payload.get(

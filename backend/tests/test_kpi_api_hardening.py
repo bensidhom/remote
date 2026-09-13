@@ -33,3 +33,14 @@ def test_program_import_is_bounded_before_multipart_spooling_and_kpi_header_is_e
     assert MAX_PROGRAM_KPI_BYTES == 5 * 1024 * 1024
     assert '"/api/analytics/kpis/program/import": MAX_PROGRAM_KPI_BYTES + (2 * 1024 * 1024)' in main
     assert '"X-BridgeGuard-KPI-Definition"' in main
+
+
+def test_age_kpi_ui_offers_count_and_deck_area_from_matching_endpoints():
+    frontend = (ROOT / "frontend/src/pages/Kpis.tsx").read_text(encoding="utf-8")
+
+    assert "'/api/analytics/kpis/age-condition-counts'" in frontend
+    assert "'/api/analytics/kpis/age-condition-area'" in frontend
+    assert "include_unknown: false" in frontend
+    assert "ageMetric === 'deck_area' ? 'age_condition_area' : 'age_condition_counts'" in frontend
+    assert ">Bridge count</button>" in frontend
+    assert ">Deck area (ft²)</button>" in frontend

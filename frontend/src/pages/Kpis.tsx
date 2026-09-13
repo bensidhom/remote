@@ -104,6 +104,25 @@ interface AgeCountResponse {
   series: AgeCountRow[];
   excluded: Record<string, number>;
 }
+interface AgeAreaRow {
+  age_bin: string;
+  Good: number;
+  'Upper Fair': number;
+  'Lower Fair': number;
+  Poor: number;
+  total_ft2: number;
+}
+interface AgeAreaResponse {
+  year: number;
+  population: string;
+  include_unknown: boolean;
+  data_generation: number;
+  schema_generation: number;
+  revision_set_sha256: string;
+  definition_version: string;
+  series: AgeAreaRow[];
+  excluded: Record<string, number>;
+}
 interface FhwaResponse {
   label: string; definition_version: string; data_generation: number; revision_set_sha256: string;
   profile: { area_rule: string; source_title: string; source_url: string };
@@ -155,7 +174,7 @@ const area = (value: number | null | undefined) => value == null ? '—' : `${nu
 const tabs: { id: Tab; label: string }[] = [
   { id: 'inventory', label: 'Operational inventory' },
   { id: 'acceptable', label: 'Acceptable condition' },
-  { id: 'age-count', label: 'Bridge count by age' },
+  { id: 'age-count', label: 'Age by condition' },
   { id: 'fhwa', label: 'NHS deck condition' },
   { id: 'scenario', label: 'Future scenarios' },
 ];
@@ -166,6 +185,10 @@ const Kpis: React.FC = () => {
   const [year, setYear] = useState<number | null>(null);
   const [report, setReport] = useState<OperationalResponse | null>(null);
   const [ageReport, setAgeReport] = useState<AgeCountResponse | null>(null);
+  const [ageAreaReport, setAgeAreaReport] = useState<AgeAreaResponse | null>(null);
+  const [ageMetric, setAgeMetric] = useState<'count' | 'deck_area'>('count');
+  const [ageAreaLoading, setAgeAreaLoading] = useState(false);
+  const [ageAreaError, setAgeAreaError] = useState('');
   const [fhwaReport, setFhwaReport] = useState<FhwaResponse | null>(null);
   const [futureReport, setFutureReport] = useState<FutureConditionResponse | null>(null);
   const [futureScenarioId, setFutureScenarioId] = useState<FutureConditionScenario['scenario_id']>('historical_trend');
@@ -227,6 +250,25 @@ const Kpis: React.FC = () => {
   useEffect(() => {
     if (year == null) return;
     const controller = new AbortController();
+    setAgeAreaLoading(true);
+    setAgeAreaError('');
+    axios.get<AgeAreaResponse>('/api/analytics/kpis/age-condition-area', {
+      params: { state_code: NJ_STATE_CODE, year, population: agePopulation, include_unknown: false },
+      signal: controller.signal,
+    }).then((ages) => setAgeAreaReport(ages.data))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setAgeAreaReport(null);
+          setAgeAreaError('Deck-area-by-age data could not be loaded.');
+        }
+      })
+      .finally(() => { if (!controller.signal.aborted) setAgeAreaLoading(false); });
+    return () => controller.abort();
+  }, [year, agePopulation, dataGenerationEpoch]);
+
+  useEffect(() => {
+    if (year == null) return;
+    const controller = new AbortController();
     axios.get<FhwaResponse>('/api/analytics/kpis/fhwa-tpm', {
       params: { state_code: NJ_STATE_CODE, year }, signal: controller.signal,
     }).then((response) => setFhwaReport(response.data))
@@ -267,7 +309,7 @@ const Kpis: React.FC = () => {
   const exportPackage = async () => {
     if (year == null) return;
     const exportKinds: Partial<Record<Tab, string>> = {
-      inventory: 'operational', acceptable: 'acceptable_condition', 'age-count': 'age_condition_counts', fhwa: 'fhwa_tpm', scenario: 'future_condition',
+      inventory: 'operational', acceptable: 'acceptable_condition', 'age-count': ageMetric === 'deck_area' ? 'age_condition_area' : 'age_condition_counts', fhwa: 'fhwa_tpm', scenario: 'future_condition',
     };
     const exportKind = exportKinds[tab];
     if (!exportKind) return;
@@ -275,7 +317,7 @@ const Kpis: React.FC = () => {
     try {
       const response = await axios.post('/api/analytics/kpis/exports', {
         export_kind: exportKind, state_code: NJ_STATE_CODE, year,
-        population: agePopulation, horizon_years: 10,
+        population: agePopulation, include_unknown: false, horizon_years: 10,
       }, { responseType: 'blob' });
       const disposition = String(response.headers['content-disposition'] || '');
       const match = disposition.match(/filename="([^"]+)"/);
@@ -425,28 +467,49 @@ const Kpis: React.FC = () => {
             </div>
           )}
 
-          {tab === 'age-count' && ageReport && (
+          {tab === 'age-count' && (
             <div className="space-y-5">
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <select value={agePopulation} onChange={(event) => setAgePopulation(event.target.value as typeof agePopulation)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
                   <option value="statewide">Statewide loaded inventory</option>
                   <option value="state_maintained">State-maintained (B.CL.02 = S01)</option>
                 </select>
+                <div className="inline-flex rounded-xl border border-slate-300 bg-white p-1" role="group" aria-label="Age chart measure">
+                  <button type="button" aria-pressed={ageMetric === 'count'} onClick={() => setAgeMetric('count')} className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${ageMetric === 'count' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:text-slate-900'}`}>Bridge count</button>
+                  <button type="button" aria-pressed={ageMetric === 'deck_area'} onClick={() => setAgeMetric('deck_area')} className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${ageMetric === 'deck_area' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:text-slate-900'}`}>Deck area (ft²)</button>
+                </div>
               </div>
-              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <h2 className="font-semibold text-slate-900">Bridge count by age and condition</h2>
-                <p className="mt-1 text-xs text-slate-500">Age is inventory year {ageReport.year} minus the SNBI year built. The official Fair class is split into Upper Fair (rating 6) and Lower Fair (rating 5).</p>
-                <ResponsiveContainer width="100%" height={430}>
-                  <BarChart data={ageReport.series} margin={{ left: 8, right: 12, top: 24 }}>
-                    <CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="age_bin" angle={-45} textAnchor="end" height={70} /><YAxis allowDecimals={false} label={{ value: 'Number of bridges', angle: -90, position: 'insideLeft' }} /><Tooltip formatter={(value) => number(Number(value))} /><Legend />
-                    <Bar dataKey="Good" stackId="count" fill={GOOD} />
-                    <Bar dataKey="Upper Fair" stackId="count" fill={UPPER_FAIR} />
-                    <Bar dataKey="Lower Fair" stackId="count" fill={LOWER_FAIR} />
-                    <Bar dataKey="Poor" stackId="count" fill={POOR} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </section>
-              {ageReport.excluded.missing_or_invalid_age_count > 0 && <p className="text-xs text-slate-500">{number(ageReport.excluded.missing_or_invalid_age_count)} records without a usable year built are not included in this age chart.</p>}
+              {ageMetric === 'deck_area' && ageAreaLoading ? (
+                <div className="py-20 text-center text-slate-500"><Loader2 className="mx-auto mb-3 h-7 w-7 animate-spin text-brand-600" />Loading deck area by age…</div>
+              ) : ageMetric === 'deck_area' && ageAreaError ? (
+                <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6 text-amber-900">{ageAreaError}</div>
+              ) : ageMetric === 'count' && !ageReport ? (
+                <div className="py-20 text-center text-slate-500">Bridge counts by age are not available for this inventory year.</div>
+              ) : (
+                <>
+                  <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <h2 className="font-semibold text-slate-900">{ageMetric === 'count' ? 'Bridge count' : 'Deck area'} by age and condition</h2>
+                    <p className="mt-1 text-xs text-slate-500">Age is inventory year {(ageMetric === 'count' ? ageReport?.year : ageAreaReport?.year) ?? year} minus the SNBI year built. {ageMetric === 'deck_area' ? 'Each bar sums bridge deck area in square feet. ' : ''}The official Fair class is split into Upper Fair (rating 6) and Lower Fair (rating 5).</p>
+                    <ResponsiveContainer width="100%" height={430}>
+                      <BarChart data={ageMetric === 'count' ? ageReport?.series : ageAreaReport?.series} margin={{ left: 8, right: 12, top: 24 }}>
+                        <CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="age_bin" angle={-45} textAnchor="end" height={70} /><YAxis allowDecimals={ageMetric === 'deck_area'} tickFormatter={ageMetric === 'deck_area' ? (value) => number(Number(value) / 1000) : undefined} label={{ value: ageMetric === 'count' ? 'Number of bridges' : 'Deck area (thousand ft²)', angle: -90, position: 'insideLeft' }} /><Tooltip formatter={(value) => ageMetric === 'count' ? number(Number(value)) : `${number(Number(value), 1)} ft²`} /><Legend />
+                        <Bar dataKey="Good" stackId="age-condition" fill={GOOD} />
+                        <Bar dataKey="Upper Fair" stackId="age-condition" fill={UPPER_FAIR} />
+                        <Bar dataKey="Lower Fair" stackId="age-condition" fill={LOWER_FAIR} />
+                        <Bar dataKey="Poor" stackId="age-condition" fill={POOR} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </section>
+                  {ageMetric === 'count' && (ageReport?.excluded.missing_or_invalid_age_count || 0) > 0 && <p className="text-xs text-slate-500">{number(ageReport?.excluded.missing_or_invalid_age_count)} records without a usable year built are not included in this age chart.</p>}
+                  {ageMetric === 'deck_area' && ageAreaReport && (
+                    <div className="space-y-1 text-xs text-slate-500">
+                      {ageAreaReport.excluded.missing_or_invalid_age_count > 0 && <p>{number(ageAreaReport.excluded.missing_or_invalid_age_count)} records without a usable year built are not included in this age chart.</p>}
+                      {ageAreaReport.excluded.missing_or_invalid_geometry_count > 0 && <p>{number(ageAreaReport.excluded.missing_or_invalid_geometry_count)} records without usable deck geometry are not included.</p>}
+                      {ageAreaReport.excluded.unknown_condition_area_ft2 > 0 && <p>{area(ageAreaReport.excluded.unknown_condition_area_ft2)} with an unknown condition is not included in the condition bars.</p>}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 

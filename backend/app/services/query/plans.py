@@ -622,6 +622,29 @@ def _resolve_field(
             "unknown_resource", "Field references an unknown resource", resource_id=resource_id, context=context
         )
     column = resource.columns_by_id.get(field_id)
+    if column is None and "." not in reference:
+        candidate_resources = {
+            (
+                join.right_resource_id
+                if join.left_resource_id == base_resource_id
+                else join.left_resource_id
+            )
+            for join in catalog.joins
+            if base_resource_id in {join.left_resource_id, join.right_resource_id}
+        }
+        candidates = [
+            joined
+            for candidate_id in sorted(candidate_resources)
+            if (joined := catalog.resources_by_id[candidate_id]).columns_by_id.get(field_id)
+            is not None
+        ]
+        if len(candidates) == 1:
+            joined = candidates[0]
+            return ResolvedField(
+                joined.resource_id,
+                field_id,
+                joined.columns_by_id[field_id],
+            )
     if column is None:
         raise PlanValidationError(
             "unknown_field",

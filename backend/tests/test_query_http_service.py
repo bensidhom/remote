@@ -169,7 +169,7 @@ def test_scalar_answer_is_provider_free_after_sql_and_emits_rich_evidence(
     assert evidence_event["metric_definitions"][0]["metric_id"] == "inventory.bridge_count"
     assert evidence_event["source_snapshot_status"] == "loaded_inventory"
     assert evidence_event["source_status"]["authoritative_source"].startswith("snbi_bridges.db")
-    assert evidence_event["catalog_version"] == "bridgeguard-semantic-v2-available-inventory"
+    assert evidence_event["catalog_version"] == "bridgeguard-semantic-v3-calculated-deck-area"
     assert evidence_event["catalog_sha256"] == "a" * 64
     assert evidence_event["snbi_dictionary_version"] == "bridgeguard-snbi-dictionary-v1"
     assert evidence_event["snbi_dictionary_sha256"] == "b" * 64
@@ -200,6 +200,9 @@ def test_plan_prompt_embeds_reviewed_context_without_double_json_encoding() -> N
 
     assert '"content":{"semantic_catalog":{"resources":[]}}' in prompt
     assert '"content_json":"{' not in prompt
+    assert "maximum span length uses maximum_span_length" in prompt
+    assert "filters reference joined fields" in prompt
+    assert "never add state_code for New Jersey" in prompt
 
 
 def test_plan_response_format_is_strict_and_scope_bound() -> None:

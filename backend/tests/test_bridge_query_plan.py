@@ -536,6 +536,24 @@ def test_reviewed_cross_resource_dimension_compiles_one_to_one_join(catalog) -> 
     )
 
 
+def test_scalar_current_concrete_deck_count_accepts_joined_county_filter(catalog) -> None:
+    plan = BridgeQueryPlan(
+        "count",
+        "v_current_bridge_deck_material_summary",
+        metric_ids=("inventory.current_concrete_deck_bridge_count",),
+        filters=(PlanFilter("county_code", "eq", 3),),
+        time_scope=PlanTimeScope("latest"),
+    )
+    result = compile_bridge_query_plan(
+        plan, catalog, QueryScope("workspace-a", 34, "latest")
+    )
+    assert 'JOIN "v_current_bridge_snapshots"' in result.logical_sql
+    assert result.evidence.joins == ("current_to_deck_material_summary",)
+    assert result.evidence.outputs[0]["id"] == (
+        "inventory.current_concrete_deck_bridge_count"
+    )
+
+
 def test_one_to_many_join_is_rejected_for_aggregate_grain(catalog) -> None:
     metric = MetricDefinition(
         metric_id="test.bridge_count",

@@ -20,7 +20,7 @@ from .models import (
 )
 
 
-CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v2-available-inventory"
+CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v3-calculated-deck-area"
 _SCOPE_FIELDS = ("workspace_id", "state_code", "bridge_number", "data_year")
 _SNAPSHOT_JOIN_FIELDS = _SCOPE_FIELDS
 
@@ -164,11 +164,28 @@ _BRIDGE_COLUMNS = _IDENTITY_COLUMNS + (
         unit="feet",
     ),
     _column(
+        "reported_calculated_deck_area",
+        SemanticDataType.NUMBER,
+        True,
+        "Raw reported BG16 deck area, when the loaded source provides it.",
+        unit="square_feet",
+    ),
+    _column(
         "calculated_deck_area",
         SemanticDataType.NUMBER,
         True,
-        "Reported or transition-calculated deck area.",
+        (
+            "Governed BG16 deck area: use a positive reported BG16 value; otherwise multiply "
+            "total bridge length by out-to-out width, falling back to approach roadway width, "
+            "and round calculated values to one decimal place."
+        ),
         unit="square_feet",
+    ),
+    _column(
+        "calculated_deck_area_method",
+        SemanticDataType.TEXT,
+        False,
+        "Evidence method used for calculated_deck_area, or unavailable when inputs are missing.",
     ),
     _column(
         "nhs_designation",
@@ -350,7 +367,7 @@ PUBLISHED_BRIDGE_SNAPSHOTS = SemanticResource(
         "workspace_state",
         "bridges",
     ),
-    implementation_id="loaded_inventory_snapshot_v3",
+    implementation_id="loaded_inventory_snapshot_v4",
 )
 
 
@@ -370,7 +387,7 @@ CURRENT_BRIDGE_SNAPSHOTS = SemanticResource(
         "workspace_state",
         "bridges",
     ),
-    implementation_id="global_latest_available_inventory_v2",
+    implementation_id="global_latest_available_inventory_v3",
 )
 
 

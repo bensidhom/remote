@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "suite_version": "bridgette-deck-area-examples-v1",
+  "cases": [
+    {
+      "id": "deck.001",
+      "category": "deck_area",
+      "question": "What is the total deck square footage in the latest inventory?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "snbi_items": ["B.G.16"]
+    },
+    {
+      "id": "deck.002",
+      "category": "deck_area",
+      "question": "How many square feet of bridge deck are in the latest New Jersey inventory?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "snbi_items": ["B.G.16"]
+    },
+    {
+      "id": "deck.003",
+      "category": "deck_area",
+      "question": "What is the sum of the deck areas for current bridges?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "snbi_items": ["B.G.16"]
+    },
+    {
+      "id": "deck.004",
+      "category": "deck_area",
+      "question": "What is the average deck square footage for current bridges?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["calculated_deck_area"],
+      "target_metric": "inventory.average_deck_area",
+      "snbi_items": ["B.G.16"]
+    },
+    {
+      "id": "deck.005",
+      "category": "deck_area",
+      "question": "List 10 current bridges with their deck square footage.",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_current_bridge_snapshots",
+      "target_fields": ["bridge_number", "calculated_deck_area"],
+      "target_metric": null,
+      "snbi_items": ["B.ID.01", "B.G.16"]
+    },
+    {
+      "id": "deck.006",
+      "category": "deck_area",
+      "question": "Which 10 current bridges have the largest decks by square footage?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_current_bridge_snapshots",
+      "target_fields": ["bridge_number", "calculated_deck_area"],
+      "target_metric": null,
+      "snbi_items": ["B.ID.01", "B.G.16"]
+    },
+    {
+      "id": "deck.007",
+      "category": "deck_area",
+      "question": "Show the current bridge deck square footage in each county.",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_current_county_bridge_inventory",
+      "target_fields": ["county_name", "total_deck_area"],
+      "target_metric": null,
+      "snbi_items": ["B.L.02", "B.G.16"]
+    },
+    {
+      "id": "deck.008",
+      "category": "deck_area",
+      "question": "What is the total known calculated deck area for inventory year 2025?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "exact", "year": 2025},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "snbi_items": ["B.G.16"]
+    },
+    {
+      "id": "deck.009",
+      "category": "deck_area",
+      "question": "What is the square footage of the decks?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "snbi_items": ["B.G.16"]
+    }
+  ]
+}

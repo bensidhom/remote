@@ -95,7 +95,15 @@ def _pdf_bytes(report: dict[str, object]) -> bytes:
 
 def build_kpi_export(report: dict[str, object], *, export_kind: str) -> tuple[str, bytes, dict[str, object]]:
     kind = str(export_kind).strip().lower()
-    if kind not in {"operational", "acceptable_condition", "age_condition_area", "program", "fhwa_tpm"}:
+    if kind not in {
+        "operational",
+        "acceptable_condition",
+        "age_condition_area",
+        "age_condition_counts",
+        "program",
+        "fhwa_tpm",
+        "future_condition",
+    }:
         raise ValueError("unsupported KPI export kind")
     report_json = _canonical(report)
     artifacts = {

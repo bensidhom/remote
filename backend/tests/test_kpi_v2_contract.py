@@ -38,7 +38,7 @@ def _fixture(path: str) -> None:
             state_code INTEGER NOT NULL, bridge_number TEXT NOT NULL, data_year INTEGER NOT NULL,
             bridge_name TEXT, county_code INTEGER, owner TEXT, maintenance_responsibility TEXT,
             year_built INTEGER, nbis_bridge_length REAL, total_bridge_length REAL,
-            bridge_width_out_to_out REAL, calculated_deck_area REAL,
+            bridge_width_out_to_out REAL, approach_roadway_width REAL, calculated_deck_area REAL,
             deck_condition_rating REAL, superstructure_condition_rating REAL,
             substructure_condition_rating REAL, culvert_condition_rating REAL,
             lowest_condition_rating_code REAL,
@@ -80,8 +80,8 @@ def _fixture(path: str) -> None:
             (f"published-{bridge}", "workspace-a", 34, bridge, 2024, revision, "2024-12-31T00:00:00Z"),
         )
         connection.execute(
-            "INSERT INTO bridges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (34, bridge, 2024, bridge, county, "S01", maintenance, built, bg01, length, width, area, bc01, bc02, bc03, bc04, bc13),
+            "INSERT INTO bridges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (34, bridge, 2024, bridge, county, "S01", maintenance, built, bg01, length, width, None, area, bc01, bc02, bc03, bc04, bc13),
         )
     connection.executemany(
         "INSERT INTO features VALUES (?,?,?,?,?,?,?)",
@@ -137,6 +137,7 @@ def test_operational_kpis_reconcile_counts_areas_unknowns_and_state_policy(tmp_p
     assert values["deck_area_method_counts"] == {
         "reported_bg15": 3,
         "derived_bg02_times_bg05": 1,
+        "derived_bg02_times_bg09": 0,
         "missing_or_invalid_geometry": 1,
     }
     assert values["high_traffic_bridge_count"] == 1
@@ -155,6 +156,37 @@ def test_operational_kpis_reconcile_counts_areas_unknowns_and_state_policy(tmp_p
     assert area_measure["acceptable_area_numerator_ft2"] == 5000.0
     assert area_measure["unknown_condition_area_ft2"] == 1000.0
     assert area_measure["percent_all_valid_area"] == 83.3
+
+
+def test_operational_deck_area_falls_back_to_approach_width(tmp_path):
+    database = tmp_path / "kpis.db"
+    _fixture(str(database))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE bridges SET total_bridge_length=24.9, bridge_width_out_to_out=NULL, "
+            "approach_roadway_width=49.5 "
+            "WHERE state_code=34 AND bridge_number='B' AND data_year=2024"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    report = compute_operational_kpis(
+        database_path=database,
+        workspace_id="workspace-a",
+        state_code=34,
+        year=2024,
+    )
+
+    # This half-tie also proves parity with SQLite ROUND(24.9 * 49.5, 1).
+    assert report["values"]["total_valid_deck_area_ft2"] == 5632.5
+    assert report["values"]["deck_area_method_counts"] == {
+        "reported_bg15": 3,
+        "derived_bg02_times_bg05": 0,
+        "derived_bg02_times_bg09": 1,
+        "missing_or_invalid_geometry": 1,
+    }
 
 
 def test_age_condition_area_uses_snapshot_age_and_reconciles_bins(tmp_path):
@@ -208,11 +240,11 @@ def test_future_condition_scenarios_are_built_from_consecutive_inventory_rows(tm
     connection = sqlite3.connect(database)
     try:
         connection.executemany(
-            "INSERT INTO bridges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bridges VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                (34, "A", 2023, "A", 1, "S01", "S01", 2000, 25.0, 100.0, 30.0, 3000.0, 8, 8, 8, "N", None),
-                (34, "B", 2023, "B", 1, "S01", "S01", 1990, 25.0, 100.0, 20.0, None, 6, 6, 6, "N", None),
-                (34, "D", 2023, "D", None, "S01", "L01", None, 25.0, 100.0, None, None, 5, 6, 6, "N", None),
+                (34, "A", 2023, "A", 1, "S01", "S01", 2000, 25.0, 100.0, 30.0, None, 3000.0, 8, 8, 8, "N", None),
+                (34, "B", 2023, "B", 1, "S01", "S01", 1990, 25.0, 100.0, 20.0, None, None, 6, 6, 6, "N", None),
+                (34, "D", 2023, "D", None, "S01", "L01", None, 25.0, 100.0, None, None, None, 5, 6, 6, "N", None),
             ),
         )
         connection.commit()

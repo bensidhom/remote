@@ -7,8 +7,36 @@ import json
 import zipfile
 
 from pypdf import PdfReader
+import pytest
 
 from app.services.kpis_v2.export import EXPORT_FORMAT, build_kpi_export
+
+
+@pytest.mark.parametrize(
+    "export_kind",
+    [
+        "operational",
+        "acceptable_condition",
+        "age_condition_area",
+        "age_condition_counts",
+        "program",
+        "fhwa_tpm",
+        "future_condition",
+    ],
+)
+def test_kpi_export_accepts_every_kind_exposed_by_the_dashboard(export_kind):
+    export_id, payload, manifest = build_kpi_export(
+        {
+            "year": 2026,
+            "definition_version": "definition-v1",
+            "data_generation": 7,
+            "revision_set_sha256": "a" * 64,
+        },
+        export_kind=export_kind,
+    )
+
+    assert export_id == hashlib.sha256(payload).hexdigest()
+    assert manifest["export_kind"] == export_kind
 
 
 def test_kpi_export_is_deterministic_reproducible_and_spreadsheet_safe():
@@ -42,4 +70,3 @@ def test_kpi_export_is_deterministic_reproducible_and_spreadsheet_safe():
         pdf = PdfReader(io.BytesIO(archive.read("review.pdf")))
         assert len(pdf.pages) >= 1
         assert "BridgeGuard KPI report" in (pdf.pages[0].extract_text() or "")
-

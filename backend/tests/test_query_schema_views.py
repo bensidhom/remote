@@ -41,22 +41,29 @@ def _insert_published_snapshot(
     bc03: float | None = 8,
     bc04: float | None = None,
     bc13: float | None = None,
+    total_bridge_length: float | None = 100.0,
+    bridge_width_out_to_out: float | None = 20.0,
+    approach_roadway_width: float | None = None,
+    calculated_deck_area: float | None = None,
 ) -> None:
     connection.execute(
         "INSERT INTO bridges "
         "(state_code,bridge_number,bridge_name,county_code,data_year,year_built,"
-        "total_bridge_length,bridge_width_out_to_out,deck_condition_rating,"
+        "total_bridge_length,bridge_width_out_to_out,approach_roadway_width,"
+        "calculated_deck_area,deck_condition_rating,"
         "superstructure_condition_rating,substructure_condition_rating,"
         "culvert_condition_rating,lowest_condition_rating_code) "
-        "VALUES (34,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (34,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             bridge_number,
             f"Bridge {bridge_number}",
             county,
             year,
             1970,
-            100.0,
-            20.0,
+            total_bridge_length,
+            bridge_width_out_to_out,
+            approach_roadway_width,
+            calculated_deck_area,
             bc01,
             bc02,
             bc03,
@@ -147,6 +154,64 @@ def test_semantic_views_ignore_publication_pointers_and_latest_is_one_global_yea
             "SELECT bridge_number,data_year FROM v_current_bridge_snapshots "
             "ORDER BY bridge_number"
         ).fetchall() == [("STAGED-ONLY", 2026)]
+    finally:
+        connection.close()
+
+
+def test_bridge_views_calculate_bg16_and_preserve_reported_evidence(test_workspace):
+    database_path = test_workspace / "query-deck-area.sqlite3"
+    ensure_schema(str(database_path))
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _insert_workspace(connection)
+        _insert_published_snapshot(
+            connection,
+            revision_id="deck-reported",
+            bridge_number="REPORTED",
+            year=2025,
+            calculated_deck_area=1234.5,
+        )
+        _insert_published_snapshot(
+            connection,
+            revision_id="deck-width",
+            bridge_number="WIDTH",
+            year=2025,
+            total_bridge_length=100.04,
+            bridge_width_out_to_out=20.0,
+            approach_roadway_width=15.0,
+        )
+        _insert_published_snapshot(
+            connection,
+            revision_id="deck-approach",
+            bridge_number="APPROACH",
+            year=2025,
+            total_bridge_length=100.0,
+            bridge_width_out_to_out=None,
+            approach_roadway_width=15.0,
+        )
+        _insert_published_snapshot(
+            connection,
+            revision_id="deck-unavailable",
+            bridge_number="UNAVAILABLE",
+            year=2025,
+            total_bridge_length=100.0,
+            bridge_width_out_to_out=None,
+            approach_roadway_width=None,
+        )
+        connection.commit()
+
+        expected = [
+            ("APPROACH", None, 1500.0, "calculated_length_times_approach_width"),
+            ("REPORTED", 1234.5, 1234.5, "reported_bg16"),
+            ("UNAVAILABLE", None, None, "unavailable"),
+            ("WIDTH", None, 2000.8, "calculated_length_times_out_to_out_width"),
+        ]
+        for view_name in ("v_published_bridge_snapshots", "v_current_bridge_snapshots"):
+            assert connection.execute(
+                f"SELECT bridge_number,reported_calculated_deck_area,calculated_deck_area,"
+                f"calculated_deck_area_method FROM {view_name} ORDER BY bridge_number"
+            ).fetchall() == expected
     finally:
         connection.close()
 

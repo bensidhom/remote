@@ -47,6 +47,7 @@ def test_registry_is_complete_deterministic_and_compatible_with_catalog():
         "inventory.average_daily_traffic",
         "inventory.total_bridge_length",
         "inventory.total_deck_area",
+        "inventory.average_deck_area",
     }
     assert required.issubset(registry.metrics_by_id)
     for metric in registry.metrics:

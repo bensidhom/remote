@@ -21,7 +21,7 @@ import sqlite3
 from typing import Iterable, Mapping, Sequence
 
 
-LATEST_SCHEMA_VERSION = 17
+LATEST_SCHEMA_VERSION = 18
 
 
 class SchemaDriftError(RuntimeError):
@@ -2142,7 +2142,23 @@ _AVAILABLE_BRIDGE_COLUMNS = """
     b.total_bridge_length,
     b.maximum_span_length,
     b.bridge_width_out_to_out,
-    b.calculated_deck_area,
+    b.calculated_deck_area AS reported_calculated_deck_area,
+    CASE
+      WHEN b.calculated_deck_area>0 THEN b.calculated_deck_area
+      WHEN b.total_bridge_length>0 AND b.bridge_width_out_to_out>0
+        THEN ROUND(b.total_bridge_length*b.bridge_width_out_to_out, 1)
+      WHEN b.total_bridge_length>0 AND b.approach_roadway_width>0
+        THEN ROUND(b.total_bridge_length*b.approach_roadway_width, 1)
+      ELSE NULL
+    END AS calculated_deck_area,
+    CASE
+      WHEN b.calculated_deck_area>0 THEN 'reported_bg16'
+      WHEN b.total_bridge_length>0 AND b.bridge_width_out_to_out>0
+        THEN 'calculated_length_times_out_to_out_width'
+      WHEN b.total_bridge_length>0 AND b.approach_roadway_width>0
+        THEN 'calculated_length_times_approach_width'
+      ELSE 'unavailable'
+    END AS calculated_deck_area_method,
     b.nhs_designation,
     b.deck_condition_rating,
     b.superstructure_condition_rating,
