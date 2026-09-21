@@ -66,7 +66,7 @@ def _fixture(path: str) -> None:
         ("B", 1, "S01", 1990, 25.0, 100.0, 20.0, None, 5, 6, 6, None, 5),
         ("C", 3, "S01", 1980, 25.0, 100.0, 10.0, 1000.0, None, None, None, None, None),
         ("D", None, "L01", None, 25.0, 100.0, None, None, 4, 6, 6, None, 4),
-        ("E", 3, "S01", 2024, 19.9, 40.0, 10.0, 400.0, 8, 8, 8, None, 8),
+        ("E", 3, "S01", 2023, 19.9, 40.0, 10.0, 400.0, 8, 8, 8, None, 8),
     )
     for ordinal, row in enumerate(rows, 1):
         bridge, county, maintenance, built, bg01, length, width, area, bc01, bc02, bc03, bc04, bc13 = row
@@ -189,7 +189,7 @@ def test_operational_deck_area_falls_back_to_approach_width(tmp_path):
     }
 
 
-def test_age_condition_area_uses_snapshot_age_and_reconciles_bins(tmp_path):
+def test_age_condition_area_uses_prior_calendar_year_and_reconciles_bins(tmp_path):
     database = tmp_path / "kpis.db"
     _fixture(str(database))
 
@@ -203,6 +203,7 @@ def test_age_condition_area_uses_snapshot_age_and_reconciles_bins(tmp_path):
     )
 
     by_bin = {row["age_bin"]: row for row in result["series"]}
+    assert result["age_reference_year"] == 2023
     assert by_bin["0-4"]["Good"] == 400.0
     assert by_bin["20-24"]["Good"] == 3000.0
     assert by_bin["30-34"]["Lower Fair"] == 2000.0
@@ -223,6 +224,7 @@ def test_age_condition_counts_returns_whole_bridge_records(tmp_path):
     )
 
     by_bin = {row["age_bin"]: row for row in result["series"]}
+    assert result["age_reference_year"] == 2023
     assert by_bin["0-4"]["Good"] == 1
     assert by_bin["20-24"]["Good"] == 1
     assert by_bin["30-34"]["Lower Fair"] == 1
@@ -232,6 +234,41 @@ def test_age_condition_counts_returns_whole_bridge_records(tmp_path):
         "missing_or_invalid_age_count": 1,
         "missing_condition_count": 1,
     }
+
+
+def test_age_condition_views_shift_boundary_bridges_to_the_prior_cycle_bin(tmp_path):
+    database = tmp_path / "kpis.db"
+    _fixture(str(database))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE bridges SET year_built=1999 "
+            "WHERE state_code=34 AND bridge_number='A' AND data_year=2024"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    area = compute_age_condition_area(
+        database_path=database,
+        workspace_id="workspace-a",
+        state_code=34,
+        year=2024,
+    )
+    counts = compute_age_condition_counts(
+        database_path=database,
+        workspace_id="workspace-a",
+        state_code=34,
+        year=2024,
+    )
+    area_by_bin = {row["age_bin"]: row for row in area["series"]}
+    count_by_bin = {row["age_bin"]: row for row in counts["series"]}
+
+    assert area["age_reference_year"] == counts["age_reference_year"] == 2023
+    assert area_by_bin["20-24"]["Good"] == 3000.0
+    assert area_by_bin["25-29"]["Good"] == 0.0
+    assert count_by_bin["20-24"]["Good"] == 1
+    assert count_by_bin["25-29"]["Good"] == 0
 
 
 def test_future_condition_scenarios_are_built_from_consecutive_inventory_rows(tmp_path):

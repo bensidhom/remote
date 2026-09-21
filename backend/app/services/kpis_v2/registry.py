@@ -18,6 +18,7 @@ from typing import Mapping
 REGISTRY_VERSION = "bridgeguard-kpi-registry-v1"
 OPERATIONAL_DEFINITION_VERSION = "bridgeguard-operational-v1"
 ACCEPTABLE_DEFINITION_VERSION = "njdot-state-maintained-candidate-v1"
+AGE_CONDITION_DEFINITION_VERSION = "bridgeguard-age-condition-cycle-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,12 +214,13 @@ _DEFINITIONS = (
     _definition(
         "deck_area_by_age_condition",
         "Deck area by age and condition",
-        purpose="Reproduce the supplied five-year age/condition stacked-area view with explicit Unknowns.",
-        population="Loaded bridges with valid deck area and valid snapshot age.",
-        numerator="Deck area summed by age bin and Good, Upper Fair (6), Lower Fair (5), Poor, or Unknown.",
+        purpose="Reproduce the supplied CY five-year age/condition stacked-area view with explicit Unknowns.",
+        population="Loaded bridges with valid deck area and valid age at the prior calendar year.",
+        numerator="Deck area summed by prior-calendar-year age bin and Good, Upper Fair (6), Lower Fair (5), Poor, or Unknown.",
         denominator="Not applicable; excluded geometry and age are returned.",
         unit="square feet",
         source_fields=("BW01", "BG15", "BG02", "BG05", "BC01", "BC02", "BC03", "BC04", "BC13"),
+        version=AGE_CONDITION_DEFINITION_VERSION,
     ),
     _program_definition("inhouse_bridge_inspections_count", "State-maintained bridge inspections in-house", "inspections", "Track approved fiscal-year inspection delivery by in-house staff."),
     _program_definition("consultant_bridge_inspections_count", "State-maintained bridge inspections by consultants", "inspections", "Track approved fiscal-year inspection delivery by consultants."),

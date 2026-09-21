@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "suite_version": "bridgette-deck-area-examples-v1",
+  "suite_version": "bridgette-deck-area-examples-v2",
   "cases": [
     {
       "id": "deck.001",
@@ -109,6 +109,102 @@
       "target_fields": ["calculated_deck_area"],
       "target_metric": "inventory.total_deck_area",
       "snbi_items": ["B.G.16"]
+    },
+    {
+      "id": "deck.010",
+      "category": "deck_area_single_bridge",
+      "question": "What is the deck area in square feet of bridge 01M0019?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest", "bridge_number": "01M0019"},
+      "target_resource": "v_current_bridge_snapshots",
+      "target_fields": [
+        "bridge_number",
+        "total_bridge_length",
+        "bridge_width_out_to_out",
+        "reported_calculated_deck_area",
+        "calculated_deck_area",
+        "calculated_deck_area_method"
+      ],
+      "target_metric": null,
+      "snbi_items": ["B.ID.01", "B.G.01", "B.G.05", "B.G.16"]
+    },
+    {
+      "id": "deck.011",
+      "category": "deck_area_single_bridge",
+      "question": "How many square feet is the deck on bridge number 0103152?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest", "bridge_number": "0103152"},
+      "target_resource": "v_current_bridge_snapshots",
+      "target_fields": [
+        "bridge_number",
+        "total_bridge_length",
+        "bridge_width_out_to_out",
+        "reported_calculated_deck_area",
+        "calculated_deck_area",
+        "calculated_deck_area_method"
+      ],
+      "target_metric": null,
+      "snbi_items": ["B.ID.01", "B.G.01", "B.G.05", "B.G.16"]
+    },
+    {
+      "id": "deck.012",
+      "category": "deck_area_single_bridge",
+      "question": "For 01M0019, what is the current bridge deck square footage?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest", "bridge_number": "01M0019"},
+      "target_resource": "v_current_bridge_snapshots",
+      "target_fields": [
+        "bridge_number",
+        "total_bridge_length",
+        "bridge_width_out_to_out",
+        "reported_calculated_deck_area",
+        "calculated_deck_area",
+        "calculated_deck_area_method"
+      ],
+      "target_metric": null,
+      "snbi_items": ["B.ID.01", "B.G.01", "B.G.05", "B.G.16"]
+    },
+    {
+      "id": "deck.013",
+      "category": "deck_area_owner_filter",
+      "question": "What is the total deck area for the bridge state owned?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["owner", "calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "target_filters": [{"field_id": "owner", "operator": "eq", "value": "S01"}],
+      "snbi_items": ["B.CL.01", "B.G.16"]
+    },
+    {
+      "id": "deck.014",
+      "category": "deck_area_owner_filter",
+      "question": "How many square feet of deck area are on state-owned bridges?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["owner", "calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "target_filters": [{"field_id": "owner", "operator": "eq", "value": "S01"}],
+      "snbi_items": ["B.CL.01", "B.G.16"]
+    },
+    {
+      "id": "deck.015",
+      "category": "deck_area_owner_filter",
+      "question": "What is the combined deck square footage for NJDOT-owned bridges?",
+      "expected_behavior": "answer",
+      "expected_code": "ready_for_planning",
+      "request_scope": {"time_mode": "latest"},
+      "target_resource": "v_published_bridge_snapshots",
+      "target_fields": ["owner", "calculated_deck_area"],
+      "target_metric": "inventory.total_deck_area",
+      "target_filters": [{"field_id": "owner", "operator": "eq", "value": "S01"}],
+      "snbi_items": ["B.CL.01", "B.G.16"]
     }
   ]
 }

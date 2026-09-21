@@ -20,7 +20,7 @@ from .models import (
 )
 
 
-CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v3-calculated-deck-area"
+CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v5-intent-preservation"
 _SCOPE_FIELDS = ("workspace_id", "state_code", "bridge_number", "data_year")
 _SNAPSHOT_JOIN_FIELDS = _SCOPE_FIELDS
 
@@ -134,7 +134,18 @@ _BRIDGE_COLUMNS = _IDENTITY_COLUMNS + (
     _column("bridge_location", SemanticDataType.TEXT, True, "Inventory location description."),
     _column("latitude", SemanticDataType.NUMBER, True, "Latitude in decimal degrees.", unit="degree"),
     _column("longitude", SemanticDataType.NUMBER, True, "Longitude in decimal degrees.", unit="degree"),
-    _column("owner", SemanticDataType.TEXT, True, "Inventory owner code."),
+    _column(
+        "owner",
+        SemanticDataType.TEXT,
+        True,
+        (
+            "SNBI B.CL.01 inventory owner code. S01 means State Transportation "
+            "Department; S02 means State park, forest, or reservation agency; "
+            "S03 means State toll authority; SX means Other State agency. Treat "
+            "a plain 'state-owned' or 'NJDOT-owned' request as S01 unless the "
+            "user explicitly asks to combine multiple state-agency categories."
+        ),
+    ),
     _column(
         "maintenance_responsibility",
         SemanticDataType.TEXT,
@@ -799,6 +810,11 @@ _FUNCTIONS = (
     SafeFunction("absolute", "ABS", 1, 1, False, True, "Absolute numeric value."),
     SafeFunction("lower", "LOWER", 1, 1, False, True, "Lowercase text for a bounded comparison."),
     SafeFunction("upper", "UPPER", 1, 1, False, True, "Uppercase text for a bounded comparison."),
+    # The reviewed v_bridge_condition view normalizes optional SNBI rating text
+    # with TRIM before applying the deterministic Good/Fair/Poor rule. Allowing
+    # this pure scalar function is required for the approved view to execute;
+    # it does not broaden relation or write access.
+    SafeFunction("trim", "TRIM", 1, 2, False, True, "Trim surrounding characters from reviewed text values."),
     # SQLite reports the infix LIKE operator through its function-authorizer
     # callback. The typed plan compiler emits LIKE only for validated contains
     # and starts_with filters, so it must be explicitly allowed at execution.

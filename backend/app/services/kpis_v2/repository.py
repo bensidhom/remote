@@ -17,12 +17,12 @@ from app.services.query.metrics import compute_controlling_condition
 
 from .registry import (
     ACCEPTABLE_DEFINITION_VERSION,
+    AGE_CONDITION_DEFINITION_VERSION,
     DEFAULT_KPI_REGISTRY,
     OPERATIONAL_DEFINITION_VERSION,
 )
 
 
-AGE_COUNT_DEFINITION_VERSION = "bridgeguard-age-condition-count-v2"
 FUTURE_CONDITION_DEFINITION_VERSION = "bridgeguard-inventory-transition-v2"
 _CONDITION_ORDER = ("Good", "Fair", "Poor")
 _DETAILED_CONDITION_ORDER = ("Good", "Upper Fair", "Lower Fair", "Poor")
@@ -469,6 +469,15 @@ def _age_bin_order() -> tuple[str, ...]:
     return tuple([f"{start}-{start + 4}" for start in range(0, 95, 5)] + ["95-100", ">100"])
 
 
+def _age_for_inventory_cycle(selected_year: int, year_built: int | None) -> int | None:
+    """Use the supplied chart convention: data year N represents CY N-1."""
+
+    if year_built is None:
+        return None
+    age = selected_year - 1 - year_built
+    return age if 0 <= age <= 300 else None
+
+
 def compute_age_condition_area(
     *,
     database_path: str | os.PathLike[str],
@@ -502,7 +511,8 @@ def compute_age_condition_area(
         "unknown_condition_area_ft2": 0.0,
     }
     for row in selected:
-        if row.year_built is None or not 0 <= selected_year - row.year_built <= 300:
+        age = _age_for_inventory_cycle(selected_year, row.year_built)
+        if age is None:
             excluded["missing_or_invalid_age_count"] += 1
             continue
         area, _method = _deck_area(row)
@@ -521,7 +531,7 @@ def compute_age_condition_area(
             condition = "Lower Fair"
         else:
             condition = "Poor"
-        buckets[_age_bin(selected_year - row.year_built)][condition] += area
+        buckets[_age_bin(age)][condition] += area
     series = []
     for age_bin in _age_bin_order():
         values = buckets[age_bin]
@@ -540,12 +550,13 @@ def compute_age_condition_area(
         "kind": "observed_loaded_inventory",
         "state_code": int(state_code),
         "year": selected_year,
+        "age_reference_year": selected_year - 1,
         "population": population_key,
         "include_unknown": bool(include_unknown),
         "data_generation": data_generation,
         "schema_generation": schema_generation,
         "revision_set_sha256": _revision_set(rows),
-        "definition_version": OPERATIONAL_DEFINITION_VERSION,
+        "definition_version": AGE_CONDITION_DEFINITION_VERSION,
         "measure_definition": DEFAULT_KPI_REGISTRY.get("deck_area_by_age_condition").as_dict(),
         "series": series,
         "excluded": {key: _rounded(value) if isinstance(value, float) else value for key, value in excluded.items()},
@@ -560,7 +571,7 @@ def compute_age_condition_counts(
     year: int | None = None,
     population: str = "statewide",
 ) -> dict[str, object]:
-    """Count bridges by snapshot age and controlling SNBI condition.
+    """Count bridges by prior-calendar-year age and controlling SNBI condition.
 
     This is intentionally a bridge-count chart.  It does not mix deck area
     into the y-axis, so values remain whole bridge records.
@@ -589,14 +600,15 @@ def compute_age_condition_counts(
         "missing_condition_count": 0,
     }
     for row in selected:
-        if row.year_built is None or not 0 <= selected_year - row.year_built <= 300:
+        age = _age_for_inventory_cycle(selected_year, row.year_built)
+        if age is None:
             excluded["missing_or_invalid_age_count"] += 1
             continue
         condition = _detailed_condition_class(row.condition_rating)
         if condition not in _DETAILED_CONDITION_ORDER:
             excluded["missing_condition_count"] += 1
             continue
-        buckets[_age_bin(selected_year - row.year_built)][str(condition)] += 1
+        buckets[_age_bin(age)][str(condition)] += 1
     series = [
         {
             "age_bin": age_bin,
@@ -610,11 +622,12 @@ def compute_age_condition_counts(
         "kind": "observed_loaded_inventory",
         "state_code": int(state_code),
         "year": selected_year,
+        "age_reference_year": selected_year - 1,
         "population": population_key,
         "data_generation": data_generation,
         "schema_generation": schema_generation,
         "revision_set_sha256": _revision_set(rows),
-        "definition_version": AGE_COUNT_DEFINITION_VERSION,
+        "definition_version": AGE_CONDITION_DEFINITION_VERSION,
         "series": series,
         "excluded": excluded,
     }

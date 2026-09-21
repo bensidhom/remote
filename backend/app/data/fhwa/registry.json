@@ -2,7 +2,7 @@
   "$schema": "./registry.schema.json",
   "format_version": 1,
   "registry_id": "fhwa_snbi_rule_bundles",
-  "observed_on": "2026-08-13",
+  "observed_on": "2026-09-20",
   "artifacts": [
     {
       "id": "ecfr_23_cfr_650_317",
@@ -200,7 +200,7 @@
       "parser_version": "official-rule-coverage-importer-v1",
       "compiler_version": null,
       "supersedes": [],
-      "superseded_by": [],
+      "superseded_by": ["validation_logic_v1_2_sep_2026"],
       "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "local_path": "artifacts/SNBI.Data.Validation.Rules.v1.1.xlsx",
       "sha256": "765776e38facb1e42a528230342317b261ba47e64676ecde418f57ee7d0e2232",
@@ -208,6 +208,33 @@
         "The source URL identifies the exact v1.1 XLSX bytes linked by the FHWA validation page, which describes distinct 2026/2027 and 2028 treatment.",
         "The exact workbook bytes were locally vendored, SHA-256 verified, and its reviewed A:H rule-table layout was deterministically inventoried.",
         "All 382 inventoried rule rows remain explicitly pending/unimplemented; no workbook prose was auto-compiled into executable validation and no FHWA/NBTIS validation claim is made."
+      ]
+    },
+    {
+      "id": "validation_logic_v1_2_sep_2026",
+      "title": "SNBI Data Submittal Validation Logic version 1.2",
+      "role": "validation_logic",
+      "authority": "FHWA",
+      "legal_status": "operational",
+      "state": "vendored_verified",
+      "source_url": "https://www.fhwa.dot.gov/bridge/snbi/SNBI_Data_Validation_Rules.xlsx",
+      "published_on": null,
+      "published_label": "Version 1.2",
+      "updated_on": "2026-09-16",
+      "retrieved_on": "2026-09-20",
+      "reviewed_on": "2026-09-20",
+      "reviewed_by": "BridgeGuard maintainers",
+      "parser_version": "byte-identity-and-version-observation-v1",
+      "compiler_version": null,
+      "supersedes": ["validation_logic_v1_1_dec_2025"],
+      "superseded_by": [],
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "local_path": "artifacts/SNBI.Data.Validation.Rules.v1.2.xlsx",
+      "sha256": "765776e38facb1e42a528230342317b261ba47e64676ecde418f57ee7d0e2232",
+      "notes": [
+        "FHWA's validation page identified the current publication as version 1.2 when observed on September 20, 2026.",
+        "The workbook downloaded from the official FHWA source URL on that date is byte-for-byte identical to the previously pinned version 1.1 workbook (same SHA-256 and 91,515-byte length).",
+        "Because the official bytes did not change, BridgeGuard retains the existing 382-row informational inventory and makes no claim that additional validation logic was compiled or executed."
       ]
     },
     {

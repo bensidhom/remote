@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -549,6 +550,61 @@ def test_typed_plan_retries_only_with_code_only_feedback(query_database):
         (2, "accepted"),
         (2, "completed"),
     ]
+
+
+def test_typed_plan_rejects_silent_loss_of_exact_compound_filter(query_database):
+    request = replace(
+        _request(
+            QueryScope(
+                workspace_id=WORKSPACE,
+                state_code=34,
+                time_mode="exact",
+                data_year=2025,
+            )
+        ),
+        question=(
+            "What is total deck area for state-owned bridges that are "
+            "operationally Poor?"
+        ),
+    )
+    calls: list[PlanGenerationRequest] = []
+
+    def generate(context: PlanGenerationRequest):
+        calls.append(context)
+        filters = [{"field_id": "owner", "operator": "eq", "value": "S01"}]
+        if context.attempt == 2:
+            assert context.feedback is not None
+            assert context.feedback.code == "semantic_intent_mismatch"
+            filters.append(
+                {
+                    "field_id": "v_bridge_condition.condition_class",
+                    "operator": "eq",
+                    "value": "Poor",
+                }
+            )
+        return {
+            "intent": "aggregate",
+            "resource_id": "v_published_bridge_snapshots",
+            "metric_ids": ["inventory.total_deck_area"],
+            "filters": filters,
+            "time_scope": {"mode": "exact"},
+            "limit": 1,
+        }
+
+    evidence = execute_semantic_plan_query(
+        database_path=query_database,
+        request=request,
+        generate_plan=generate,
+    )
+
+    assert evidence.attempt == 2
+    assert len(calls) == 2
+    assert evidence.plan_evidence is not None
+    assert evidence.plan_evidence.canonical_plan["filters"][-1] == {
+        "field_id": "v_bridge_condition.condition_class",
+        "operator": "eq",
+        "value": "Poor",
+    }
 
 
 @pytest.mark.parametrize(

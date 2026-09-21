@@ -47,6 +47,10 @@ VERIFIED_ARTIFACTS = {
         "artifacts/SNBI.Data.Validation.Rules.v1.1.xlsx",
         "765776e38facb1e42a528230342317b261ba47e64676ecde418f57ee7d0e2232",
     ),
+    "validation_logic_v1_2_sep_2026": (
+        "artifacts/SNBI.Data.Validation.Rules.v1.2.xlsx",
+        "765776e38facb1e42a528230342317b261ba47e64676ecde418f57ee7d0e2232",
+    ),
     "legacy_element_xsd_v1_2013": (
         "artifacts/FHWAElement.Schema.v1.0.2013-10-03.xsd",
         "193cda71b64933e2d5316e7d193d6f780c9479a875ea3ebcb21dcaee36f0a95f",
@@ -132,13 +136,28 @@ class FhwaRegistryTests(unittest.TestCase):
                 self.assertIs(artifact.state, ArtifactState.VENDORED_VERIFIED)
                 self.assertEqual(artifact.local_path, expected_path)
                 self.assertEqual(artifact.sha256, expected_sha256)
-                self.assertEqual(str(artifact.retrieved_on), "2026-08-13")
-                self.assertEqual(str(artifact.reviewed_on), "2026-08-13")
+                expected_date = (
+                    "2026-09-20"
+                    if artifact.id == "validation_logic_v1_2_sep_2026"
+                    else "2026-08-13"
+                )
+                self.assertEqual(str(artifact.retrieved_on), expected_date)
+                self.assertEqual(str(artifact.reviewed_on), expected_date)
                 self.assertEqual(artifact.reviewed_by, "BridgeGuard maintainers")
                 self.assertTrue(artifact.parser_version)
                 self.assertIsNone(artifact.compiler_version)
-                self.assertEqual(artifact.supersedes, ())
-                self.assertEqual(artifact.superseded_by, ())
+                expected_supersedes = (
+                    ("validation_logic_v1_1_dec_2025",)
+                    if artifact.id == "validation_logic_v1_2_sep_2026"
+                    else ()
+                )
+                expected_superseded_by = (
+                    ("validation_logic_v1_2_sep_2026",)
+                    if artifact.id == "validation_logic_v1_1_dec_2025"
+                    else ()
+                )
+                self.assertEqual(artifact.supersedes, expected_supersedes)
+                self.assertEqual(artifact.superseded_by, expected_superseded_by)
             else:
                 self.assertIn(
                     artifact.state,
@@ -162,6 +181,11 @@ class FhwaRegistryTests(unittest.TestCase):
                 b"PK",
             ),
             "validation_logic_v1_1_dec_2025": (
+                91515,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                b"PK",
+            ),
+            "validation_logic_v1_2_sep_2026": (
                 91515,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 b"PK",

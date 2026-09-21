@@ -496,7 +496,7 @@ def _message_text(msg) -> str:
 
 
 def _cerebras_call(client, kwargs, retries=3):
-    """Create a completion, retrying transient 429/queue errors with backoff."""
+    """Create a completion, retrying only recognized transient failures."""
     import time
     last = None
     for attempt in range(retries):
@@ -506,7 +506,22 @@ def _cerebras_call(client, kwargs, retries=3):
             last = e
             name = type(e).__name__
             status = getattr(e, "status_code", None)
-            if status == 429 or "RateLimit" in name or "too_many_requests" in str(e):
+            transient_name = name in {
+                "APIConnectionError",
+                "APITimeoutError",
+                "ConnectError",
+                "ReadError",
+                "RemoteProtocolError",
+            }
+            transient_status = isinstance(status, int) and (
+                status in {408, 409, 425, 429} or 500 <= status <= 599
+            )
+            if (
+                transient_name
+                or transient_status
+                or "RateLimit" in name
+                or "too_many_requests" in str(e)
+            ):
                 if attempt < retries - 1:
                     time.sleep(1.5 * (attempt + 1))
                     continue

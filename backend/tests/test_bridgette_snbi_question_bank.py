@@ -53,15 +53,17 @@ def test_snbi_question_bank_behavior_distribution_is_intentional() -> None:
     assert actual_counts == {"answer": 81, "clarification": 14, "abstention": 5}
 
 
-def test_deck_area_question_bank_covers_nine_answer_phrasings() -> None:
+def test_deck_area_question_bank_covers_aggregate_and_single_bridge_phrasings() -> None:
     cases = _load_deck_area_question_bank()["cases"]
 
     assert [case["id"] for case in cases] == [
-        f"deck.{index:03d}" for index in range(1, 10)
+        f"deck.{index:03d}" for index in range(1, 16)
     ]
-    assert len({case["question"] for case in cases}) == 9
+    assert len({case["question"] for case in cases}) == 15
     assert {case["expected_behavior"] for case in cases} == {"answer"}
     assert {case["expected_code"] for case in cases} == {"ready_for_planning"}
+    assert sum(case["category"] == "deck_area_single_bridge" for case in cases) == 3
+    assert sum(case["category"] == "deck_area_owner_filter" for case in cases) == 3
 
 
 def test_snbi_question_bank_contract_fields_are_complete() -> None:

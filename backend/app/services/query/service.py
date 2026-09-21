@@ -67,6 +67,7 @@ from .sandbox import (
     execute_read_query,
 )
 from .semantic import build_semantic_catalog
+from .semantic_retrieval import RETRIEVAL_VERSION, retrieve_semantic_context
 from .snbi_dictionary import DEFAULT_SNBI_DICTIONARY, SnbiDictionary
 from .snbi_official_information import (
     DEFAULT_SNBI_INFORMATION,
@@ -88,8 +89,8 @@ from .sql_ast import (
 )
 
 
-PROMPT_VERSION = "bridgette-semantic-query-v1"
-PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v3"
+PROMPT_VERSION = "bridgette-semantic-query-v3-intent-preservation"
+PLAN_PROMPT_VERSION = "bridge-query-plan-prompt-v6-intent-preservation"
 MAX_GENERATION_ATTEMPTS = 2
 MAX_QUERY_CONTEXT_BYTES = 256 * 1024
 # Keep planning prompts bounded while retaining the complete 154-field SNBI
@@ -312,6 +313,12 @@ def _plan_repair_instruction(code: str) -> str:
         "invalid_plan_json": (
             "Return exactly one JSON object matching the response schema with no prose."
         ),
+        "semantic_intent_mismatch": (
+            "Preserve every exact_semantic_requirement from semantic_retrieval. Use "
+            "one of its reviewed metric_ids or add its exact field/value filter; do "
+            "not omit a requested owner, maintainer, condition class, NHS value, or "
+            "deck-material restriction."
+        ),
     }
     specific = guidance.get(
         code,
@@ -405,6 +412,8 @@ class SemanticQueryEvidence:
     compiled_sql_sha256: str
     snbi_information_sha256: str | None = None
     plan_evidence: PlanEvidence | None = None
+    semantic_retrieval_version: str | None = None
+    semantic_retrieval_sha256: str | None = None
 
 
 class SemanticQueryError(RuntimeError):
@@ -865,13 +874,28 @@ def build_query_context(
         "start_year": scope.start_year,
         "end_year": scope.end_year,
     }
-    selected_tags = list(
-        _select_dictionary_details(
-            question=question,
-            catalog=catalog,
-            dictionary=dictionary,
-        )
+    retrieval = retrieve_semantic_context(
+        question,
+        catalog=catalog,
+        dictionary=dictionary,
+        information=information,
+        metrics=DEFAULT_METRIC_REGISTRY,
     )
+    # Retrieval is additive rather than restrictive.  Preserve the original
+    # deterministic lexical selector as a recall backstop, and keep the full
+    # compact 154-field index below regardless of what either selector ranks.
+    selected_tags = list(
+        dict.fromkeys(
+            (
+                *retrieval.selected_tags,
+                *_select_dictionary_details(
+                    question=question,
+                    catalog=catalog,
+                    dictionary=dictionary,
+                ),
+            )
+        )
+    )[:MAX_DETAILED_DICTIONARY_FIELDS]
     dictionary_index = _compact_dictionary_index(
         catalog=catalog,
         dictionary=dictionary,
@@ -913,6 +937,7 @@ def build_query_context(
             ),
         },
         "semantic_catalog": catalog.prompt_payload(),
+        "semantic_retrieval": retrieval.prompt_payload(),
         "snbi_dictionary": {
             "dictionary_hash": dictionary.dictionary_hash,
             "complete_compact_index": dictionary_index,
@@ -1049,6 +1074,12 @@ def build_plan_context(
             "Match the requested semantic field exactly. 'Maximum span' means "
             "maximum_span_length (BG03); span_continuity (BSP05) is a different fact."
         ),
+        "owner_code_rule": (
+            "For B.CL.01 owner filters, State Transportation Department is S01. "
+            "A plain 'state-owned' or 'NJDOT-owned' request means owner=S01. Do not "
+            "silently include S02 (state park), S03 (state toll authority), or SX "
+            "(other State agency) unless the user explicitly requests those categories."
+        ),
         "scalar_filter_rule": (
             "A field used only to restrict a scalar metric belongs in filters, not in "
             "selected_fields or dimensions. For a current concrete-deck bridge count "
@@ -1058,6 +1089,15 @@ def build_plan_context(
             "v_current_bridge_snapshots.county_code. County FIPS is stored in county_code "
             "as an integer, so leading zeroes are removed; never add state_code because "
             "the server already applies New Jersey scope."
+        ),
+        "compound_filter_rules": (
+            "Preserve every exact_semantic_requirement. Operational Good/Fair/Poor "
+            "is v_bridge_condition.condition_class and must use the reviewed one-to-one "
+            "condition join when the metric comes from bridge snapshots. A concrete-deck "
+            "restriction uses the one-to-one deck-material summary with "
+            "has_concrete_deck=true. NHS and AADT are carried-highway feature facts; "
+            "retain nhs_designation and traffic thresholds and do not silently drop a "
+            "join or filter."
         ),
     }
     selected_tags = dictionary_payload.get(
@@ -1218,6 +1258,167 @@ def _reason_code(value: str) -> str:
     return reason[:128] or "query_failed"
 
 
+def _retrieval_receipt(context_json: str) -> tuple[str, str]:
+    """Read the non-secret retrieval identity embedded in a reviewed prompt."""
+
+    try:
+        payload = json.loads(context_json)
+        retrieval = payload["semantic_retrieval"]
+        version = str(retrieval["retrieval_version"])
+        digest = str(retrieval["knowledge_hash"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("semantic retrieval receipt is missing from query context") from exc
+    if version != RETRIEVAL_VERSION or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("semantic retrieval receipt is invalid")
+    return version, digest
+
+
+def _exact_semantic_requirements(
+    context_json: str,
+) -> tuple[Mapping[str, object], ...]:
+    """Return the bounded, reviewed exact requirements embedded by retrieval."""
+
+    try:
+        payload = json.loads(context_json)
+        rows = payload["semantic_retrieval"].get("exact_semantic_requirements", [])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("semantic retrieval requirements are invalid") from exc
+    if not isinstance(rows, list) or len(rows) > 32:
+        raise ValueError("semantic retrieval requirements are invalid")
+    output: list[Mapping[str, object]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("semantic retrieval requirements are invalid")
+        record_id = row.get("record_id")
+        field_ids = row.get("field_ids")
+        metric_ids = row.get("metric_ids")
+        values = row.get("canonical_values")
+        if (
+            not isinstance(record_id, str)
+            or not isinstance(field_ids, list)
+            or not all(isinstance(item, str) for item in field_ids)
+            or not isinstance(metric_ids, list)
+            or not all(isinstance(item, str) for item in metric_ids)
+            or not isinstance(values, list)
+            or not all(isinstance(item, str) for item in values)
+        ):
+            raise ValueError("semantic retrieval requirements are invalid")
+        output.append(row)
+    return tuple(output)
+
+
+def _semantic_scalar(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip().casefold()
+
+
+def _plan_preserves_exact_semantics(
+    plan: BridgeQueryPlan,
+    context_json: str,
+) -> None:
+    """Reject a valid-looking plan that silently drops an exact reviewed concept."""
+
+    missing: list[str] = []
+    selected_metrics = set(plan.metric_ids)
+    for requirement in _exact_semantic_requirements(context_json):
+        metric_ids = {
+            str(item) for item in requirement.get("metric_ids", ())
+        }
+        if selected_metrics.intersection(metric_ids):
+            continue
+        field_ids = {
+            str(item).rsplit(".", 1)[-1]
+            for item in requirement.get("field_ids", ())
+        }
+        canonical_values = {
+            _semantic_scalar(item)
+            for item in requirement.get("canonical_values", ())
+        }
+        represented = False
+        for plan_filter in plan.filters:
+            if plan_filter.field_id.rsplit(".", 1)[-1] not in field_ids:
+                continue
+            actual_values = (
+                tuple(plan_filter.value)
+                if isinstance(plan_filter.value, tuple)
+                else (plan_filter.value,)
+            )
+            normalized_actual = {_semantic_scalar(item) for item in actual_values}
+            if not canonical_values or normalized_actual.intersection(canonical_values):
+                represented = True
+                break
+        if not represented:
+            missing.append(str(requirement.get("record_id", "unknown")))
+    if missing:
+        raise PlanError(
+            "semantic_intent_mismatch",
+            "Generated plan omitted an exact reviewed semantic requirement",
+            missing_requirement_ids=tuple(missing),
+        )
+
+
+def _sql_preserves_exact_semantics(
+    validated: ValidatedSql,
+    context_json: str,
+) -> None:
+    """Apply the same fail-closed semantic check to guarded expert SQL."""
+
+    columns = {column.column.casefold() for column in validated.columns}
+    sql = validated.sql.casefold()
+    missing: list[str] = []
+    for requirement in _exact_semantic_requirements(context_json):
+        record_id = str(requirement.get("record_id", ""))
+        field_ids = {
+            str(item).rsplit(".", 1)[-1].casefold()
+            for item in requirement.get("field_ids", ())
+        }
+        present_fields = field_ids.intersection(columns)
+        if (
+            record_id.endswith("filter.deck_material.concrete")
+            and "deck_material_and_type" in columns
+            and re.search(
+                r"(?<![a-z0-9_-])['\"](?:c0[1-5]|cx|cp-t|cr-t)['\"](?![a-z0-9_-])",
+                sql,
+                re.IGNORECASE,
+            )
+        ):
+            # A specific reviewed BSP09 concrete material code is a stronger
+            # representation of the requested concrete-deck restriction than
+            # the bridge-grain summary flag.
+            continue
+        if not present_fields:
+            missing.append(str(requirement.get("record_id", "unknown")))
+            continue
+        canonical_values = {
+            _semantic_scalar(item)
+            for item in requirement.get("canonical_values", ())
+        }
+        if not canonical_values:
+            continue
+        if record_id.endswith("filter.deck_material.concrete") and any(
+            f"sum({field}" in re.sub(r"\s+", "", sql) for field in present_fields
+        ):
+            continue
+        accepted_literals = set(canonical_values)
+        if "true" in canonical_values:
+            accepted_literals.add("1")
+        if not any(
+            re.search(
+                rf"(?<![a-z0-9_-])(?:'{re.escape(value)}'|\"{re.escape(value)}\"|{re.escape(value)})(?![a-z0-9_-])",
+                sql,
+            )
+            for value in accepted_literals
+        ):
+            missing.append(record_id or "unknown")
+    if missing:
+        raise SqlGuardError(
+            "semantic_intent_mismatch",
+            "Generated SQL omitted an exact reviewed semantic requirement",
+            missing_requirement_ids=tuple(missing),
+        )
+
+
 def _finish_audit(
     database_path: str | Path,
     *,
@@ -1301,6 +1502,7 @@ def execute_semantic_plan_query(
         official_information=official_information,
     )
     context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
+    retrieval_version, retrieval_hash = _retrieval_receipt(context_json)
     bounded_plan_limit = min(request.max_rows, 200)
     active_plan_limits = plan_limits or PlanLimits(
         max_limit=bounded_plan_limit,
@@ -1334,7 +1536,8 @@ def execute_semantic_plan_query(
                         f"c-{catalog.catalog_hash[:16]}/"
                         f"d-{dictionary.dictionary_hash[:16]}/"
                         f"metrics-{DEFAULT_METRIC_REGISTRY.registry_hash[:16]}/"
-                        f"i-{official_information.dataset_sha256[:16]}"
+                        f"i-{official_information.dataset_sha256[:16]}/"
+                        f"r-{retrieval_hash[:16]}"
                     ),
                 ),
             )
@@ -1363,6 +1566,7 @@ def execute_semantic_plan_query(
                 generated,
                 default_limit=min(request.max_rows, 200),
             )
+            _plan_preserves_exact_semantics(plan, context_json)
             compiled_plan = compile_bridge_query_plan(
                 plan,
                 catalog,
@@ -1560,6 +1764,8 @@ def execute_semantic_plan_query(
             ).hexdigest(),
             snbi_information_sha256=official_information.dataset_sha256,
             plan_evidence=compiled_plan.evidence,
+            semantic_retrieval_version=retrieval_version,
+            semantic_retrieval_sha256=retrieval_hash,
         )
 
     raise AssertionError("semantic plan query attempt loop exhausted unexpectedly")
@@ -1607,6 +1813,7 @@ def execute_semantic_query(
         dictionary=dictionary,
     )
     context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
+    retrieval_version, retrieval_hash = _retrieval_receipt(context_json)
     limits = sql_limits or SqlLimits(max_rows=min(request.max_rows, 200))
     feedback: GenerationFeedback | None = None
 
@@ -1632,7 +1839,8 @@ def execute_semantic_query(
                     model_id=request.model_id,
                     prompt_version=(
                         f"{request.prompt_version}/catalog-{catalog.catalog_hash}/"
-                        f"dictionary-{dictionary.dictionary_hash}"
+                        f"dictionary-{dictionary.dictionary_hash}/"
+                        f"r-{retrieval_hash[:16]}"
                     ),
                 ),
             )
@@ -1661,6 +1869,7 @@ def execute_semantic_query(
             if not isinstance(generated, str) or not generated.strip():
                 raise TypeError("SQL generator must return a non-empty string")
             validated = validate_generated_sql(generated, sql_catalog, limits=limits)
+            _sql_preserves_exact_semantics(validated, context_json)
             _enforce_time_routing(validated, sql_catalog, request.scope)
             compiled = compile_scoped_sql(
                 validated,
@@ -1859,6 +2068,8 @@ def execute_semantic_query(
             compiled_sql_sha256=hashlib.sha256(
                 compiled.sql.encode("utf-8")
             ).hexdigest(),
+            semantic_retrieval_version=retrieval_version,
+            semantic_retrieval_sha256=retrieval_hash,
         )
 
     raise AssertionError("semantic query attempt loop exhausted unexpectedly")

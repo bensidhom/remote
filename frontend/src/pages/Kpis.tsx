@@ -96,6 +96,7 @@ interface AgeCountRow {
 }
 interface AgeCountResponse {
   year: number;
+  age_reference_year: number;
   population: string;
   data_generation: number;
   schema_generation: number;
@@ -114,6 +115,7 @@ interface AgeAreaRow {
 }
 interface AgeAreaResponse {
   year: number;
+  age_reference_year: number;
   population: string;
   include_unknown: boolean;
   data_generation: number;
@@ -488,8 +490,8 @@ const Kpis: React.FC = () => {
               ) : (
                 <>
                   <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <h2 className="font-semibold text-slate-900">{ageMetric === 'count' ? 'Bridge count' : 'Deck area'} by age and condition</h2>
-                    <p className="mt-1 text-xs text-slate-500">Age is inventory year {(ageMetric === 'count' ? ageReport?.year : ageAreaReport?.year) ?? year} minus the SNBI year built. {ageMetric === 'deck_area' ? 'Each bar sums bridge deck area in square feet. ' : ''}The official Fair class is split into Upper Fair (rating 6) and Lower Fair (rating 5).</p>
+                    <h2 className="font-semibold text-slate-900">CY{(ageMetric === 'count' ? ageReport?.age_reference_year : ageAreaReport?.age_reference_year) ?? ((year ?? 1) - 1)} {ageMetric === 'count' ? 'bridge count' : 'deck area'} by age and condition</h2>
+                    <p className="mt-1 text-xs text-slate-500">To match the supplied reporting chart, inventory year {(ageMetric === 'count' ? ageReport?.year : ageAreaReport?.year) ?? year} is aged at calendar year {(ageMetric === 'count' ? ageReport?.age_reference_year : ageAreaReport?.age_reference_year) ?? ((year ?? 1) - 1)}. Age is that calendar year minus the SNBI year built. {ageMetric === 'deck_area' ? 'Each bar sums bridge deck area in square feet. ' : ''}The official Fair class is split into Upper Fair (rating 6) and Lower Fair (rating 5).</p>
                     <ResponsiveContainer width="100%" height={430}>
                       <BarChart data={ageMetric === 'count' ? ageReport?.series : ageAreaReport?.series} margin={{ left: 8, right: 12, top: 24 }}>
                         <CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="age_bin" angle={-45} textAnchor="end" height={70} /><YAxis allowDecimals={ageMetric === 'deck_area'} tickFormatter={ageMetric === 'deck_area' ? (value) => number(Number(value) / 1000) : undefined} label={{ value: ageMetric === 'count' ? 'Number of bridges' : 'Deck area (thousand ft²)', angle: -90, position: 'insideLeft' }} /><Tooltip formatter={(value) => ageMetric === 'count' ? number(Number(value)) : `${number(Number(value), 1)} ft²`} /><Legend />

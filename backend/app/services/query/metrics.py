@@ -22,7 +22,7 @@ from .models import (
 )
 
 
-METRIC_REGISTRY_VERSION = "bridgeguard-metrics-v2-available-inventory"
+METRIC_REGISTRY_VERSION = "bridgeguard-metrics-v3-deck-area-coverage"
 
 
 class ConditionBasis(str, Enum):
@@ -506,6 +506,20 @@ DEFAULT_METRIC_REGISTRY = MetricRegistry(
             unit="square_feet",
             null_semantics="Unknown deck areas are excluded; they are never treated as zero.",
             denominator_semantics="Not a ratio; one deck-area contribution per selected bridge snapshot.",
+            time_semantics="Explicit year is exact; latest selects the global latest available state inventory year.",
+            allowed_dimensions=_SNAPSHOT_DIMENSIONS,
+            classification=MetricClassification.OPERATIONAL_INVENTORY,
+        ),
+        MetricDefinition(
+            metric_id="inventory.known_deck_area_count",
+            label="Bridge snapshots with known deck area",
+            description="Count of selected bridge snapshots with a known governed BG16 deck area.",
+            source_resource_id="v_published_bridge_snapshots",
+            expression="COUNT(calculated_deck_area)",
+            required_columns=("calculated_deck_area",),
+            unit="bridges",
+            null_semantics="Only non-null governed deck areas are counted; unknown areas are excluded rather than treated as zero.",
+            denominator_semantics="Not a ratio; compare with inventory.bridge_count to report deck-area coverage.",
             time_semantics="Explicit year is exact; latest selects the global latest available state inventory year.",
             allowed_dimensions=_SNAPSHOT_DIMENSIONS,
             classification=MetricClassification.OPERATIONAL_INVENTORY,

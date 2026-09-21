@@ -22,7 +22,7 @@ from .models import MetricRegistry, SemanticCatalog
 from .snbi_dictionary import DEFAULT_SNBI_DICTIONARY, SnbiDictionary
 
 
-INTERPRETATION_VERSION = "bridgette-query-interpretation-v1"
+INTERPRETATION_VERSION = "bridgette-query-interpretation-v2"
 DETECTION_SCOPE = "conservative_known_patterns_not_exhaustive"
 
 
@@ -209,6 +209,16 @@ class _UnsupportedRule:
 _UNSUPPORTED_RULES: tuple[_UnsupportedRule, ...] = (
     _UnsupportedRule(
         re.compile(
+            r"\b(?:predict|forecast|calculate|give)\b.{0,48}"
+            r"\b(?:exact\s+)?(?:date|time)\b.{0,48}\b(?:collapse|fail(?:ure)?)\b|"
+            r"\b(?:collapse|fail(?:ure)?)\b.{0,48}\b(?:exact\s+)?(?:date|time)\b",
+            re.IGNORECASE,
+        ),
+        "an exact bridge collapse date",
+        (),
+    ),
+    _UnsupportedRule(
+        re.compile(
             r"(?:\boriginal\b.{0,28})?(?:\bpaint(?:ed)?\b|\bcoating\b)"
             r".{0,28}\bcolou?r\b|\bcolou?r\b.{0,28}"
             r"(?:\bpaint(?:ed)?\b|\bcoating\b)",
@@ -275,6 +285,11 @@ _NHS_RE = re.compile(r"\bNHS\b|\bNational Highway System\b", re.IGNORECASE)
 _NHS_QUALIFIED_RE = re.compile(
     r"\bBH03\b|\b(?:carried|roadway|feature)[- ]level\b|"
     r"\bcarried\s+(?:highway|roadway|route|feature)\b|"
+    r"\bNHS\s+designation\b|\bNHS\s+bridges?\s+carry(?:ing|ies)\b|"
+    r"\bNHS\b.{0,36}\b(?:AADT|traffic|Interstate|routes?)\b|"
+    r"\bNHS\b.{0,60}\b(?:elements?|quantit(?:y|ies)|condition\s+states?)\b|"
+    r"\b(?:elements?|quantit(?:y|ies)|condition\s+states?)\b.{0,60}\bNHS\b|"
+    r"\b(?:non[- ]?)?NHS[- ]designated\b|\bnon[- ]NHS\b|"
     r"\b(?:root|inventory|bridge)[- ]level\s+(?:inventory\s+)?designation\b|"
     r"\broot\s+inventory\b|\bfederal\s+(?:performance|population)\b|"
     r"\bTPM\b|\b23\s*CFR\b|\bdeck[- ]area[- ]weighted\b",
@@ -303,6 +318,24 @@ _MULTIPLE_COUNTY_RESOLUTION_RE = re.compile(
     r"\b(?:separate county groups?|group(?: the)? results? by county|"
     r"compare(?: them)? separately|combined set|combine(?: the)? counties|"
     r"treat(?: them)? as (?:one )?combined)\b",
+    re.IGNORECASE,
+)
+_RESPONSIBILITY_AMBIGUITY_RE = re.compile(
+    r"\b(?:state|NJDOT|department)\b.{0,40}\bresponsible\s+for\b|"
+    r"\bresponsible\s+for\b.{0,40}\b(?:state|NJDOT|department)\b",
+    re.IGNORECASE,
+)
+_VERTICAL_CLEARANCE_RE = re.compile(r"\bvertical\s+clearance\b", re.IGNORECASE)
+_VERTICAL_CLEARANCE_QUALIFIED_RE = re.compile(
+    r"\b(?:highway|roadway|railroad|rail|navigable|navigation|movable)\b|"
+    r"\b(?:minimum|min|maximum|max)[- ](?:usable[- ])?vertical\s+clearance\b|"
+    r"\bB(?:H12|H13|RR02|N02|N03)\b",
+    re.IGNORECASE,
+)
+_SECURITY_EXFILTRATION_RE = re.compile(
+    r"\b(?:passwords?|api[- ]?keys?|secrets?|credentials?)\b|"
+    r"\b(?:rows?|records?|data)\b.{0,28}\b(?:other|another)\s+workspaces?\b|"
+    r"\b(?:other|another)\s+workspaces?\b.{0,28}\b(?:rows?|records?|data)\b",
     re.IGNORECASE,
 )
 
@@ -401,12 +434,13 @@ def _unknown_county(question: str, known: tuple[CountyReference, ...]) -> str | 
     patterns = (
         re.compile(
             r"\b(?:in|within|for|across|inside|of)\s+(?:the\s+)?"
-            r"(?P<name>[A-Za-z][A-Za-z .'-]{0,39}?)\s+count(?:y|ies)\b",
+            r"(?P<name>[A-Za-z][A-Za-z .'-]{0,39}?)\s+count(?:y|ies)\b"
+            r"(?![- ]owned)",
             re.IGNORECASE,
         ),
         re.compile(
             r"\b(?P<name>[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2})"
-            r"\s+County\b"
+            r"\s+County\b(?![- ]owned)"
         ),
     )
     for pattern in patterns:
@@ -435,7 +469,7 @@ def _bridge_reference(question: str) -> str | None:
         return demonstrative.group("reference")[:80]
 
     identifier = re.search(
-        r"\b(?:bridge|structure)\s*(?:number|no\.?|id|#)\s*[:#-]?\s*"
+        r"\b(?:bridge|structure)\s*(?:(?:number|no\.?|id)\b|#)\s*[:#-]?\s*"
         r"(?P<identifier>[A-Z0-9][A-Z0-9._/-]{1,39})\b",
         question,
         re.IGNORECASE,
@@ -447,6 +481,7 @@ def _bridge_reference(question: str) -> str | None:
         # for agency IDs, so reject common continuation words after matching.
         if candidate.casefold() not in {
             "and",
+            "as",
             "by",
             "for",
             "from",
@@ -586,8 +621,16 @@ def interpret_bridge_query(
         (_CONDITION_RE.search(text) or _BAD_BRIDGE_RE.search(text))
         and not _CONDITION_QUALIFIED_RE.search(text)
     )
+    responsibility_ambiguous = bool(_RESPONSIBILITY_AMBIGUITY_RE.search(text))
+    vertical_clearance_ambiguous = bool(
+        _VERTICAL_CLEARANCE_RE.search(text)
+        and not _VERTICAL_CLEARANCE_QUALIFIED_RE.search(text)
+    )
+    security_exfiltration = bool(_SECURITY_EXFILTRATION_RE.search(text))
 
     issue_codes: list[str] = []
+    if security_exfiltration:
+        issue_codes.append("security_scope_violation")
     if unsupported is not None:
         issue_codes.append("unsupported_fact")
     if unknown_county is not None:
@@ -602,7 +645,24 @@ def interpret_bridge_query(
         issue_codes.append("nhs_meaning")
     if condition_ambiguous:
         issue_codes.append("condition_metric")
+    if responsibility_ambiguous:
+        issue_codes.append("ownership_or_maintenance")
+    if vertical_clearance_ambiguous:
+        issue_codes.append("vertical_clearance_field")
     all_codes = tuple(issue_codes)
+
+    if security_exfiltration:
+        return QueryInterpretation(
+            decision=InterpretationDecision.ABSTENTION,
+            code="security_scope_violation",
+            message=(
+                "I can answer authorized bridge-inventory questions, but I cannot "
+                "expose credentials or data outside the authorized workspace."
+            ),
+            normalized_counties=counties,
+            detected_issue_codes=all_codes,
+            warnings=("No SQL, model call, or database read was made.",),
+        )
 
     # Known unsupported facts win over ambiguities: choosing another meaning
     # must never turn a nearby field into an invented proxy answer.
@@ -651,6 +711,67 @@ def interpret_bridge_query(
             warnings=("No nearby field was used as a proxy.",),
         )
 
+    if responsibility_ambiguous:
+        return _clarification(
+            code="ownership_or_maintenance",
+            message=(
+                "Does ‘the state is responsible for’ mean bridges owned by the State "
+                "Transportation Department (B.CL.01), or bridges maintained by it "
+                "(B.CL.02)?"
+            ),
+            options=(
+                InterpretationOption(
+                    "state_owned",
+                    "State-owned bridges",
+                    "owner=S01",
+                    f"{text}\n\nAdditional context: Use owner B.CL.01 code S01.",
+                ),
+                InterpretationOption(
+                    "state_maintained",
+                    "State-maintained bridges",
+                    "maintenance_responsibility=S01",
+                    (
+                        f"{text}\n\nAdditional context: Use maintenance responsibility "
+                        "B.CL.02 code S01."
+                    ),
+                ),
+            ),
+            counties=counties,
+            all_codes=all_codes,
+        )
+
+    if vertical_clearance_ambiguous:
+        return _clarification(
+            code="vertical_clearance_field",
+            message=(
+                "Vertical clearance has distinct highway minimum, highway maximum-usable, "
+                "railroad, navigation, and movable-bridge fields. Which measurement "
+                "should be ranked?"
+            ),
+            options=(
+                InterpretationOption(
+                    "highway_minimum_clearance",
+                    "Highway minimum clearance",
+                    "highway_min_vertical_clearance",
+                    f"{text}\n\nAdditional context: Use highway minimum vertical clearance B.H.13.",
+                ),
+                InterpretationOption(
+                    "highway_maximum_usable_clearance",
+                    "Highway maximum usable clearance",
+                    "highway_max_usable_vertical_clearance",
+                    f"{text}\n\nAdditional context: Use highway maximum usable vertical clearance B.H.12.",
+                ),
+                InterpretationOption(
+                    "railroad_minimum_clearance",
+                    "Railroad minimum clearance",
+                    "railroad_min_vertical_clearance",
+                    f"{text}\n\nAdditional context: Use railroad minimum vertical clearance B.RR.02.",
+                ),
+            ),
+            counties=counties,
+            all_codes=all_codes,
+        )
+
     if unknown_county is not None:
         return _clarification(
             code="unknown_nj_county",
@@ -695,7 +816,8 @@ def interpret_bridge_query(
             code="multiple_nj_counties",
             message=(
                 "More than one New Jersey county was named. Specify one county, "
-                "or state whether the counties should be separate groups or a combined set."
+                "or state whether the counties should be separate groups or a combined "
+                "set using the reviewed county_code field."
             ),
             options=county_options
             + (
@@ -777,7 +899,8 @@ def interpret_bridge_query(
             message=(
                 "NHS can refer to a bridge-level inventory projection, the SNBI "
                 "designation of a carried highway feature, or a regulated federal "
-                "performance-measure population. Which meaning is intended?"
+                "performance-measure population. The available inventory semantic is "
+                "nhs_designation. Which meaning is intended?"
             ),
             options=(
                 InterpretationOption(
@@ -809,7 +932,9 @@ def interpret_bridge_query(
             message=(
                 "Condition could mean the reviewed controlling operational class, "
                 "a particular SNBI component rating, or a regulated federal "
-                "performance measure. Which definition should be used?"
+                "performance measure. The reviewed operational outputs are "
+                "condition_class and controlling_rating. Which definition should be "
+                "used?"
             ),
             options=(
                 InterpretationOption(

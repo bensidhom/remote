@@ -11,6 +11,8 @@ import threading
 
 import pytest
 
+from app.routers.services.database import ensure_schema
+from app.routers.services.db_schema import LATEST_SCHEMA_VERSION
 from app.services.query import http_service
 from app.query_api import BoundedResultStore
 from app.services.query.service import (
@@ -138,6 +140,682 @@ _PLAN_JSON = (
 )
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("What is the deck area of bridge 01M0019?", "01M0019"),
+        ("What is the deck area of bridge 1234?", "1234"),
+        ("How many square feet is bridge number 0103152's deck?", "0103152"),
+        ("For 01M0019, what is the current bridge deck square footage?", "01M0019"),
+        ("What is the total deck square footage for all bridges?", None),
+        ("List bridge deck material types.", None),
+        (
+            "Find Poor bridges with concrete decks and report owner plus deck area; "
+            "do not double-count bridge identities.",
+            None,
+        ),
+        (
+            "Find Poor bridges with concrete decks and report owner plus deck area, "
+            "and retain bridge number as the stable inventory identity.",
+            None,
+        ),
+    ],
+)
+def test_single_bridge_deck_area_candidate_is_deliberately_narrow(question, expected):
+    assert http_service._candidate_bridge_number(question) == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("What is the total deck area for the bridge state owned?", True),
+        ("How many square feet of deck area are on state-owned bridges?", True),
+        ("How many square feet of deck belong to state-owned structures?", True),
+        ("For the latest inventory, compare the number and deck area of state-owned bridges.", True),
+        ("What is the combined deck square footage for NJDOT-owned bridges?", True),
+        ("What is the deck area of state-owned bridge 01M0019?", False),
+        (
+            "What is the total deck area for state-owned bridges that are operationally Poor?",
+            False,
+        ),
+        (
+            "What is the total deck area for state-owned concrete-deck bridges?",
+            False,
+        ),
+        ("What is the total deck area for county-owned bridges?", False),
+        ("Count state-owned bridges.", False),
+    ],
+)
+def test_state_owned_total_deck_area_intent_is_narrow(question, expected):
+    assert http_service._is_state_owned_total_deck_area_question(question) is expected
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("How many square feet of bridge deck are in the latest New Jersey inventory?", True),
+        ("What is the total deck area for all bridges?", True),
+        ("What is the total deck area for state-owned bridges?", False),
+        ("What is the total deck area for operationally Poor bridges?", False),
+        ("What is the deck area of bridge 01M0019?", False),
+    ],
+)
+def test_unfiltered_total_deck_area_intent_is_narrow(question, expected):
+    assert http_service._is_unfiltered_total_deck_area_question(question) is expected
+
+
+def test_unfiltered_total_deck_area_plan_uses_governed_metric_without_filter():
+    plan = json.loads(
+        http_service._total_deck_plan(
+            QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest")
+        )
+    )
+
+    assert plan["resource_id"] == "v_published_bridge_snapshots"
+    assert plan["metric_ids"] == ["inventory.total_deck_area"]
+    assert plan["filters"] == []
+
+
+def test_state_owned_total_deck_area_plan_uses_s01_owner_filter():
+    plan = json.loads(
+        http_service._state_owned_total_deck_plan(
+            QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest")
+        )
+    )
+
+    assert plan["metric_ids"] == ["inventory.total_deck_area"]
+    assert plan["filters"] == [
+        {"field_id": "owner", "operator": "eq", "value": "S01"}
+    ]
+
+
+def test_state_owned_deck_plan_can_return_count_and_area_together():
+    plan = json.loads(
+        http_service._state_owned_total_deck_plan(
+            QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest"),
+            question=(
+                "For the latest inventory, compare the number and deck area of "
+                "state-owned bridges."
+            ),
+        )
+    )
+
+    assert plan["metric_ids"] == [
+        "inventory.bridge_count",
+        "inventory.total_deck_area",
+    ]
+
+    coverage_plan = json.loads(
+        http_service._state_owned_total_deck_plan(
+            QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest"),
+            question=(
+                "Report bridge count, known-area count, and deck square footage "
+                "for state-owned."
+            ),
+        )
+    )
+    assert coverage_plan["metric_ids"] == [
+        "inventory.bridge_count",
+        "inventory.known_deck_area_count",
+        "inventory.total_deck_area",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_field", "expected_code", "expected_condition", "expected_metrics"),
+    [
+        (
+            "Return bridge count and total deck area for state-owned operationally Poor bridges",
+            "owner",
+            "S01",
+            "Poor",
+            ["inventory.bridge_count", "inventory.total_deck_area"],
+        ),
+        (
+            "Give bridge count for county-owned structures that are operationally Fair",
+            "owner",
+            "L01",
+            "Fair",
+            ["inventory.bridge_count"],
+        ),
+        (
+            "Show total bridge length for NJDOT-maintained operationally Good bridges",
+            "maintenance_responsibility",
+            "S01",
+            "Good",
+            ["inventory.total_bridge_length"],
+        ),
+    ],
+)
+def test_reviewed_owner_condition_plan_preserves_both_filters(
+    question,
+    expected_field,
+    expected_code,
+    expected_condition,
+    expected_metrics,
+):
+    raw = http_service._reviewed_owner_condition_plan(
+        QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest"),
+        question=question,
+    )
+
+    assert raw is not None
+    plan = json.loads(raw)
+    assert plan["metric_ids"] == expected_metrics
+    assert plan["filters"] == [
+        {"field_id": expected_field, "operator": "eq", "value": expected_code},
+        {
+            "field_id": "v_bridge_condition.condition_class",
+            "operator": "eq",
+            "value": expected_condition,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("question", "required_fragments"),
+    [
+        (
+            "What is the average deck area for state toll authority owned NHS-designated bridges?",
+            ("s.owner = 'S03'", "h.nhs_designation = 'Y'", "s.bridge_number IN"),
+        ),
+        (
+            "What is the concrete-deck bridge count for county-owned NHS-designated bridges?",
+            (
+                "s.owner = 'L01'",
+                "d.has_concrete_deck = 1",
+                "h.nhs_designation = 'Y'",
+                "s.bridge_number IN",
+            ),
+        ),
+        (
+            "What is the total deck area for state park agency-owned non-NHS bridges?",
+            ("s.owner = 'S02'", "h.nhs_designation = 'N'", "s.bridge_number IN"),
+        ),
+        (
+            "What is the bridge count for state-owned bridges with AADT above 20000?",
+            (
+                "s.owner = 'S01'",
+                "h.annual_average_daily_traffic > 20000",
+                "s.bridge_number IN",
+            ),
+        ),
+        (
+            "What is the total deck area for county-owned bridges with minimum highway clearance below 14 feet?",
+            (
+                "s.owner = 'L01'",
+                "h.highway_min_vertical_clearance < 14",
+                "s.bridge_number IN",
+            ),
+        ),
+        (
+            "Rank deck-material status by concrete-deck bridge count from highest to lowest.",
+            (
+                "d.has_concrete_deck",
+                "AS concrete_deck_bridge_count",
+                "GROUP BY d.has_concrete_deck",
+            ),
+        ),
+        (
+            "Rank county by total deck area from highest to lowest.",
+            (
+                "c.county_code",
+                "c.county_name",
+                "c.total_deck_area",
+                "ORDER BY c.total_deck_area DESC, c.county_code ASC",
+            ),
+        ),
+        (
+            "Using 2022 through 2025, show annual Poor counts and percentages.",
+            (
+                "c.data_year",
+                "c.condition_class = 'Poor'",
+                "AS poor_bridge_count",
+                "AS poor_bridge_percent",
+                "GROUP BY c.data_year",
+            ),
+        ),
+        (
+            "Operational Good, Fair, Poor, and Unknown bridge counts and state the rule.",
+            (
+                "c.condition_class = 'Good'",
+                "AS good_bridge_count",
+                "AS fair_bridge_count",
+                "AS poor_bridge_count",
+                "AS unknown_condition_count",
+            ),
+        ),
+        (
+            "Percentage of bridges with concrete deck material and state the calculation rule.",
+            (
+                "d.has_concrete_deck = 1",
+                "AS concrete_deck_bridge_count",
+                "AS concrete_deck_bridge_percent",
+            ),
+        ),
+        (
+            "Sum deck area in square feet; report unknown values separately.",
+            (
+                "s.calculated_deck_area",
+                "total_calculated_deck_area_square_feet",
+                "unknown_deck_area_count",
+            ),
+        ),
+        (
+            "Average AADT in vehicles per day; report unknown values separately.",
+            (
+                "h.annual_average_daily_traffic",
+                "average_aadt_vehicles_per_day",
+                "unknown_aadt_count",
+            ),
+        ),
+        (
+            "List deck condition ratings where N means not applicable.",
+            (
+                "s.deck_condition_rating",
+                "CAST(s.deck_condition_rating AS TEXT) = 'N'",
+                "deck_condition_rating_status",
+            ),
+        ),
+        (
+            "Compare total length and maximum span length in feet; report unknown values separately.",
+            (
+                "s.total_bridge_length",
+                "s.maximum_span_length",
+                "average_total_bridge_length_feet",
+                "average_maximum_span_length_feet",
+            ),
+        ),
+        (
+            "What is the total deck area for operationally Poor bridges?",
+            ("s.calculated_deck_area", "c.condition_class = 'Poor'"),
+        ),
+        (
+            "What is the total deck area for carried-highway AADT above 20,000 vehicles per day bridges?",
+            (
+                "s.calculated_deck_area",
+                "h.annual_average_daily_traffic > 20000",
+                "s.bridge_number IN",
+            ),
+        ),
+        (
+            "What is the total deck area for longest-maximum-span bridges?",
+            (
+                "s.calculated_deck_area",
+                "MAX(s.maximum_span_length)",
+                "SELECT MAX(x.maximum_span_length)",
+            ),
+        ),
+        (
+            "What is the total deck area for minimum-highway-clearance bridges?",
+            (
+                "s.calculated_deck_area",
+                "h.highway_min_vertical_clearance IS NOT NULL",
+                "s.bridge_number IN",
+            ),
+        ),
+        (
+            "For each county, report Poor bridge count and total bridges.",
+            (
+                "s.county_code",
+                "c.condition_class = 'Poor'",
+                "AS poor_bridge_count",
+                "COUNT(*) AS bridge_count",
+                "ORDER BY poor_bridge_count DESC, s.county_code ASC",
+            ),
+        ),
+        (
+            "Rank condition class by bridge count from highest to lowest.",
+            (
+                "c.condition_class",
+                "COUNT(*) AS bridge_count",
+                "GROUP BY c.condition_class",
+                "ORDER BY bridge_count DESC, c.condition_class ASC",
+            ),
+        ),
+        (
+            "List NHS bridges carrying Interstate routes and show AADT, returning one row per bridge.",
+            (
+                "h.nhs_designation = 'Y'",
+                "r.route_type = '1'",
+                "MAX(h.annual_average_daily_traffic)",
+                "GROUP BY h.bridge_number",
+            ),
+        ),
+        (
+            "Count distinct county-owned bridges having concrete deck span sets, returning one row per bridge.",
+            (
+                "COUNT(DISTINCT s.bridge_number)",
+                "s.owner = 'L01'",
+                "d.has_concrete_deck = 1",
+                "m.deck_material_and_type IN",
+            ),
+        ),
+        (
+            "Sum element quantities by condition state for NHS bridges, returning one row per bridge.",
+            (
+                "SUM(e.element_total_quantity)",
+                "element_quantity_condition_state_one",
+                "h.nhs_designation = 'Y'",
+                "GROUP BY e.bridge_number",
+            ),
+        ),
+        (
+            "Show bridges with load-posting events and the latest status-change date.",
+            (
+                "p.bridge_number",
+                "MAX(p.load_posting_status) AS load_posting_status",
+                "MAX(q.posting_status_change_date) AS posting_status_change_date",
+                "p.posting_status_change_date = latest.posting_status_change_date",
+            ),
+        ),
+        (
+            "List routes and directions for bridges whose carried-highway AADT exceeds 15000.",
+            (
+                "MIN(r.route_number)",
+                "MIN(r.route_direction)",
+                "h.annual_average_daily_traffic > 15000",
+                "GROUP BY h.bridge_number",
+            ),
+        ),
+        (
+            "Compare number of span configurations with total spans for every bridge.",
+            (
+                "COUNT(DISTINCT d.span_configuration_designation)",
+                "SUM(d.number_of_spans)",
+                "GROUP BY d.bridge_number",
+            ),
+        ),
+        (
+            "Find Poor bridges with concrete decks and report owner plus deck area.",
+            (
+                "c.condition_class = 'Poor'",
+                "d.has_concrete_deck = 1",
+                "s.owner",
+                "s.calculated_deck_area",
+            ),
+        ),
+    ],
+)
+def test_reviewed_cross_resource_sql_preserves_compound_filters_without_correlated_aliases(
+    question,
+    required_fragments,
+):
+    sql = http_service._reviewed_cross_resource_sql(
+        QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest"),
+        question=question,
+    )
+
+    assert sql is not None
+    for fragment in required_fragments:
+        assert fragment in sql
+    assert "WHERE s.workspace_id = h.workspace_id" not in sql
+
+
+@pytest.mark.parametrize(
+    ("question", "required_fragments"),
+    [
+        (
+            "Which latest published bridges have known latitude and longitude? List their identifiers and coordinates.",
+            ("v_current_bridge_snapshots", "s.bridge_name", "s.latitude", "s.longitude"),
+        ),
+        (
+            "List the 20 oldest latest-published bridges by year built, including bridge number and name.",
+            ("v_current_bridge_snapshots", "s.year_built", "LIMIT 20"),
+        ),
+        (
+            "How many current published bridges in Bergen County, county FIPS 003, have concrete decks?",
+            (
+                "v_current_bridge_snapshots.county_code = 3",
+                "d.has_concrete_deck = 1",
+                "metric__inventory__current_concrete_deck_bridge_count",
+            ),
+        ),
+        (
+            "List latest published span configurations with prestressed pre-tensioned concrete deck code C03.",
+            ("v_bridge_span_sets", "d.deck_material_and_type = 'C03'"),
+        ),
+        (
+            "Which latest concrete deck span configurations use epoxy-coated reinforcing protection, BSP12 code C01?",
+            ("v_bridge_span_sets", "d.deck_reinforcing_protective_system = 'C01'"),
+        ),
+        (
+            "Which latest published bridges have a superstructure condition rating of 4 or lower?",
+            ("v_current_bridge_snapshots", "s.superstructure_condition_rating BETWEEN 0 AND 4"),
+        ),
+        (
+            "List latest bridge condition records where the supplied ratings conflict with the controlling-condition evidence.",
+            ("v_bridge_condition", "c.bc01", "c.bc13", "c.condition_conflict = 1"),
+        ),
+        (
+            "List latest carried-highway features with AADT greater than 50000 vehicles per day.",
+            ("v_carried_highway_features", "h.feature_name", "h.annual_average_daily_traffic > 50000"),
+        ),
+        (
+            "Which latest highway features have minimum vertical clearance below 14.5 feet?",
+            ("v_bridge_features", "h.feature_name", "h.highway_min_vertical_clearance < 14.5"),
+        ),
+        (
+            "List route number, route direction, route type, and service type for latest published bridge routes.",
+            ("v_bridge_routes", "r.route_number", "r.route_direction", "r.route_type"),
+        ),
+        (
+            "List latest work records that contain major superstructure rehabilitation code SP2.",
+            ("v_bridge_works", "w.work_performed = 'SP2'"),
+        ),
+        (
+            "Which latest element records have a quantity greater than zero in condition state four?",
+            ("v_bridge_elements", "e.element_total_quantity", "e.element_quantity_condition_state_four > 0"),
+        ),
+    ],
+)
+def test_reviewed_snbi_example_sql_preserves_requested_resource_and_fields(
+    question,
+    required_fragments,
+):
+    sql = http_service._reviewed_snbi_example_sql(
+        QueryScope(workspace_id=WORKSPACE, state_code=34, time_mode="latest"),
+        question=question,
+    )
+
+    assert sql is not None
+    for fragment in required_fragments:
+        assert fragment in sql
+
+
+def _insert_http_query_workspace(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO workspaces (id,slug,display_name,status,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (
+            WORKSPACE,
+            WORKSPACE,
+            "HTTP query tests",
+            "active",
+            "2026-09-13T00:00:00Z",
+            "2026-09-13T00:00:00Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO workspace_state "
+        "(workspace_id,data_generation,schema_generation,updated_at) VALUES (?,?,?,?)",
+        (WORKSPACE, 1, LATEST_SCHEMA_VERSION, "2026-09-13T00:00:00Z"),
+    )
+
+
+def test_single_bridge_deck_area_uses_verified_scope_and_governed_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    database = tmp_path / "single-bridge-deck.sqlite3"
+    ensure_schema(str(database))
+    connection = sqlite3.connect(database)
+    try:
+        _insert_http_query_workspace(connection)
+        connection.execute(
+            "INSERT INTO bridges "
+            "(state_code,bridge_number,bridge_name,data_year,total_bridge_length,"
+            "bridge_width_out_to_out,approach_roadway_width,calculated_deck_area) "
+            "VALUES (34,'01M0019','Fallback deck bridge',2025,30.8,32.8,29.9,NULL)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("BRIDGEGUARD_QUERY_MODE", "plan_required")
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("the reviewed single-bridge route must be provider-free")
+        ),
+    )
+    events = list(
+        http_service.stream_bridgette_semantic_query(
+            database_path=database,
+            workspace_id=WORKSPACE,
+            request=Request(
+                question="What is the deck area in square feet of bridge 01M0019?"
+            ),
+        )
+    )
+
+    evidence_event, token_event = events
+    assert evidence_event["type"] == "evidence"
+    assert evidence_event["scope"]["bridge_number"] == "01M0019"
+    assert evidence_event["interpreted_scope"]["bridge_number"] == "01M0019"
+    assert evidence_event["query_plan"]["routing"] == (
+        "reviewed_single_bridge_deck_area_lookup"
+    )
+    assert evidence_event["metric_definitions"] == []
+    assert evidence_event["columns"] == [
+        "bridge_number",
+        "bridge_name",
+        "data_year",
+        "total_bridge_length",
+        "bridge_width_out_to_out",
+        "reported_calculated_deck_area",
+        "calculated_deck_area",
+        "calculated_deck_area_method",
+    ]
+    assert evidence_event["rows"] == [
+        [
+            "01M0019",
+            "Fallback deck bridge",
+            2025,
+            30.8,
+            32.8,
+            None,
+            1010.2,
+            "calculated_length_times_out_to_out_width",
+        ]
+    ]
+    assert token_event["type"] == "token"
+    assert token_event["content"] == (
+        "For inventory year **2025**, bridge **01M0019** has a deck area of "
+        "**1,010.2 square feet**. No positive reported BG16 value is available, "
+        "so Bridgette used **30.8 ft × 32.8 ft** (total length × out-to-out "
+        "width), rounded to one decimal place."
+    )
+
+
+def test_state_owned_total_deck_area_uses_s01_and_real_governed_metric(
+    tmp_path,
+    monkeypatch,
+):
+    database = tmp_path / "state-owned-deck.sqlite3"
+    ensure_schema(str(database))
+    connection = sqlite3.connect(database)
+    try:
+        _insert_http_query_workspace(connection)
+        connection.executemany(
+            "INSERT INTO bridges "
+            "(state_code,bridge_number,data_year,owner,total_bridge_length,"
+            "bridge_width_out_to_out,approach_roadway_width,calculated_deck_area) "
+            "VALUES (34,?,?,?,?,?,?,?)",
+            (
+                ("S01-A", 2025, "S01", 30.0, 10.0, 9.0, None),
+                ("S01-B", 2025, "S01", 20.0, 5.0, 4.0, None),
+                ("S03-A", 2025, "S03", 100.0, 10.0, 9.0, None),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("BRIDGEGUARD_QUERY_MODE", "plan_required")
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("the reviewed state-owned deck route must be provider-free")
+        ),
+    )
+    events = list(
+        http_service.stream_bridgette_semantic_query(
+            database_path=database,
+            workspace_id=WORKSPACE,
+            request=Request(
+                question="What is the total deck area for the bridge state owned?"
+            ),
+        )
+    )
+
+    evidence_event, token_event = events
+    assert evidence_event["type"] == "evidence"
+    assert evidence_event["query_plan"]["routing"] == (
+        "reviewed_state_owned_total_deck_area"
+    )
+    assert evidence_event["columns"] == ["metric__inventory__total_deck_area"]
+    assert evidence_event["rows"] == [[400.0]]
+    assert token_event["type"] == "token"
+    assert token_event["content"] == (
+        "Bridges owned by the **State Transportation Department** "
+        "(**Owner B.CL.01 = S01**) have a total calculated deck area of "
+        "**400.0 square feet** in the selected inventory. State parks, the state "
+        "toll authority, and other state agencies use separate owner codes and "
+        "are not included."
+    )
+
+
+def test_unknown_single_bridge_deck_area_does_not_fall_back_to_portfolio_query(
+    tmp_path,
+    monkeypatch,
+):
+    database = tmp_path / "missing-single-bridge-deck.sqlite3"
+    ensure_schema(str(database))
+    connection = sqlite3.connect(database)
+    try:
+        _insert_http_query_workspace(connection)
+        connection.execute(
+            "INSERT INTO bridges (state_code,bridge_number,data_year) "
+            "VALUES (34,'KNOWN-01',2025)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an unresolved bridge must not reach a provider")
+        ),
+    )
+    events = list(
+        http_service.stream_bridgette_semantic_query(
+            database_path=database,
+            workspace_id=WORKSPACE,
+            request=Request(question="What is the deck area of bridge UNKNOWN-99?"),
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0]["type"] == "clarification"
+    assert events[0]["code"] == "unresolved_bridge_identity"
+    assert "did not substitute a portfolio deck-area total" in events[0]["message"]
+
+
 def test_scalar_answer_is_provider_free_after_sql_and_emits_rich_evidence(
     monkeypatch,
 ):
@@ -169,7 +847,7 @@ def test_scalar_answer_is_provider_free_after_sql_and_emits_rich_evidence(
     assert evidence_event["metric_definitions"][0]["metric_id"] == "inventory.bridge_count"
     assert evidence_event["source_snapshot_status"] == "loaded_inventory"
     assert evidence_event["source_status"]["authoritative_source"].startswith("snbi_bridges.db")
-    assert evidence_event["catalog_version"] == "bridgeguard-semantic-v3-calculated-deck-area"
+    assert evidence_event["catalog_version"] == "bridgeguard-semantic-v5-intent-preservation"
     assert evidence_event["catalog_sha256"] == "a" * 64
     assert evidence_event["snbi_dictionary_version"] == "bridgeguard-snbi-dictionary-v1"
     assert evidence_event["snbi_dictionary_sha256"] == "b" * 64
@@ -1388,3 +2066,65 @@ def test_known_unsupported_fact_abstains_before_database_and_names_no_proxy(monk
     ]
     assert len(event["options"]) == 2
     assert all(option["suggested_question"] for option in event["options"])
+
+
+@pytest.mark.parametrize(
+    ("question", "required_terms"),
+    [
+        (
+            "How many current bridges use the proposed C06 ultra-high-performance concrete deck code, and should C06 count as concrete?",
+            ("deck_material_and_type",),
+        ),
+        (
+            "How many distinct current bridges have ever had major rehabilitation on any component?",
+            ("v_bridge_works", "bridge_number", "work_performed"),
+        ),
+        (
+            "What is the average deck condition rating by county in the latest published inventory?",
+            ("v_bridge_condition", "bc01", "v_published_bridge_snapshots.county_code"),
+        ),
+        (
+            "What is the average superstructure condition rating for each inventory year?",
+            ("v_bridge_condition", "data_year", "bc02"),
+        ),
+        (
+            "How many distinct current bridges are weight-posted?",
+            ("v_bridge_posting_statuses", "bridge_number", "load_posting_status"),
+        ),
+        (
+            "How many distinct current bridges have any element quantity in condition state four?",
+            ("v_bridge_elements", "bridge_number", "element_quantity_condition_state_four"),
+        ),
+        (
+            "Which bridges have an inspection due date before today?",
+            ("inspection_due_date",),
+        ),
+        (
+            "How many current bridges have reinforced-concrete substructures?",
+            ("substructure_material",),
+        ),
+        (
+            "Which current bridges have a controlling legal load rating factor below 1.0?",
+            ("controlling_legal_load_rating_factor",),
+        ),
+    ],
+)
+def test_known_capability_gaps_are_precise_and_do_not_call_a_provider(
+    monkeypatch,
+    question,
+    required_terms,
+):
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("known capability gaps must not call a provider")
+        ),
+    )
+    event = http_service._known_capability_gap_event(Request(question=question))
+
+    assert event is not None
+    assert event["type"] == "clarification"
+    assert event["code"] == "query_needs_more_context"
+    assert all(term in event["message"] for term in required_terms)
+    assert len(event["options"]) == 2

@@ -44,6 +44,47 @@ def test_model_capabilities_keep_text_only_gpt_oss_out_of_vision():
         llm_providers.require_generation_capability("vision", model="gpt-oss-120b")
 
 
+def test_cerebras_call_retries_transient_connection_failures(monkeypatch):
+    class APIConnectionError(Exception):
+        pass
+
+    responses = iter((APIConnectionError(), APIConnectionError(), "completed"))
+    def create(**_kwargs):
+        result = next(responses)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    completion_api = SimpleNamespace(create=create)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completion_api))
+    sleeps = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    assert llm_providers._cerebras_call(client, {"model": "test"}) == "completed"
+    assert sleeps == [1.5, 3.0]
+
+
+def test_cerebras_call_does_not_retry_permanent_validation_failure(monkeypatch):
+    calls = 0
+
+    def create(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise ValueError("invalid response schema")
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    monkeypatch.setattr(
+        "time.sleep",
+        lambda _seconds: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+
+    with pytest.raises(ValueError, match="invalid response schema"):
+        llm_providers._cerebras_call(client, {"model": "test"})
+    assert calls == 1
+
+
 def test_typed_multimodal_generation_preserves_roles_png_mime_schema_and_receipt(
     monkeypatch,
 ):
