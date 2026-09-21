@@ -535,6 +535,28 @@ def test_reviewed_owner_condition_plan_preserves_both_filters(
                 "s.calculated_deck_area",
             ),
         ),
+        (
+            "Using the latest published inventory, rank New Jersey counties by the total deck area of distinct bridges carrying an NHS-designated highway feature with AADT above 20,000 and minimum highway vertical clearance below 14.5 feet. Also return the distinct bridge count, without double-counting bridges with multiple features.",
+            (
+                "COUNT(DISTINCT s.bridge_number)",
+                "SUM(s.calculated_deck_area)",
+                "h.nhs_designation = 'Y'",
+                "h.annual_average_daily_traffic > 20000",
+                "f.highway_min_vertical_clearance < 14.5",
+            ),
+        ),
+        (
+            "Using the latest snapshot for each bridge, list operationally Poor bridges with concrete decks that have major superstructure rehabilitation and an element quantity greater than zero in condition state four. Return one row per bridge with bridge number, bridge name, deck area, most recent work year, and summed condition-state-four quantity; show the top 20 by that quantity.",
+            (
+                "WITH latest_sp2 AS",
+                "w.work_performed = 'SP2'",
+                "WITH latest_sp2 AS (SELECT",
+                "SUM(e.element_quantity_condition_state_four)",
+                "c.condition_class = 'Poor'",
+                "d.has_concrete_deck = 1",
+                "LIMIT 20",
+            ),
+        ),
     ],
 )
 def test_reviewed_cross_resource_sql_preserves_compound_filters_without_correlated_aliases(

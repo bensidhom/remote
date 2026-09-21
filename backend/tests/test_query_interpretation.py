@@ -340,6 +340,19 @@ def test_unknown_nj_county_requires_correction_without_guessing() -> None:
     assert interpret_bridge_query(remove_county, time_mode="latest").should_query
 
 
+def test_statewide_county_ranking_recovery_prompt_is_not_an_unknown_county() -> None:
+    result = interpret_bridge_query(
+        "Which 10 New Jersey counties have the most distinct bridges? "
+        "Additional context: Use inventory year 2025. Use County Code (BL02), "
+        "return the reviewed county name and bridge count, ordered from largest "
+        "to smallest.",
+        time_mode="latest",
+    )
+
+    assert result.should_query
+    assert result.unknown_county_text is None
+
+
 def test_county_owned_is_an_owner_phrase_not_an_unknown_county_name() -> None:
     result = interpret_bridge_query(
         "How many square feet of deck belong to county-owned structures?",

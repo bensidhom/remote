@@ -97,9 +97,26 @@ const bridgeIdentifier = (question: string): string | null => {
 };
 
 export const isMapRequest = (question: string): boolean => {
-  const action = /\b(?:show|find|locate|centre|center|zoom|where\s+is|take\s+me\s+to)\b/i.test(question);
-  if (!action) return false;
-  return /\bmap\b/i.test(question) || /\bbridge\b/i.test(question) || bridgeIdentifier(question) !== null;
+  const explicitMapAction = /\b(?:show|find|locate|centre|center|zoom|where\s+is|take\s+me\s+to)\b/i.test(question)
+    && /\bmap\b/i.test(question);
+  if (explicitMapAction) return true;
+
+  const navigationAction = /\b(?:centre|center|zoom|where\s+is|take\s+me\s+to)\b/i.test(question);
+  if (navigationAction) {
+    return /\b(?:bridge|structure|skyway|viaduct|overpass)\b/i.test(question)
+      || bridgeIdentifier(question) !== null;
+  }
+
+  // Only a leading direct lookup such as "show bridge 123" belongs to the
+  // map resolver. Analytical prompts often contain both "bridge" and a later
+  // "show the top 20" clause; sending those to the identity resolver turns
+  // the entire portfolio question into a bogus bridge name.
+  const directLookup = /^\s*(?:show|find|locate)\b/i.test(question);
+  if (!directLookup) return false;
+  const analytical = /\b(?:bridges|count|rank|ranking|top\s+\d+|total|average|sum|group|each|every|one\s+row\s+per)\b/i.test(question);
+  if (analytical) return false;
+  return /\b(?:bridge|structure|skyway|viaduct|overpass)\b/i.test(question)
+    || bridgeIdentifier(question) !== null;
 };
 
 // Backward-compatible export for the sidebar while both Bridgette surfaces use

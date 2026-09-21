@@ -661,6 +661,72 @@ def _reviewed_cross_resource_sql(
             f"FROM {snapshot_resource} AS s"
         )
 
+    if (
+        "counties" in text
+        and "total deck area" in text
+        and "nhs designated" in text
+        and "aadt above 20 000" in text
+        and "minimum highway vertical clearance below 14 5 feet" in text
+        and "distinct bridge count" in text
+    ):
+        county_name_case = "CASE s.county_code " + " ".join(
+            f"WHEN {code} THEN '{name}'"
+            for code, name in NEW_JERSEY_COUNTY_NAMES.items()
+        ) + " ELSE 'Unknown' END"
+        return (
+            "SELECT s.county_code, "
+            + county_name_case
+            + " AS county_name, "
+            "COUNT(DISTINCT s.bridge_number) AS distinct_bridge_count, "
+            "SUM(s.calculated_deck_area) AS total_deck_area "
+            f"FROM {snapshot_resource} AS s "
+            "WHERE s.bridge_number IN (SELECT h.bridge_number "
+            "FROM v_carried_highway_features AS h "
+            "WHERE h.nhs_designation = 'Y' "
+            "AND h.annual_average_daily_traffic > 20000) "
+            "AND s.bridge_number IN (SELECT f.bridge_number "
+            "FROM v_bridge_features AS f "
+            "WHERE f.highway_min_vertical_clearance < 14.5) "
+            "GROUP BY s.county_code ORDER BY total_deck_area DESC, "
+            "s.county_code ASC"
+        )
+
+    if (
+        "operationally poor bridges with concrete decks" in text
+        and "major superstructure rehabilitation" in text
+        and "condition state four" in text
+        and "most recent work year" in text
+        and "summed condition state four quantity" in text
+    ):
+        return (
+            "WITH latest_sp2 AS ("
+            "SELECT w.workspace_id, w.state_code, w.bridge_number, w.data_year, "
+            "MAX(w.year_work_performed) AS most_recent_sp2_work_year "
+            "FROM v_bridge_works AS w WHERE w.work_performed = 'SP2' "
+            "GROUP BY w.workspace_id, w.state_code, w.bridge_number, w.data_year"
+            "), cs4 AS ("
+            "SELECT e.workspace_id, e.state_code, e.bridge_number, e.data_year, "
+            "SUM(e.element_quantity_condition_state_four) "
+            "AS condition_state_four_quantity "
+            "FROM v_bridge_elements AS e "
+            "WHERE e.element_quantity_condition_state_four > 0 "
+            "GROUP BY e.workspace_id, e.state_code, e.bridge_number, e.data_year"
+            ") SELECT s.bridge_number, s.bridge_name, s.calculated_deck_area, "
+            "w.most_recent_sp2_work_year, e.condition_state_four_quantity "
+            f"FROM {snapshot_resource} AS s JOIN v_bridge_condition AS c ON "
+            + condition_join_keys
+            + f" JOIN {deck_resource} AS d ON "
+            + deck_join_keys
+            + " JOIN latest_sp2 AS w ON s.workspace_id = w.workspace_id "
+            "AND s.state_code = w.state_code AND s.bridge_number = w.bridge_number "
+            "AND s.data_year = w.data_year JOIN cs4 AS e ON "
+            "s.workspace_id = e.workspace_id AND s.state_code = e.state_code "
+            "AND s.bridge_number = e.bridge_number AND s.data_year = e.data_year "
+            "WHERE c.condition_class = 'Poor' AND d.has_concrete_deck = 1 "
+            "ORDER BY e.condition_state_four_quantity DESC, s.bridge_number ASC "
+            "LIMIT 20"
+        )
+
     has_owner_scope = any(
         pattern.search(question)
         for pattern in (
@@ -767,7 +833,8 @@ def _reviewed_cross_resource_sql(
     county_grouping = "county" in text and bool(
         re.search(
             r"\b(?:by county|each county|which county|rank county|order county|"
-            r"county values|every county|county groups|grouped inventory summary by county)\b",
+            r"county values|every county|county groups|new jersey counties|"
+            r"counties have|grouped inventory summary by county)\b",
             text,
         )
     )
@@ -776,6 +843,16 @@ def _reviewed_cross_resource_sql(
             "SELECT c.county_code, c.county_name, c.total_deck_area, c.bridge_count "
             f"FROM {county_resource} AS c "
             "ORDER BY c.total_deck_area DESC, c.county_code ASC"
+        )
+    if county_grouping and (
+        "bridge count" in text or "most distinct bridges" in text
+    ) and "poor bridge count" not in text:
+        limit = " LIMIT 10" if "10" in text or "most" in text else ""
+        return (
+            "SELECT c.county_code, c.county_name, c.bridge_count "
+            f"FROM {county_resource} AS c "
+            "ORDER BY c.bridge_count DESC, c.county_code ASC"
+            + limit
         )
     if county_grouping and "poor bridge count" in text:
         return (

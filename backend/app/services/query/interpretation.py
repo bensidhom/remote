@@ -454,6 +454,9 @@ def _unknown_county(question: str, known: tuple[CountyReference, ...]) -> str | 
             "each",
             "every",
             "any",
+            "use",
+            "reviewed",
+            "new jersey",
         }:
             return candidate
     return None

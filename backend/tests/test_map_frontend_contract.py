@@ -31,6 +31,15 @@ def test_both_bridgette_surfaces_use_the_shared_server_resolver():
     assert "state_code" not in shared.split("const body:", 1)[1].split("const response", 1)[0]
 
 
+def test_map_detector_requires_direct_navigation_not_analytical_show_language():
+    shared = _text("frontend/src/lib/mapBridgeEvents.ts")
+
+    assert "const directLookup" in shared
+    assert "if (!directLookup) return false" in shared
+    assert "const analytical" in shared
+    assert "one\\s+row\\s+per" in shared
+
+
 def test_map_resolution_cache_and_navigation_are_revision_and_request_scoped():
     shared = _text("frontend/src/lib/mapBridgeEvents.ts")
     map_page = _text("frontend/src/pages/Map.tsx")
