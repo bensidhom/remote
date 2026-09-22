@@ -431,6 +431,19 @@ def _county_matches(question: str) -> tuple[CountyReference, ...]:
 def _unknown_county(question: str, known: tuple[CountyReference, ...]) -> str | None:
     if known:
         return None
+    # Generic grouping phrases describe the output grain, not a county filter.
+    # Keep this check ahead of the broad ``for ... counties`` matcher so
+    # requests such as "for each New Jersey county" are not misread as an
+    # unknown county named "each New Jersey".  A genuinely named but unknown
+    # county (for example, "Atlantis County") is still handled below.
+    normalized = _normalize_for_matching(question).casefold()
+    if re.search(
+        r"\b(?:for\s+)?(?:each|every|all)\s+(?:new\s+jersey\s+)?count(?:y|ies)\b|"
+        r"\b(?:by|across)\s+(?:all\s+)?(?:new\s+jersey\s+)?counties\b|"
+        r"\b(?:rank|compare|group)\s+(?:new\s+jersey\s+)?counties\b",
+        normalized,
+    ):
+        return None
     patterns = (
         re.compile(
             r"\b(?:in|within|for|across|inside|of)\s+(?:the\s+)?"

@@ -20,7 +20,7 @@ from .models import (
 )
 
 
-CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v5-intent-preservation"
+CATALOG_DEFINITION_VERSION = "bridgeguard-semantic-v6-safe-metric-joins"
 _SCOPE_FIELDS = ("workspace_id", "state_code", "bridge_number", "data_year")
 _SNAPSHOT_JOIN_FIELDS = _SCOPE_FIELDS
 
@@ -785,6 +785,30 @@ _JOINS = (
         JoinCardinality.ONE_TO_MANY,
         "Attach carried highways only for bridges in the global latest available year.",
         left_resource_id="v_current_bridge_snapshots",
+    ),
+    SemanticJoin(
+        join_id="published_to_county_inventory",
+        left_resource_id="v_published_bridge_snapshots",
+        right_resource_id="v_county_bridge_inventory",
+        left_fields=("workspace_id", "state_code", "county_code", "data_year"),
+        right_fields=("workspace_id", "state_code", "county_code", "data_year"),
+        cardinality=JoinCardinality.MANY_TO_ONE,
+        description=(
+            "Attach the reviewed county name and same-year county summary without "
+            "multiplying bridge snapshot rows."
+        ),
+    ),
+    SemanticJoin(
+        join_id="current_to_county_inventory",
+        left_resource_id="v_current_bridge_snapshots",
+        right_resource_id="v_current_county_bridge_inventory",
+        left_fields=("workspace_id", "state_code", "county_code", "data_year"),
+        right_fields=("workspace_id", "state_code", "county_code", "data_year"),
+        cardinality=JoinCardinality.MANY_TO_ONE,
+        description=(
+            "Attach the reviewed county name for the global latest inventory "
+            "without multiplying current bridge rows."
+        ),
     ),
     SemanticJoin(
         join_id="features_to_routes",

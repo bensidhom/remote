@@ -271,7 +271,8 @@ def _plan_repair_instruction(code: str) -> str:
             "Choose metric_ids only from active reviewed_metric_registry rows."
         ),
         "metric_resource_mismatch": (
-            "Choose a metric whose source_resource exactly equals resource_id."
+            "Choose the metric's source resource as the base, or use a reviewed "
+            "direct one-to-one or many-to-one join that preserves base grain."
         ),
         "invalid_order": (
             "Set order.by to an exact selected output field reference or selected "
@@ -291,9 +292,9 @@ def _plan_repair_instruction(code: str) -> str:
             "dimensions; for aggregate intents use metrics and approved dimensions."
         ),
         "metric_required": (
-            "Select at least one active metric whose source_resource equals resource_id "
-            "for count, aggregate, trend, or compare. For a scalar filtered result, keep "
-            "selected_fields and dimensions empty."
+            "Select at least one active metric for count, aggregate, trend, or compare. "
+            "A cross-resource metric needs a reviewed direct one-to-one or many-to-one "
+            "join. For a scalar filtered result, keep selected_fields and dimensions empty."
         ),
         "selected_field_required": (
             "Select at least one reviewed field for a list or lookup plan."

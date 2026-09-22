@@ -22,7 +22,7 @@ from .models import (
 )
 
 
-METRIC_REGISTRY_VERSION = "bridgeguard-metrics-v3-deck-area-coverage"
+METRIC_REGISTRY_VERSION = "bridgeguard-metrics-v4-safe-joined-dimensions"
 
 
 class ConditionBasis(str, Enum):
@@ -226,13 +226,17 @@ _SNAPSHOT_DIMENSIONS = (
     "v_published_bridge_snapshots.county_code",
     "v_published_bridge_snapshots.owner",
     "v_published_bridge_snapshots.maintenance_responsibility",
+    "v_county_bridge_inventory.county_name",
+    "v_current_county_bridge_inventory.county_name",
 )
 _CONDITION_DIMENSIONS = (
     "v_bridge_condition.state_code",
     "v_bridge_condition.data_year",
     "v_bridge_condition.condition_class",
+    "v_published_bridge_snapshots.data_year",
     "v_published_bridge_snapshots.county_code",
     "v_published_bridge_snapshots.owner",
+    "v_published_bridge_snapshots.maintenance_responsibility",
 )
 _FEATURE_DIMENSIONS = (
     "v_carried_highway_features.state_code",

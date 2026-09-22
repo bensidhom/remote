@@ -26,6 +26,7 @@ from .answers import (
     NarrativeGenerationRequest,
     VerifiedAnswer,
     VerifiedClaim,
+    render_deterministic_answer,
     render_verified_answer,
 )
 from .audit import RecordQueryResponseAuditRequest, record_query_response_audit
@@ -741,6 +742,11 @@ def _reviewed_cross_resource_sql(
         "operationally poor" in text
         and _is_deck_area_question(question)
         and not has_owner_scope
+        and not re.search(
+            r"\b(?:each|every|all)\s+(?:new jersey\s+)?count(?:y|ies)\b|"
+            r"\brank\s+(?:new jersey\s+)?counties\b",
+            text,
+        )
     ):
         if "rank" in text:
             return (
@@ -804,6 +810,80 @@ def _reviewed_cross_resource_sql(
             f"(SELECT MAX(x.maximum_span_length) FROM {snapshot_resource} AS x)"
         )
 
+    county_grouping_request = "county" in text and bool(
+        re.search(
+            r"\b(?:(?:by|each|every|all|which|rank|order)\s+"
+            r"(?:new jersey\s+)?count(?:y|ies)|county values|county groups|"
+            r"new jersey counties|counties have|grouped inventory summary by county)\b",
+            text,
+        )
+    )
+    county_name_case = "CASE s.county_code " + " ".join(
+        f"WHEN {code} THEN '{name}'"
+        for code, name in NEW_JERSEY_COUNTY_NAMES.items()
+    ) + " ELSE 'Unknown' END"
+
+    # These compound queries are deliberately reviewed templates. They extend
+    # coverage for common bridge-level combinations while preserving one row
+    # per bridge before aggregation; the model never supplies SQL fragments.
+    if (
+        county_grouping_request
+        and _COUNTY_OWNER_RE.search(question)
+        and "average deck area" in text
+        and ("bridge count" in text or "distinct bridge" in text)
+    ):
+        return (
+            "SELECT s.county_code, "
+            + county_name_case
+            + " AS county_name, "
+            "COUNT(DISTINCT s.bridge_number) AS distinct_bridge_count, "
+            "AVG(s.calculated_deck_area) AS average_deck_area "
+            "FROM v_published_bridge_snapshots AS s WHERE s.owner = 'L01' "
+            "GROUP BY s.county_code ORDER BY average_deck_area DESC, "
+            "s.county_code ASC"
+        )
+
+    if (
+        county_grouping_request
+        and "poor" in text
+        and "concrete deck" in text
+        and ("total deck area" in text or "sum" in text)
+        and ("count distinct" in text or "bridge count" in text)
+    ):
+        return (
+            "SELECT s.county_code, "
+            + county_name_case
+            + " AS county_name, "
+            "COUNT(DISTINCT s.bridge_number) AS distinct_bridge_count, "
+            "SUM(s.calculated_deck_area) AS total_deck_area "
+            f"FROM {snapshot_resource} AS s JOIN v_bridge_condition AS c ON "
+            + condition_join_keys
+            + f" JOIN {deck_resource} AS d ON "
+            + deck_join_keys
+            + " WHERE c.condition_class = 'Poor' AND d.has_concrete_deck = 1 "
+            "GROUP BY s.county_code ORDER BY total_deck_area DESC, "
+            "s.county_code ASC"
+        )
+
+    if (
+        _STATE_MAINTAINED_RE.search(question)
+        and ("yearly" in text or "inventory years" in text)
+        and "bridge count" in text
+        and "total deck area" in text
+        and "poor bridge percentage" in text
+    ):
+        return (
+            "SELECT s.data_year, COUNT(DISTINCT s.bridge_number) AS bridge_count, "
+            "SUM(s.calculated_deck_area) AS total_deck_area, "
+            "100.0 * SUM(CASE WHEN c.condition_class = 'Poor' THEN 1 ELSE 0 END) "
+            "/ NULLIF(COUNT(*), 0) AS poor_bridge_percent "
+            "FROM v_published_bridge_snapshots AS s "
+            "JOIN v_bridge_condition AS c ON "
+            + condition_join_keys
+            + " WHERE s.maintenance_responsibility = 'S01' "
+            "GROUP BY s.data_year ORDER BY s.data_year ASC"
+        )
+
     if (
         "minimum highway clearance" in text
         and _is_deck_area_question(question)
@@ -830,14 +910,7 @@ def _reviewed_cross_resource_sql(
             "WHERE h.highway_min_vertical_clearance IS NOT NULL)"
         )
 
-    county_grouping = "county" in text and bool(
-        re.search(
-            r"\b(?:by county|each county|which county|rank county|order county|"
-            r"county values|every county|county groups|new jersey counties|"
-            r"counties have|grouped inventory summary by county)\b",
-            text,
-        )
-    )
+    county_grouping = county_grouping_request
     if county_grouping and "total deck area" in text:
         return (
             "SELECT c.county_code, c.county_name, c.total_deck_area, c.bridge_count "
@@ -1526,7 +1599,7 @@ def _semantic_plan_prompt(generation: PlanGenerationRequest) -> str:
                     "Do not substitute a nearby field or metric for an unsupported requested fact.",
                     "The server already applied workspace, state, bridge, and time scope; never repeat those as filters.",
                     "A named county is a data filter: use the exact reviewed county_code field, remove leading zeroes from its FIPS value, and never add state_code for New Jersey.",
-                    "For count, aggregate, trend, or compare, select at least one active metric whose source_resource exactly equals resource_id.",
+                    "For count, aggregate, trend, or compare, select at least one active metric. Prefer metrics whose source_resource equals resource_id. A metric from another resource is allowed only when the catalog contains one unambiguous direct one-to-one or many-to-one join from the base resource; never use a one-to-many child metric because it would multiply bridge rows.",
                     "For aggregate outputs, selected_fields and dimensions must contain the same field references; list and lookup use selected_fields but no metrics or dimensions.",
                     "For a scalar aggregate or count, keep selected_fields and dimensions empty even when filters reference joined fields.",
                     "Match requested field semantics exactly: maximum span length uses maximum_span_length, never span_continuity.",
@@ -3169,6 +3242,26 @@ def _verification_payload(answer: VerifiedAnswer) -> dict[str, object]:
     }
 
 
+def _reviewed_sql_answer(evidence: EvidenceTable) -> VerifiedAnswer:
+    """Render a bounded, provider-free answer for a code-reviewed SQL template."""
+
+    try:
+        return render_deterministic_answer(evidence)
+    except AnswerAbstained:
+        preview = render_deterministic_answer(evidence, fallback=True)
+        return VerifiedAnswer(
+            answer_markdown=preview.answer_markdown,
+            claims=preview.claims,
+            caveats=tuple(
+                caveat
+                for caveat in preview.caveats
+                if "generated narrative" not in caveat.casefold()
+            ),
+            mode=AnswerMode.DETERMINISTIC,
+            generation_attempts=0,
+        )
+
+
 def _single_bridge_deck_answer(
     evidence: EvidenceTable,
 ) -> VerifiedAnswer | None:
@@ -3391,6 +3484,11 @@ def _record_verified_response(
     fallback_used = verification.get("fallback_used") is True
     if mode == AnswerMode.DETERMINISTIC_FALLBACK.value:
         status = "fallback"
+    elif status == "provisional":
+        # The durable audit schema predates the user-facing provisional label.
+        # Preserve its established vocabulary without mislabeling the response
+        # as verified.
+        status = "abstained" if mode == "abstained" else "fallback"
     audit_request = RecordQueryResponseAuditRequest(
         workspace_id=workspace_id,
         request_id=request.request_id,
@@ -3635,6 +3733,7 @@ def _raw_sql_respects_time_contract(
         "elements",
         "substructure_sets",
         "roadway_classifications",
+        "posting_statuses",
     )
     bridge_match = re.search(
         r"(?:from|join)\s+[\"`\[]?bridges[\"`\]]?\s+(?:as\s+)?([a-z_]\w*)",
@@ -3690,6 +3789,64 @@ def _raw_sql_respects_time_contract(
             rf'(?:\b\w+\.)?["`\[]?data_year["`\]]?\s*=\s*{int(year)}\b',
             normalized,
         )
+    )
+
+
+def _reviewed_raw_bridge_sql(
+    question: str,
+    *,
+    contract: Mapping[str, object],
+    state_code: int,
+) -> str | None:
+    """Return narrow code-owned SQL for reviewed raw-schema compound queries.
+
+    This supplements the model fallback; it does not replace it for unrecognized
+    questions. Server-resolved scope values are the only values interpolated.
+    """
+
+    text = " ".join(re.findall(r"[a-z0-9]+", question.casefold()))
+    year = contract.get("data_year")
+    if year is None:
+        return None
+    if "bridge records are missing a county code" in text:
+        return (
+            "SELECT b.bridge_number, b.bridge_name, b.county_code "
+            "FROM bridges AS b "
+            f"WHERE b.state_code = {int(state_code)} AND b.data_year = {int(year)} "
+            "AND b.county_code IS NULL ORDER BY b.bridge_number ASC"
+        )
+    clearance_match = re.search(
+        r"minimum highway vertical clearance below (\d+(?:\.\d+)?) feet",
+        question.casefold(),
+    )
+    if clearance_match is None:
+        return None
+    if not all(
+        phrase in text
+        for phrase in (
+            "load posting status",
+            "latest posting status change date",
+            "maximum aadt",
+        )
+    ):
+        return None
+    clearance = float(clearance_match.group(1))
+    return (
+        "SELECT b.bridge_number, b.bridge_name, "
+        "MIN(f.highway_min_vertical_clearance) "
+        "AS min_highway_vertical_clearance, "
+        "MAX(p.posting_status_change_date) "
+        "AS latest_posting_status_change_date, "
+        "MAX(f.annual_average_daily_traffic) AS max_aadt "
+        "FROM bridges AS b JOIN features AS f ON "
+        "b.state_code = f.state_code AND b.bridge_number = f.bridge_number "
+        "AND b.data_year = f.data_year JOIN posting_statuses AS p ON "
+        "b.state_code = p.state_code AND b.bridge_number = p.bridge_number "
+        "AND b.data_year = p.data_year "
+        f"WHERE b.state_code = {int(state_code)} AND b.data_year = {int(year)} "
+        f"AND f.highway_min_vertical_clearance < {clearance:g} "
+        "GROUP BY b.bridge_number, b.bridge_name "
+        "ORDER BY min_highway_vertical_clearance ASC, b.bridge_number ASC"
     )
 
 
@@ -3945,6 +4102,11 @@ def _stream_raw_bridge_query(
     workspace_state = get_workspace_state(
         str(database_path), request.scope.workspace_id
     )
+    reviewed_sql = _reviewed_raw_bridge_sql(
+        request.question,
+        contract=time_contract,
+        state_code=request.scope.state_code,
+    )
     feedback = ""
     result: dict[str, object] | None = None
     sql = ""
@@ -3972,31 +4134,35 @@ def _stream_raw_bridge_query(
             f"EXACT_SEMANTIC_REQUIREMENTS:\n{_stable_json(exact_semantic_requirements)}\n"
             f"SCHEMA:\n{schema_context}\nQUESTION:\n{request.question}\n{feedback}"
         )
-        try:
-            payload = _provider_text(
-                prompt,
-                request.cancellation_token,
-                timeout=120,
-                num_predict=4096,
-                response_format=_bridgette_sql_response_format(),
-            )
-        except Exception as exc:
-            _log_provider_failure(
-                request_id=request.request_id,
-                phase="raw_sql",
-                attempt=_attempt + 1,
-                exc=exc,
-            )
-            raise
-        try:
-            decoded = json.loads(payload)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            feedback = (
-                "The previous structured response was incomplete. Return a shorter "
-                "single SELECT with concise aliases."
-            )
-            continue
-        candidate = decoded.get("sql")
+        candidate: object
+        if reviewed_sql is not None:
+            candidate = reviewed_sql
+        else:
+            try:
+                payload = _provider_text(
+                    prompt,
+                    request.cancellation_token,
+                    timeout=120,
+                    num_predict=4096,
+                    response_format=_bridgette_sql_response_format(),
+                )
+            except Exception as exc:
+                _log_provider_failure(
+                    request_id=request.request_id,
+                    phase="raw_sql",
+                    attempt=_attempt + 1,
+                    exc=exc,
+                )
+                raise
+            try:
+                decoded = json.loads(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                feedback = (
+                    "The previous structured response was incomplete. Return a shorter "
+                    "single SELECT with concise aliases."
+                )
+                continue
+            candidate = decoded.get("sql")
         if not isinstance(candidate, str):
             feedback = "The previous response contained no SQL. Return one SELECT."
             continue
@@ -4026,6 +4192,7 @@ def _stream_raw_bridge_query(
             result = _execute_legacy_context_sql(str(database_path), bounded_sql)
             break
         except Exception:
+            reviewed_sql = None
             feedback = (
                 "The previous SQL was rejected or referenced an invalid table/column. "
                 "Use a simpler SELECT using the schema exactly."
@@ -4675,20 +4842,26 @@ def stream_bridgette_semantic_query(
             else None
         )
         if answer is None:
-            answer = render_verified_answer(
-                answer_evidence,
-                generate_narrative=generate_narrative,
-                # Preserve the deployed Bridgette interaction: summarize database
-                # results in natural language and leave SQL/rows as optional client
-                # detail. Numeric claims are still checked against bounded evidence.
-                prefer_narrative=(
-                    bool(answer_evidence.rows)
-                    and not (
-                        len(answer_evidence.rows) == 1
-                        and len(answer_evidence.columns) == 1
-                    )
-                ),
-            )
+            if reviewed_cross_resource_sql is not None:
+                # Reviewed templates are code-owned and already carry validated,
+                # scoped evidence. Render them mechanically so a model narrative
+                # cannot downgrade an otherwise verified answer.
+                answer = _reviewed_sql_answer(answer_evidence)
+            else:
+                answer = render_verified_answer(
+                    answer_evidence,
+                    generate_narrative=generate_narrative,
+                    # Preserve the deployed Bridgette interaction: summarize database
+                    # results in natural language and leave SQL/rows as optional client
+                    # detail. Numeric claims are still checked against bounded evidence.
+                    prefer_narrative=(
+                        bool(answer_evidence.rows)
+                        and not (
+                            len(answer_evidence.rows) == 1
+                            and len(answer_evidence.columns) == 1
+                        )
+                    ),
+                )
         verification = _verification_payload(answer)
         answer_markdown = answer.answer_markdown
         # The hosted Bridgette experience releases the natural-language answer
@@ -4715,23 +4888,45 @@ def stream_bridgette_semantic_query(
         raise
     except AnswerAbstained:
         abstained = True
-        answer = None
-        verification = {
-            "version": ANSWER_VERIFICATION_VERSION,
-            "mode": "abstained",
-            "status": "abstained",
-            "provider_calls": 2,
-            "claims": [],
-            "unverified_claim_count": 0,
-            "fallback_used": False,
-            "caveats": [
-                "The generated narrative was withheld because its claims could not be verified."
-            ],
-        }
-        answer_markdown = (
-            "Bridgette could not safely summarize this result. Use the bounded "
-            "evidence and download metadata instead."
-        )
+        # The query and its bounded rows have already passed the read-only data
+        # boundary. If the model narrative cannot be verified, keep the user
+        # supplied with a mechanical evidence preview and label it provisional.
+        try:
+            answer = _reviewed_sql_answer(answer_evidence)
+        except AnswerAbstained:
+            answer = None
+            verification = {
+                "version": ANSWER_VERIFICATION_VERSION,
+                "mode": "abstained",
+                "status": "provisional",
+                "provider_calls": 2,
+                "claims": [],
+                "unverified_claim_count": 0,
+                "fallback_used": False,
+                "caveats": [
+                    "The model narrative could not be verified and the evidence "
+                    "was too wide for an inline preview; inspect the bounded evidence."
+                ],
+            }
+            answer_markdown = (
+                "Bridgette could not safely summarize this result. Use the bounded "
+                "database evidence and download metadata instead."
+            )
+        else:
+            verification = _verification_payload(answer)
+            verification.update(
+                {
+                    "status": "provisional",
+                    "provider_calls": 2,
+                    "fallback_used": True,
+                    "caveats": [
+                        *verification.get("caveats", []),
+                        "The model narrative could not be verified; Bridgette displayed "
+                        "the bounded database evidence instead.",
+                    ],
+                }
+            )
+            answer_markdown = answer.answer_markdown
 
     warnings = list(verification.get("caveats", []))
     if query_mode == "hybrid" and effective_query_mode == "expert_sql_fallback":
@@ -4783,6 +4978,7 @@ def stream_bridgette_semantic_query(
         evidence,
         unavailable_reason="result_artifact_not_registered",
     )
+    reviewed_sql_answer = reviewed_cross_resource_sql is not None
     evidence_event = {
         "type": "evidence",
         "sql": approved_sql,
@@ -4792,14 +4988,16 @@ def stream_bridgette_semantic_query(
             else "bridge_query_plan"
         ),
         "answer_mode": (
-            "validated_sql_fallback"
+            "verified_reviewed_sql"
+            if reviewed_sql_answer
+            else "validated_sql_fallback"
             if effective_query_mode == "expert_sql_fallback"
             else "verified_semantic_plan"
         ),
         "answer_status": (
-            "sql_assisted"
-            if effective_query_mode == "expert_sql_fallback"
-            else "verified"
+            "verified"
+            if verification.get("status") == "verified"
+            else "provisional"
         ),
         "fallback": {
             "used": query_mode == "hybrid"

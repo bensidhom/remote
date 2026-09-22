@@ -557,6 +557,34 @@ def test_reviewed_owner_condition_plan_preserves_both_filters(
                 "LIMIT 20",
             ),
         ),
+        (
+            "Rank New Jersey counties by average calculated deck area for county-owned bridges, returning county name, distinct bridge count, and average deck area.",
+            (
+                "s.owner = 'L01'",
+                "AS county_name",
+                "COUNT(DISTINCT s.bridge_number)",
+                "AVG(s.calculated_deck_area) AS average_deck_area",
+            ),
+        ),
+        (
+            "For each New Jersey county, count distinct operationally Poor bridges with concrete decks and sum their calculated deck area; rank counties by total deck area.",
+            (
+                "c.condition_class = 'Poor'",
+                "d.has_concrete_deck = 1",
+                "COUNT(DISTINCT s.bridge_number)",
+                "SUM(s.calculated_deck_area) AS total_deck_area",
+            ),
+        ),
+        (
+            "From inventory years 2021 through 2025, return yearly NJDOT-maintained distinct bridge count, total deck area, and operational Poor bridge percentage. Use maintenance responsibility B.CL.02 = S01, not owner.",
+            (
+                "s.maintenance_responsibility = 'S01'",
+                "COUNT(DISTINCT s.bridge_number) AS bridge_count",
+                "SUM(s.calculated_deck_area) AS total_deck_area",
+                "AS poor_bridge_percent",
+                "GROUP BY s.data_year",
+            ),
+        ),
     ],
 )
 def test_reviewed_cross_resource_sql_preserves_compound_filters_without_correlated_aliases(
@@ -869,7 +897,7 @@ def test_scalar_answer_is_provider_free_after_sql_and_emits_rich_evidence(
     assert evidence_event["metric_definitions"][0]["metric_id"] == "inventory.bridge_count"
     assert evidence_event["source_snapshot_status"] == "loaded_inventory"
     assert evidence_event["source_status"]["authoritative_source"].startswith("snbi_bridges.db")
-    assert evidence_event["catalog_version"] == "bridgeguard-semantic-v5-intent-preservation"
+    assert evidence_event["catalog_version"] == "bridgeguard-semantic-v6-safe-metric-joins"
     assert evidence_event["catalog_sha256"] == "a" * 64
     assert evidence_event["snbi_dictionary_version"] == "bridgeguard-snbi-dictionary-v1"
     assert evidence_event["snbi_dictionary_sha256"] == "b" * 64
@@ -1171,7 +1199,8 @@ def test_unverifiable_wide_result_abstains_without_releasing_generated_claims(
             request=Request(question="Explain the wide result"),
         )
     )
-    assert evidence_event["answer_verification"]["status"] == "abstained"
+    assert evidence_event["answer_status"] == "provisional"
+    assert evidence_event["answer_verification"]["status"] == "provisional"
     assert evidence_event["answer_verification"]["claims"] == []
     assert "999" not in token_event["content"]
     assert "could not safely summarize" in token_event["content"]
@@ -1421,7 +1450,7 @@ def test_hybrid_mode_returns_validated_sql_answer_when_plan_is_rejected(monkeypa
     assert [event["type"] for event in events] == ["evidence", "token"]
     evidence_event = events[0]
     assert evidence_event["answer_mode"] == "validated_sql_fallback"
-    assert evidence_event["answer_status"] == "sql_assisted"
+    assert evidence_event["answer_status"] == "verified"
     assert evidence_event["query_language"] == "expert_sql"
     assert evidence_event["fallback"] == {
         "used": True,
@@ -2006,11 +2035,54 @@ def test_inventory_time_contract_defaults_to_latest_and_respects_year_intent():
         "AND s.data_year=b.data_year WHERE b.data_year=2025",
         latest,
     )
+    assert not http_service._raw_sql_respects_time_contract(
+        "SELECT MAX(p.posting_status_change_date) FROM bridges b "
+        "JOIN posting_statuses p ON p.state_code=b.state_code "
+        "AND p.bridge_number=b.bridge_number WHERE b.data_year=2025",
+        latest,
+    )
     result_contract = http_service._raw_result_contract(
         "List latest span configurations with reinforced concrete cast-in-place deck"
     )
     assert "exactly one column named span_configuration_designation" in result_contract
     assert "C01, CR-T" in result_contract
+
+
+def test_reviewed_raw_clearance_posting_query_uses_server_scope():
+    sql = http_service._reviewed_raw_bridge_sql(
+        "List distinct bridges with minimum highway vertical clearance below 13.5 "
+        "feet and at least one load-posting status; show bridge number, bridge name, "
+        "minimum clearance, latest posting status-change date, and maximum AADT.",
+        contract={"mode": "latest_loaded_inventory", "data_year": 2025},
+        state_code=34,
+    )
+
+    assert sql is not None
+    assert "b.state_code = 34" in sql
+    assert "b.data_year = 2025" in sql
+    assert "f.highway_min_vertical_clearance < 13.5" in sql
+    assert "b.data_year = p.data_year" in sql
+    assert http_service._raw_sql_respects_time_contract(
+        sql,
+        {"mode": "latest_loaded_inventory", "data_year": 2025},
+    )
+
+
+def test_reviewed_raw_missing_county_query_uses_server_scope():
+    sql = http_service._reviewed_raw_bridge_sql(
+        "Which latest published bridge records are missing a county code?",
+        contract={"mode": "latest_loaded_inventory", "data_year": 2025},
+        state_code=34,
+    )
+
+    assert sql is not None
+    assert "b.state_code = 34" in sql
+    assert "b.data_year = 2025" in sql
+    assert "b.county_code IS NULL" in sql
+    assert http_service._raw_sql_respects_time_contract(
+        sql,
+        {"mode": "latest_loaded_inventory", "data_year": 2025},
+    )
 
 
 def test_loaded_inventory_answers_with_server_resolved_latest_year(tmp_path, monkeypatch):

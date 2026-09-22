@@ -340,6 +340,22 @@ def test_unknown_nj_county_requires_correction_without_guessing() -> None:
     assert interpret_bridge_query(remove_county, time_mode="latest").should_query
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "For each New Jersey county, count operationally Poor bridges.",
+        "Rank New Jersey counties by total deck area.",
+        "Compare all counties by bridge count.",
+        "Group results by counties.",
+    ],
+)
+def test_generic_county_grouping_is_not_an_unknown_county_filter(question: str) -> None:
+    result = interpret_bridge_query(question)
+
+    assert result.code != "unknown_nj_county"
+    assert result.should_query
+
+
 def test_statewide_county_ranking_recovery_prompt_is_not_an_unknown_county() -> None:
     result = interpret_bridge_query(
         "Which 10 New Jersey counties have the most distinct bridges? "

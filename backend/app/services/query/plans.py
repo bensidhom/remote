@@ -935,14 +935,6 @@ def validate_bridge_query_plan(
                 metric_id=metric_id,
                 reason=metric.disabled_reason,
             )
-        if metric.source_resource_id != plan.resource_id:
-            raise PlanValidationError(
-                "metric_resource_mismatch",
-                "All metrics must use the plan's declared base resource",
-                metric_id=metric_id,
-                metric_resource_id=metric.source_resource_id,
-                plan_resource_id=plan.resource_id,
-            )
         if ":" in metric.expression:
             raise PlanValidationError(
                 "metric_requires_server_parameter",
@@ -1051,6 +1043,15 @@ def validate_bridge_query_plan(
         for item in (*selected, *dimensions, *(entry[1] for entry in validated_filters))
         if item.resource_id != plan.resource_id
     }
+    # Metrics may use another resource only through a reviewed direct join that
+    # preserves the declared base grain. This is intentionally additive: plans
+    # whose metrics already use the base resource compile exactly as before,
+    # while one-to-many child metrics remain rejected below.
+    referenced_resource_ids.update(
+        metric.source_resource_id
+        for metric in metrics
+        if metric.source_resource_id != plan.resource_id
+    )
     joins: list[SemanticJoin] = []
     joined_resources: list[SemanticResource] = []
     for resource_id in sorted(referenced_resource_ids):
@@ -1132,6 +1133,35 @@ def _quote(identifier: str) -> str:
 
 def _field_sql(field: ResolvedField) -> str:
     return f'{_quote(field.resource_id)}.{_quote(field.field_id)}'
+
+
+def _metric_expression_sql(metric: MetricDefinition, base_resource_id: str) -> str:
+    """Qualify cross-resource metric columns without accepting model SQL.
+
+    Metric expressions are reviewed registry constants. Only their declared
+    ``required_columns`` are rewritten, and only when the metric is reached
+    through a safe reviewed join. Base-resource expressions are kept byte-for-
+    byte compatible with the existing compiler output.
+    """
+
+    if metric.source_resource_id == base_resource_id:
+        return metric.expression
+    expression = metric.expression
+    for column in sorted(metric.required_columns, key=len, reverse=True):
+        qualified = f'{_quote(metric.source_resource_id)}.{_quote(column)}'
+        expression, count = re.subn(
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])",
+            qualified,
+            expression,
+        )
+        if count == 0:
+            raise PlanCompilationError(
+                "metric_expression_column_missing",
+                "Reviewed metric expression does not reference a required column",
+                metric_id=metric.metric_id,
+                column=column,
+            )
+    return expression
 
 
 def _sql_literal(value: object) -> str:
@@ -1251,7 +1281,8 @@ def _logical_sql(validated: ValidatedBridgeQueryPlan) -> tuple[str, tuple[dict[s
         )
     for metric in validated.metrics:
         alias = validated.output_aliases[metric.metric_id]
-        output_parts.append(f"{metric.expression} AS {_quote(alias)}")
+        expression = _metric_expression_sql(metric, plan.resource_id)
+        output_parts.append(f"{expression} AS {_quote(alias)}")
         outputs.append(
             {
                 "kind": "metric",

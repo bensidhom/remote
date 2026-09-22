@@ -367,15 +367,40 @@ def test_unknown_and_disabled_metrics_have_distinct_errors(catalog) -> None:
     )
 
 
-def test_metric_must_match_declared_base_resource(catalog) -> None:
+def test_cross_resource_metric_uses_reviewed_grain_preserving_join(catalog) -> None:
+    result = compile_bridge_query_plan(
+        BridgeQueryPlan(
+            "trend",
+            "v_published_bridge_snapshots",
+            metric_ids=(
+                "inventory.bridge_count",
+                "inventory.total_deck_area",
+                "inventory.poor_bridge_percent",
+            ),
+            selected_fields=("data_year",),
+            dimensions=("data_year",),
+            filters=(PlanFilter("maintenance_responsibility", "eq", "S01"),),
+            time_scope=PlanTimeScope("trend"),
+            order=(PlanOrder("data_year", "asc"),),
+        ),
+        catalog,
+        QueryScope("workspace-a", 34, "trend", start_year=2021, end_year=2025),
+    )
+
+    assert 'JOIN "v_bridge_condition"' in result.logical_sql
+    assert '"v_bridge_condition"."condition_class" = \'Poor\'' in result.logical_sql
+    assert result.evidence.joins == ("published_to_condition",)
+
+
+def test_cross_resource_metric_rejects_one_to_many_join(catalog) -> None:
     assert_plan_error(
         PlanValidationError,
-        "metric_resource_mismatch",
+        "aggregate_grain_error",
         lambda: validate_bridge_query_plan(
             BridgeQueryPlan(
-                "count",
-                "v_bridge_condition",
-                metric_ids=("inventory.bridge_count",),
+                "aggregate",
+                "v_published_bridge_snapshots",
+                metric_ids=("inventory.average_daily_traffic",),
                 time_scope=PlanTimeScope("exact"),
             ),
             catalog,
@@ -534,6 +559,25 @@ def test_reviewed_cross_resource_dimension_compiles_one_to_one_join(catalog) -> 
         "v_bridge_condition",
         "v_published_bridge_snapshots",
     )
+
+
+def test_reviewed_county_name_dimension_compiles_many_to_one_join(catalog) -> None:
+    plan = BridgeQueryPlan(
+        "aggregate",
+        "v_published_bridge_snapshots",
+        metric_ids=("inventory.bridge_count", "inventory.average_deck_area"),
+        selected_fields=("v_county_bridge_inventory.county_name",),
+        dimensions=("v_county_bridge_inventory.county_name",),
+        filters=(PlanFilter("owner", "eq", "L01"),),
+        time_scope=PlanTimeScope("exact"),
+        order=(PlanOrder("inventory.average_deck_area", "desc"),),
+    )
+    result = compile_bridge_query_plan(
+        plan, catalog, QueryScope("workspace-a", 34, "exact", data_year=2025)
+    )
+
+    assert 'JOIN "v_county_bridge_inventory"' in result.logical_sql
+    assert result.evidence.joins == ("published_to_county_inventory",)
 
 
 def test_scalar_current_concrete_deck_count_accepts_joined_county_filter(catalog) -> None:
