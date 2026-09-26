@@ -36,13 +36,13 @@ class TestHostedPointCloud:
             return_value={
                 "text": '{"regions":[]}',
                 "provider": "cerebras",
-                "model": "gemma-4-31b",
+                "model": "qwen-3.8-27b",
                 "usage": {"tokens": 4},
             },
         ) as generate_messages, patch.object(
             point_cloud.llm_providers,
             "vision_model",
-            return_value="gemma-4-31b",
+            return_value="qwen-3.8-27b",
         ), patch.object(point_cloud.llm_providers, "require_generation_capability"):
             response = point_cloud._hosted_vlm_generate(
                 "Inspect this scene.",
@@ -64,7 +64,7 @@ class TestHostedPointCloud:
         )
         assert kwargs["timeout"] == 42
         assert kwargs["num_predict"] == 128
-        assert kwargs["server_model_override"] == "gemma-4-31b"
+        assert kwargs["server_model_override"] == "qwen-3.8-27b"
         assert kwargs["response_format"]["json_schema"]["strict"] is True
         assert response.receipt.image_receipts[0]["sha256"] == image.sha256
 
@@ -88,7 +88,7 @@ class TestHostedPointCloud:
         ), patch.object(
             point_cloud.llm_providers,
             "vision_model",
-            return_value="gemma-4-31b",
+            return_value="qwen-3.8-27b",
         ), patch.object(point_cloud.llm_providers, "require_generation_capability"):
             with pytest.raises(VlmProviderCallError) as captured:
                 point_cloud._hosted_vlm_generate(

@@ -38,10 +38,66 @@ def test_cerebras_client_cache_honors_timeout_and_disables_sdk_retries(
 
 
 def test_model_capabilities_keep_text_only_gpt_oss_out_of_vision():
+    qwen = llm_providers.generation_model_capabilities("qwen-3.8-27b")
+    assert qwen["text"] is True
+    assert qwen["vision"] is True
+    assert qwen["json_schema"] is True
     assert llm_providers.generation_model_capabilities("gemma-4-31b")["vision"] is True
     assert llm_providers.generation_model_capabilities("gpt-oss-120b")["vision"] is False
     with pytest.raises(RuntimeError, match="does not have reviewed vision capability"):
         llm_providers.require_generation_capability("vision", model="gpt-oss-120b")
+
+
+def test_qwen_is_default_and_explicitly_disables_provider_default_reasoning(
+    monkeypatch,
+):
+    monkeypatch.delenv("CEREBRAS_MODEL", raising=False)
+    monkeypatch.delenv("CEREBRAS_VISION_MODEL", raising=False)
+    monkeypatch.delenv("CEREBRAS_REASONING_EFFORT", raising=False)
+
+    kwargs = llm_providers._cerebras_create_kwargs(
+        None,
+        [{"role": "user", "content": "Reply OK"}],
+        32,
+        0,
+        False,
+    )
+
+    assert llm_providers.generation_model() == "qwen-3.8-27b"
+    assert llm_providers.vision_model() == "qwen-3.8-27b"
+    assert kwargs["model"] == "qwen-3.8-27b"
+    assert kwargs["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize("configured", ["none", "off", "0"])
+def test_reasoning_disable_aliases_are_sent_as_none(monkeypatch, configured):
+    monkeypatch.setenv("CEREBRAS_MODEL", "qwen-3.8-27b")
+    monkeypatch.setenv("CEREBRAS_REASONING_EFFORT", configured)
+
+    kwargs = llm_providers._cerebras_create_kwargs(
+        None,
+        [{"role": "user", "content": "Reply OK"}],
+        32,
+        0,
+        False,
+    )
+
+    assert kwargs["reasoning_effort"] == "none"
+
+
+def test_explicit_qwen_reasoning_effort_is_preserved(monkeypatch):
+    monkeypatch.setenv("CEREBRAS_MODEL", "qwen-3.8-27b")
+    monkeypatch.setenv("CEREBRAS_REASONING_EFFORT", "high")
+
+    kwargs = llm_providers._cerebras_create_kwargs(
+        None,
+        [{"role": "user", "content": "Reply OK"}],
+        512,
+        0,
+        False,
+    )
+
+    assert kwargs["reasoning_effort"] == "high"
 
 
 def test_cerebras_call_retries_transient_connection_failures(monkeypatch):
@@ -126,16 +182,17 @@ def test_typed_multimodal_generation_preserves_roles_png_mime_schema_and_receipt
     result = llm_providers.generate_messages(
         messages,
         response_format=schema,
-        server_model_override="gemma-4-31b",
+        server_model_override="qwen-3.8-27b",
     )
 
     assert captured["messages"] == messages
     assert captured["response_format"] == schema
-    assert captured["model"] == "gemma-4-31b"
+    assert captured["model"] == "qwen-3.8-27b"
+    assert captured["reasoning_effort"] == "none"
     assert result == {
         "text": '{"regions":[]}',
         "provider": "cerebras",
-        "model": "gemma-4-31b",
+        "model": "qwen-3.8-27b",
         "usage": {"prompt_tokens": 12, "completion_tokens": 4, "tokens": 16},
         "has_images": True,
     }

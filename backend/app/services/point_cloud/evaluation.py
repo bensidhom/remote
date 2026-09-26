@@ -311,7 +311,7 @@ def active_evaluation_versions() -> EvaluationVersions:
         model=(
             os.getenv("CEREBRAS_VISION_MODEL", "").strip()
             or os.getenv("CEREBRAS_MODEL", "").strip()
-            or "gemma-4-31b"
+            or "qwen-3.8-27b"
         ),
         context_builder_version=KNOWLEDGE_PACK_VERSION,
     )

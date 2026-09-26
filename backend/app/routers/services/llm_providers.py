@@ -20,10 +20,19 @@ CEREBRAS = "cerebras"
 TEI = "tei"
 
 # ── Model defaults ───────────────────────────────────────────────────
-_CEREBRAS_MODEL_DEFAULT = "gemma-4-31b"
-_SERVER_MODEL_OVERRIDES = frozenset({"gemma-4-31b", "gpt-oss-120b"})
-_CEREBRAS_VISION_MODEL_DEFAULT = "gemma-4-31b"
+_CEREBRAS_MODEL_DEFAULT = "qwen-3.8-27b"
+_SERVER_MODEL_OVERRIDES = frozenset(
+    {"qwen-3.8-27b", "gemma-4-31b", "gpt-oss-120b"}
+)
+_CEREBRAS_VISION_MODEL_DEFAULT = "qwen-3.8-27b"
 _CEREBRAS_MODEL_CAPABILITIES = {
+    "qwen-3.8-27b": {
+        "text": True,
+        "vision": True,
+        "json_schema": True,
+    },
+    # Gemma is retained for customers with a Cerebras dedicated endpoint, but
+    # it is no longer available from Cerebras's public inference endpoint.
     "gemma-4-31b": {
         "text": True,
         "vision": True,
@@ -45,6 +54,13 @@ _TEI_TRUNCATION_DIRECTION = "right"
 _TEI_DTYPE = "float32"
 _TEI_POOLING = "mean"
 _CEREBRAS_MODEL_LIMITS = {
+    "qwen-3.8-27b": {
+        "context": 65536,
+        # Cerebras account/tier limits vary, so only the documented model
+        # context is built in. Deployments can set explicit env limits.
+        "requests": {"minute": None, "hour": None, "day": None},
+        "tokens": {"minute": None, "hour": None, "day": None},
+    },
     "gemma-4-31b": {
         "context": 65536,
         "requests": {"minute": 5, "hour": 150, "day": 2400},
@@ -307,8 +323,8 @@ def _record_usage(provider: str, category: str, estimated_tokens: int = 0,
 def usage_snapshot() -> dict:
     """Local daily hosted-API usage tracked by this app.
 
-    Provider dashboards may have stricter account-level limits. Cerebras
-    gemma-4-31b has built-in defaults; env vars can override any limit.
+    Provider dashboards may have stricter account-level limits. Model context
+    defaults are built in; env vars can override any account-specific limit.
     """
     with _usage_lock:
         data = _load_usage()
@@ -472,14 +488,17 @@ def _cerebras_create_kwargs(
     }
     if response_format is not None:
         kwargs["response_format"] = response_format
-    # reasoning_effort is a Cerebras-specific knob (see reference usage). It is
-    # OFF by default: on reasoning models (e.g. gemma-4-31b) the hidden reasoning
-    # consumes the token budget and leaves message.content EMPTY when num_predict
-    # is modest — which many call sites use. Opt back in with
-    # CEREBRAS_REASONING_EFFORT=low|medium|high (and give it a large num_predict).
+    # Qwen 3.8 defaults to high reasoning at Cerebras. Most call sites here use
+    # modest completion budgets, so explicitly disable reasoning unless the
+    # deployment opts in. This avoids hidden reasoning exhausting the budget
+    # and leaving message.content empty.
     effort = os.getenv("CEREBRAS_REASONING_EFFORT", "").strip().lower()
-    if effort and effort not in ("none", "off", "0"):
+    if effort in ("none", "off", "0"):
+        kwargs["reasoning_effort"] = "none"
+    elif effort:
         kwargs["reasoning_effort"] = effort
+    elif selected_model == "qwen-3.8-27b":
+        kwargs["reasoning_effort"] = "none"
     return kwargs
 
 
