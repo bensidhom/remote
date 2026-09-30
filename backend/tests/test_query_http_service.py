@@ -1203,7 +1203,7 @@ def test_unverifiable_wide_result_abstains_without_releasing_generated_claims(
     assert evidence_event["answer_verification"]["status"] == "provisional"
     assert evidence_event["answer_verification"]["claims"] == []
     assert "999" not in token_event["content"]
-    assert "could not safely summarize" in token_event["content"]
+    assert "could not verify a narrative summary" in token_event["content"]
 
 
 def test_plan_and_download_hooks_are_canonicalized_and_fail_closed(monkeypatch):
@@ -1643,7 +1643,7 @@ def test_non_planning_abstention_becomes_actionable_without_releasing_data(monke
     assert len(events[0]["options"]) == 3
     assert "query_denied" not in repr(events[0])
     assert events[0]["warnings"] == [
-        "No failed, partial, or unverified result was released."
+        "No partial or unverified result was shown."
     ]
 
 
@@ -1676,8 +1676,72 @@ def test_execution_failure_becomes_actionable_without_raw_error(monkeypatch):
 
     assert event["type"] == "clarification"
     assert event["code"] == "query_could_not_be_completed"
+    assert "couldn't safely" not in event["message"]
+    assert "database query couldn't be completed" in event["message"].casefold()
     assert event["options"][0]["suggested_question"] != Request.question
     assert "distinct bridges" in event["options"][0]["suggested_question"]
+
+
+def test_provider_unavailability_is_named_instead_of_called_a_safety_failure(monkeypatch):
+    class APIConnectionError(RuntimeError):
+        pass
+
+    monkeypatch.setenv("BRIDGETTE_QUERY_ENGINE", "agentic")
+    monkeypatch.setattr(
+        http_service,
+        "_stream_agentic_bridge_query",
+        lambda **_kwargs: (_ for _ in ()).throw(APIConnectionError("offline")),
+    )
+
+    event = list(
+        http_service.stream_bridgette_semantic_query(
+            database_path="does-not-exist.sqlite3",
+            workspace_id=WORKSPACE,
+            request=Request(
+                question="List latest span configurations with concrete decks"
+            ),
+        )
+    )[0]
+
+    assert event["code"] == "query_provider_unavailable"
+    assert "language-model service was temporarily unavailable" in event["message"]
+    assert "couldn't safely" not in event["message"]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_tags"),
+    (
+        (
+            "How many distinct bridges were built before 1970?\n\n"
+            "Additional context: Use inventory year 2025. Use Year Built (B.W.01), "
+            "exclude missing values, and return the distinct bridge count.",
+            ("BW01",),
+        ),
+        ("Which 10 bridges have the lowest deck condition rating?", ("BC01",)),
+        (
+            "Show bridges with maximum highway vertical clearance below 14 feet.",
+            ("BH12",),
+        ),
+        ("What is the total deck square footage in the latest inventory?", ("BG16",)),
+        ("What is the total reported bridge length for inventory year 2025?", ("BG02",)),
+        (
+            "List 10 distinct bridge numbers.\n\nAdditional context: exclude missing "
+            "values and return one row per bridge.",
+            ("BID01",),
+        ),
+        ("Which bridges have known latitude and longitude?", ("BL05", "BL06")),
+        (
+            "List owner and maintenance responsibility codes for every bridge.",
+            ("BCL02", "BCL01"),
+        ),
+    ),
+)
+def test_recovery_field_ranking_ignores_generic_boilerplate_and_nearby_fields(
+    question, expected_tags
+):
+    assert tuple(
+        field.tag for field, _codes in http_service._rank_recovery_fields(question)
+    ) == expected_tags
 
 
 def test_audit_failure_becomes_actionable_without_raw_error(monkeypatch):
@@ -1947,6 +2011,498 @@ def test_raw_schema_provider_failure_uses_customized_recovery(monkeypatch):
     ]
 
 
+def _agentic_inventory_database(tmp_path):
+    database = tmp_path / "agentic-inventory.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE bridges (
+            state_code INTEGER NOT NULL,
+            bridge_number TEXT NOT NULL,
+            data_year INTEGER NOT NULL,
+            county_code INTEGER,
+            owner TEXT,
+            maintenance_responsibility TEXT,
+            calculated_deck_area REAL,
+            operational_condition TEXT
+        );
+        CREATE TABLE ref_counties (
+            state_code INTEGER NOT NULL,
+            county_code INTEGER NOT NULL,
+            county_name TEXT NOT NULL
+        );
+        INSERT INTO ref_counties VALUES (34, 1, 'Alpha'), (34, 3, 'Beta');
+        INSERT INTO bridges VALUES
+            (34, 'A', 2025, 1, 'L01', 'S01', 100.0, 'Poor'),
+            (34, 'B', 2025, 1, 'L01', 'S01', 300.0, 'Good'),
+            (34, 'C', 2025, 3, 'L01', 'S01', 600.0, 'Poor'),
+            (34, 'D', 2025, 3, 'S01', 'S01', 900.0, 'Good'),
+            (34, 'A', 2024, 1, 'L01', 'S01', 90.0, 'Poor');
+        CREATE VIEW v_bridge_condition AS
+            SELECT state_code, bridge_number, data_year,
+                   operational_condition AS condition_class
+            FROM bridges;
+        """
+    )
+    connection.commit()
+    connection.close()
+    return database
+
+
+def _install_agentic_workspace(monkeypatch):
+    monkeypatch.setattr(
+        http_service,
+        "get_workspace_state",
+        lambda _database, _workspace: SimpleNamespace(
+            schema_generation=5,
+            data_generation=9,
+        ),
+    )
+
+
+def test_agentic_county_query_returns_count_and_average_area(tmp_path, monkeypatch):
+    database = _agentic_inventory_database(tmp_path)
+    _install_agentic_workspace(monkeypatch)
+    question = (
+        "For each New Jersey county, show the number of county-owned bridges and "
+        "their average deck area, ranked from largest average deck area to smallest"
+    )
+    sql = (
+        "SELECT c.county_name, COUNT(DISTINCT b.bridge_number) AS bridge_count, "
+        "AVG(b.calculated_deck_area) AS average_deck_area FROM bridges AS b "
+        "JOIN ref_counties AS c ON c.state_code=b.state_code AND "
+        "c.county_code=b.county_code WHERE b.state_code=34 AND "
+        "b.data_year=2025 AND b.owner='L01' GROUP BY c.county_name "
+        "ORDER BY average_deck_area DESC"
+    )
+
+    def provider(_prompt, _token, **kwargs):
+        name = kwargs["response_format"]["json_schema"]["name"]
+        if name == "bridgette_agentic_query":
+            return json.dumps(
+                {
+                    "interpretation_summary": "Group county-owned bridges by county.",
+                    "requirements": [
+                        {"id": "county", "description": "county name", "kind": "grouping", "output_aliases": ["county_name"]},
+                        {"id": "count", "description": "distinct bridge count", "kind": "output", "output_aliases": ["bridge_count"]},
+                        {"id": "area", "description": "average deck area", "kind": "output", "output_aliases": ["average_deck_area"]},
+                        {"id": "owner", "description": "county-owned", "kind": "filter", "output_aliases": []},
+                        {"id": "rank", "description": "largest average first", "kind": "ordering", "output_aliases": []},
+                    ],
+                    "sql": sql,
+                }
+            )
+        return json.dumps(
+            {
+                "answer_markdown": "Beta ranks first, followed by Alpha.",
+                "complete": True,
+                "missing_requirements": [],
+            }
+        )
+
+    monkeypatch.setattr(http_service, "_provider_text", provider)
+    events = list(
+        http_service._stream_raw_bridge_query(
+            database_path=database,
+            request=Request(question=question),
+            inventory_context={"latest_loaded_year": 2025},
+            agentic=True,
+        )
+    )
+
+    assert events[0]["answer_mode"] == "agentic_sql"
+    assert events[0]["answer_status"] == "verified"
+    assert events[0]["columns"] == [
+        "county_name", "bridge_count", "average_deck_area"
+    ]
+    assert events[0]["rows"] == [["Beta", 1, 600.0], ["Alpha", 2, 200.0]]
+
+
+def test_agentic_yearly_query_returns_every_requested_measure(tmp_path, monkeypatch):
+    database = _agentic_inventory_database(tmp_path)
+    _install_agentic_workspace(monkeypatch)
+    question = (
+        "For each inventory year from 2024 through 2025, show the number of "
+        "NJDOT-maintained bridges, their total deck area, and the percentage "
+        "classified as operationally Poor."
+    )
+    sql = (
+        "SELECT b.data_year, COUNT(DISTINCT b.bridge_number) AS bridge_count, "
+        "SUM(b.calculated_deck_area) AS total_deck_area, "
+        "100.0 * COUNT(DISTINCT CASE WHEN c.condition_class='Poor' THEN "
+        "b.bridge_number END) / NULLIF(COUNT(DISTINCT b.bridge_number),0) "
+        "AS poor_percentage FROM bridges AS b JOIN v_bridge_condition AS c ON "
+        "c.state_code=b.state_code AND c.bridge_number=b.bridge_number AND "
+        "c.data_year=b.data_year WHERE b.state_code=34 AND "
+        "b.data_year BETWEEN 2024 AND 2025 AND "
+        "b.maintenance_responsibility='S01' GROUP BY b.data_year "
+        "ORDER BY b.data_year"
+    )
+
+    def provider(_prompt, _token, **kwargs):
+        name = kwargs["response_format"]["json_schema"]["name"]
+        if name == "bridgette_agentic_query":
+            return json.dumps(
+                {
+                    "interpretation_summary": "One row per inventory year.",
+                    "requirements": [
+                        {"id": "year", "description": "inventory year", "kind": "grouping", "output_aliases": ["data_year"]},
+                        {"id": "count", "description": "bridge count", "kind": "output", "output_aliases": ["bridge_count"]},
+                        {"id": "area", "description": "total deck area", "kind": "output", "output_aliases": ["total_deck_area"]},
+                        {"id": "poor", "description": "Poor percentage", "kind": "output", "output_aliases": ["poor_percentage"]},
+                        {"id": "maintainer", "description": "NJDOT maintained", "kind": "filter", "output_aliases": []},
+                    ],
+                    "sql": sql,
+                }
+            )
+        return json.dumps(
+            {
+                "answer_markdown": "The result includes all requested yearly measures.",
+                "complete": True,
+                "missing_requirements": [],
+            }
+        )
+
+    monkeypatch.setattr(http_service, "_provider_text", provider)
+    events = list(
+        http_service._stream_raw_bridge_query(
+            database_path=database,
+            request=Request(question=question),
+            inventory_context={"latest_loaded_year": 2025},
+            agentic=True,
+        )
+    )
+
+    assert events[0]["answer_status"] == "verified"
+    assert events[0]["columns"] == [
+        "data_year", "bridge_count", "total_deck_area", "poor_percentage"
+    ]
+    assert len(events[0]["rows"]) == 2
+
+
+def test_agentic_safe_incomplete_query_is_shown_as_provisional(tmp_path, monkeypatch):
+    database = _agentic_inventory_database(tmp_path)
+    _install_agentic_workspace(monkeypatch)
+    responses = iter(
+        [
+            json.dumps(
+                {
+                    "interpretation_summary": "Count and total area.",
+                    "requirements": [
+                        {"id": "count", "description": "bridge count", "kind": "output", "output_aliases": ["bridge_count"]},
+                        {"id": "area", "description": "total deck area", "kind": "output", "output_aliases": ["total_deck_area"]},
+                    ],
+                    "sql": "SELECT COUNT(*) AS bridge_count FROM bridges WHERE state_code=34 AND data_year=2025",
+                }
+            ),
+            json.dumps(
+                {
+                    "answer_markdown": "The result contains the bridge count only.",
+                    "complete": False,
+                    "missing_requirements": ["total deck area"],
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    events = list(
+        http_service._stream_raw_bridge_query(
+            database_path=database,
+            request=Request(question="How many bridges are there and what is their total deck area?"),
+            inventory_context={"latest_loaded_year": 2025},
+            agentic=True,
+        )
+    )
+
+    assert [event["type"] for event in events] == ["evidence", "token"]
+    assert events[0]["answer_status"] == "provisional"
+    assert events[0]["rows"] == [[4]]
+    assert events[1]["content"] == "The result contains the bridge count only."
+    assert "total deck area" in events[0]["agentic_review"]["missing_requirements"]
+
+
+def test_agentic_model_routes_paraphrased_dashboard_question_to_kpi(
+    tmp_path, monkeypatch
+):
+    database = _agentic_inventory_database(tmp_path)
+    _install_agentic_workspace(monkeypatch)
+    captured = {}
+
+    def kpi_route(**kwargs):
+        captured["intent"] = kwargs["interpreted_intent"].as_dict()
+        return iter(
+            [
+                {
+                    "type": "evidence",
+                    "answer_mode": "verified_kpi",
+                    "rows": [[548134.0]],
+                },
+                {"type": "token", "content": "548,134.0 ft²"},
+            ]
+        )
+
+    monkeypatch.setattr(http_service, "stream_bridgette_kpi_query", kpi_route)
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "route": "kpi",
+                "kpi_intent": {
+                    "family": "age_condition",
+                    "measure": "deck_area",
+                    "population": "statewide",
+                    "condition": "Good",
+                    "component": "",
+                    "age_bin": "50-54",
+                    "county": "",
+                    "scenario": "",
+                    "projection_year": None,
+                    "inventory_year": None,
+                    "program_measure_id": "",
+                },
+                "interpretation_summary": "Good bridge deck area for one age band.",
+                "requirements": [
+                    {
+                        "id": "area",
+                        "description": "deck area",
+                        "kind": "output",
+                        "output_aliases": [],
+                    },
+                    {
+                        "id": "age",
+                        "description": "50 through 54 years",
+                        "kind": "filter",
+                        "output_aliases": [],
+                    },
+                    {
+                        "id": "condition",
+                        "description": "Good condition",
+                        "kind": "filter",
+                        "output_aliases": [],
+                    },
+                ],
+                "sql": "",
+            }
+        ),
+    )
+
+    events = list(
+        http_service._stream_raw_bridge_query(
+            database_path=database,
+            request=Request(
+                question=(
+                    "How many square feet of deck belong to Good-rated structures "
+                    "whose ages lie in the fifty-to-fifty-four-year band?"
+                )
+            ),
+            inventory_context={"latest_loaded_year": 2025},
+            agentic=True,
+        )
+    )
+
+    assert captured["intent"] == {
+        "family": "age_condition",
+        "measure": "deck_area",
+        "population": "statewide",
+        "condition": "Good",
+        "age_bin": "50-54",
+    }
+    assert events[0]["answer_mode"] == "verified_kpi"
+
+
+def test_agentic_semantic_router_selects_kpi_before_sql_generation(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda _prompt, _token, **kwargs: (
+            captured.setdefault(
+                "schema", kwargs["response_format"]["json_schema"]["name"]
+            )
+            and json.dumps(
+                {
+                    "route": "kpi",
+                    "kpi_intent": {
+                        "family": "age_condition",
+                        "measure": "deck_area",
+                        "population": "statewide",
+                        "condition": "Good",
+                        "component": "",
+                        "age_bin": "50-54",
+                        "county": "",
+                        "scenario": "",
+                        "projection_year": None,
+                        "inventory_year": None,
+                        "program_measure_id": "",
+                    },
+                    "interpretation_summary": "Governed age-condition deck area.",
+                }
+            )
+        ),
+    )
+
+    def kpi_route(**kwargs):
+        captured["intent"] = kwargs["interpreted_intent"].as_dict()
+        return iter(
+            [
+                {"type": "evidence", "answer_mode": "verified_kpi"},
+                {"type": "token", "content": "548,134.0 ft²"},
+            ]
+        )
+
+    monkeypatch.setattr(http_service, "stream_bridgette_kpi_query", kpi_route)
+
+    events = list(
+        http_service._stream_agentic_bridge_query(
+            database_path="not-opened.sqlite3",
+            request=Request(
+                question=(
+                    "How many square feet of deck belong to Good-rated structures "
+                    "whose ages lie in the fifty-to-fifty-four-year band?"
+                )
+            ),
+        )
+    )
+
+    assert captured["schema"] == "bridgette_semantic_route"
+    assert captured["intent"]["age_bin"] == "50-54"
+    assert events[0]["answer_mode"] == "verified_kpi"
+
+
+def test_agentic_semantic_router_locks_general_question_to_database(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        http_service,
+        "_provider_text",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "route": "database",
+                "kpi_intent": {
+                    "family": "none",
+                    "measure": "",
+                    "population": "",
+                    "condition": "",
+                    "component": "",
+                    "age_bin": "",
+                    "county": "",
+                    "scenario": "",
+                    "projection_year": None,
+                    "inventory_year": None,
+                    "program_measure_id": "",
+                },
+                "interpretation_summary": "Owner-filtered deck area is a database query.",
+            }
+        ),
+    )
+
+    def raw_route(**kwargs):
+        captured.update(kwargs)
+        return iter([{"type": "token", "content": "database answer"}])
+
+    monkeypatch.setattr(http_service, "_stream_raw_bridge_query", raw_route)
+
+    events = list(
+        http_service._stream_agentic_bridge_query(
+            database_path="unused.sqlite3",
+            request=Request(
+                question="Total deck area for bridges owned by the state DOT"
+            ),
+        )
+    )
+
+    assert captured["agentic"] is True
+    assert captured["semantic_route_locked"] == "database"
+    assert events == [{"type": "token", "content": "database answer"}]
+
+
+def test_default_engine_uses_model_router_not_legacy_regex(monkeypatch):
+    monkeypatch.delenv("BRIDGETTE_QUERY_ENGINE", raising=False)
+    monkeypatch.setattr(
+        http_service,
+        "_stream_agentic_bridge_query",
+        lambda **_kwargs: iter(
+            [
+                {"type": "evidence", "answer_mode": "agentic_sql"},
+                {"type": "token", "content": "answer"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        http_service,
+        "stream_bridgette_kpi_query",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy regex KPI router must not run")
+        ),
+    )
+
+    events = list(
+        http_service.stream_bridgette_semantic_query(
+            database_path="not-opened.sqlite3",
+            workspace_id=WORKSPACE,
+            request=Request(question="Use whatever phrasing I choose."),
+        )
+    )
+
+    assert [event["type"] for event in events] == ["evidence", "token"]
+
+
+def test_agentic_context_exposes_all_codes_and_aliases(tmp_path):
+    database = _agentic_inventory_database(tmp_path)
+
+    context = json.loads(
+        http_service._raw_bridge_schema_context(
+            database,
+            "How many bridges are there?",
+            full_context=True,
+        )
+    )
+
+    assert len(context["snbi_field_dictionary"]) == 154
+    assert "BCL01" in context["all_limited_value_fields"]
+    assert "BAP01" in context["all_limited_value_fields"]
+    assert len(context["all_reviewed_semantic_aliases"]) == len(
+        http_service.DEFAULT_SEMANTIC_ALIASES.records
+    )
+
+
+def test_agentic_engine_bypasses_legacy_semantic_gates(monkeypatch):
+    monkeypatch.setenv("BRIDGETTE_QUERY_ENGINE", "agentic")
+    monkeypatch.setattr(
+        http_service,
+        "_stream_agentic_bridge_query",
+        lambda **_kwargs: iter(
+            [
+                {"type": "evidence", "answer_mode": "agentic_sql"},
+                {"type": "token", "content": "answer"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        http_service,
+        "_known_capability_gap_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy capability gate must not run")
+        ),
+    )
+
+    events = list(
+        http_service.stream_bridgette_semantic_query(
+            database_path="not-opened.sqlite3",
+            workspace_id=WORKSPACE,
+            request=Request(question="Ask the complete SNBI schema"),
+        )
+    )
+
+    assert [event["type"] for event in events] == ["evidence", "token"]
+
+
 def test_data_availability_follow_up_is_answered_without_provider(tmp_path, monkeypatch):
     database = tmp_path / "inventory.sqlite3"
     connection = sqlite3.connect(database)
@@ -2005,6 +2561,10 @@ def test_inventory_time_contract_defaults_to_latest_and_respects_year_intent():
         Request(question="Show bridge counts by inventory year from 2020 through 2025."),
         context,
     )
+    oldest = http_service._raw_inventory_time_contract(
+        Request(question="List the 20 oldest latest-published bridges by year built."),
+        context,
+    )
 
     assert latest["mode"] == "latest_loaded_inventory"
     assert latest["data_year"] == 2025
@@ -2013,6 +2573,8 @@ def test_inventory_time_contract_defaults_to_latest_and_respects_year_intent():
     assert trend["mode"] == "group_by_inventory_year"
     assert trend["start_year"] == 2020
     assert trend["end_year"] == 2025
+    assert oldest["mode"] == "latest_loaded_inventory"
+    assert oldest["data_year"] == 2025
     assert http_service._raw_sql_respects_time_contract(
         "SELECT COUNT(*) FROM bridges b WHERE b.data_year = 2025",
         latest,
@@ -2020,6 +2582,15 @@ def test_inventory_time_contract_defaults_to_latest_and_respects_year_intent():
     assert not http_service._raw_sql_respects_time_contract(
         "SELECT COUNT(*) FROM bridges",
         latest,
+    )
+    assert http_service._raw_sql_respects_time_contract(
+        "SELECT data_year, COUNT(*) FROM bridges "
+        "WHERE data_year BETWEEN 2020 AND 2025 GROUP BY data_year",
+        trend,
+    )
+    assert not http_service._raw_sql_respects_time_contract(
+        "SELECT data_year, COUNT(*) FROM bridges GROUP BY data_year",
+        trend,
     )
     assert not http_service._raw_sql_respects_time_contract(
         "SELECT DISTINCT s.span_configuration_designation "

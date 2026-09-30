@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+from threading import Event, Lock
 from typing import Any, Iterable
 
 from app.services.query.metrics import compute_controlling_condition
@@ -26,6 +27,7 @@ from .registry import (
 FUTURE_CONDITION_DEFINITION_VERSION = "bridgeguard-inventory-transition-v2"
 _CONDITION_ORDER = ("Good", "Fair", "Poor")
 _DETAILED_CONDITION_ORDER = ("Good", "Upper Fair", "Lower Fair", "Poor")
+_SNAPSHOT_CACHE_SIZE = 4
 
 
 class KpiComputationError(RuntimeError):
@@ -52,6 +54,13 @@ class _Snapshot:
     condition_rating: float | None
     condition_class: str
     condition_invalid: bool
+
+
+_LoadResult = tuple[int, int, int, tuple[_Snapshot, ...], dict[str, object]]
+_LoadCacheKey = tuple[str, str, int, int, int, int]
+_snapshot_cache: OrderedDict[_LoadCacheKey, _LoadResult] = OrderedDict()
+_snapshot_cache_inflight: dict[_LoadCacheKey, Event] = {}
+_snapshot_cache_lock = Lock()
 
 
 def _readonly(path: str | os.PathLike[str]) -> sqlite3.Connection:
@@ -174,13 +183,62 @@ def _loaded_identity(row: sqlite3.Row) -> tuple[str, str]:
     return revision_id, digest
 
 
-def _load(
+def _load_cache_identity(
     database_path: str | os.PathLike[str],
     *,
     workspace_id: str,
     state_code: int,
     year: int | None,
-) -> tuple[int, int, int, tuple[_Snapshot, ...], dict[str, object]]:
+) -> _LoadCacheKey:
+    database = Path(database_path).resolve()
+    connection = _readonly(database)
+    try:
+        selected = (
+            connection.execute(
+                "SELECT MAX(data_year) FROM bridges WHERE state_code=?",
+                (int(state_code),),
+            ).fetchone()[0]
+            if year is None
+            else int(year)
+        )
+        if selected is None:
+            raise KpiComputationError("loaded KPI population was not found")
+        generation = connection.execute(
+            "SELECT data_generation,schema_generation FROM workspace_state WHERE workspace_id=?",
+            (str(workspace_id).strip(),),
+        ).fetchone()
+        if generation is None:
+            raise KpiComputationError("workspace state was not found")
+    except KpiComputationError:
+        raise
+    except sqlite3.Error as exc:
+        raise KpiComputationError("loaded KPI projection could not be read") from exc
+    finally:
+        connection.close()
+    return (
+        str(database),
+        str(workspace_id).strip(),
+        int(state_code),
+        int(selected),
+        int(generation[0]),
+        int(generation[1]),
+    )
+
+
+def clear_kpi_snapshot_cache() -> None:
+    """Clear the bounded in-process cache, primarily for tests and maintenance."""
+
+    with _snapshot_cache_lock:
+        _snapshot_cache.clear()
+
+
+def _load_uncached(
+    database_path: str | os.PathLike[str],
+    *,
+    workspace_id: str,
+    state_code: int,
+    year: int | None,
+) -> _LoadResult:
     workspace = str(workspace_id).strip()
     state = int(state_code)
     if not workspace:
@@ -284,6 +342,65 @@ def _load(
     )
 
 
+def _load(
+    database_path: str | os.PathLike[str],
+    *,
+    workspace_id: str,
+    state_code: int,
+    year: int | None,
+) -> _LoadResult:
+    """Load one immutable inventory projection per generation and share it.
+
+    Concurrent KPI requests for the same year wait for the first load instead
+    of scanning and interpreting the same bridge rows independently.
+    """
+
+    for _attempt in range(2):
+        key = _load_cache_identity(
+            database_path,
+            workspace_id=workspace_id,
+            state_code=state_code,
+            year=year,
+        )
+        while True:
+            with _snapshot_cache_lock:
+                cached = _snapshot_cache.get(key)
+                if cached is not None:
+                    _snapshot_cache.move_to_end(key)
+                    return cached
+                pending = _snapshot_cache_inflight.get(key)
+                if pending is None:
+                    pending = Event()
+                    _snapshot_cache_inflight[key] = pending
+                    leader = True
+                else:
+                    leader = False
+            if not leader:
+                pending.wait(timeout=30.0)
+                continue
+            try:
+                loaded = _load_uncached(
+                    key[0],
+                    workspace_id=key[1],
+                    state_code=key[2],
+                    year=key[3],
+                )
+                if loaded[:3] != (key[3], key[4], key[5]):
+                    break
+                with _snapshot_cache_lock:
+                    _snapshot_cache[key] = loaded
+                    _snapshot_cache.move_to_end(key)
+                    while len(_snapshot_cache) > _SNAPSHOT_CACHE_SIZE:
+                        _snapshot_cache.popitem(last=False)
+                return loaded
+            finally:
+                with _snapshot_cache_lock:
+                    completed = _snapshot_cache_inflight.pop(key, None)
+                    if completed is not None:
+                        completed.set()
+    raise KpiComputationError("KPI data changed while the snapshot was loading")
+
+
 def compute_operational_kpis(
     *,
     database_path: str | os.PathLike[str],
@@ -365,10 +482,11 @@ def compute_operational_kpis(
     length_unknown = len(length_eligible) - len(length_classifiable)
 
     state_area_population = length_eligible
+    state_area_revision_ids = {row.revision_id for row in state_area_population}
     state_area_rows = [
         (row, area)
         for row, area, _method in areas
-        if row in state_area_population
+        if row.revision_id in state_area_revision_ids
     ]
     state_area_missing = len(state_area_population) - len(state_area_rows)
     classifiable_area = sum(area for row, area in state_area_rows if row.condition_rating is not None)
@@ -478,6 +596,15 @@ def _age_for_inventory_cycle(selected_year: int, year_built: int | None) -> int 
     return age if 0 <= age <= 300 else None
 
 
+def _age_at_inventory_year(selected_year: int, year_built: int | None) -> int | None:
+    """Return the comparison age measured directly against inventory year N."""
+
+    if year_built is None:
+        return None
+    age = selected_year - year_built
+    return age if 0 <= age <= 300 else None
+
+
 def compute_age_condition_area(
     *,
     database_path: str | os.PathLike[str],
@@ -505,24 +632,32 @@ def compute_age_condition_area(
         key: {"Good": 0.0, "Upper Fair": 0.0, "Lower Fair": 0.0, "Poor": 0.0, "Unknown": 0.0}
         for key in _age_bin_order()
     }
+    inventory_year_buckets: dict[str, dict[str, float]] = {
+        key: {"Good": 0.0, "Upper Fair": 0.0, "Lower Fair": 0.0, "Poor": 0.0, "Unknown": 0.0}
+        for key in _age_bin_order()
+    }
     excluded = {
         "missing_or_invalid_age_count": 0,
         "missing_or_invalid_geometry_count": 0,
         "unknown_condition_area_ft2": 0.0,
     }
     for row in selected:
-        age = _age_for_inventory_cycle(selected_year, row.year_built)
-        if age is None:
+        reporting_age = _age_for_inventory_cycle(selected_year, row.year_built)
+        inventory_age = _age_at_inventory_year(selected_year, row.year_built)
+        if reporting_age is None:
             excluded["missing_or_invalid_age_count"] += 1
+        if reporting_age is None and inventory_age is None:
             continue
         area, _method = _deck_area(row)
         if area is None:
-            excluded["missing_or_invalid_geometry_count"] += 1
+            if reporting_age is not None:
+                excluded["missing_or_invalid_geometry_count"] += 1
             continue
         rating = row.condition_rating
         if rating is None:
             condition = "Unknown"
-            excluded["unknown_condition_area_ft2"] += area
+            if reporting_age is not None:
+                excluded["unknown_condition_area_ft2"] += area
         elif rating >= 7:
             condition = "Good"
         elif rating >= 6:
@@ -531,26 +666,37 @@ def compute_age_condition_area(
             condition = "Lower Fair"
         else:
             condition = "Poor"
-        buckets[_age_bin(age)][condition] += area
-    series = []
-    for age_bin in _age_bin_order():
-        values = buckets[age_bin]
-        series.append(
-            {
-                "age_bin": age_bin,
-                **{
-                    key: _rounded(value)
-                    for key, value in values.items()
-                    if include_unknown or key != "Unknown"
-                },
-                "total_ft2": _rounded(sum(values.values())),
-            }
-        )
+        if reporting_age is not None:
+            buckets[_age_bin(reporting_age)][condition] += area
+        if inventory_age is not None:
+            inventory_year_buckets[_age_bin(inventory_age)][condition] += area
+
+    def area_series(source: dict[str, dict[str, float]]) -> list[dict[str, object]]:
+        result = []
+        for age_bin in _age_bin_order():
+            values = source[age_bin]
+            result.append(
+                {
+                    "age_bin": age_bin,
+                    **{
+                        key: _rounded(value)
+                        for key, value in values.items()
+                        if include_unknown or key != "Unknown"
+                    },
+                    "total_ft2": _rounded(sum(values.values())),
+                }
+            )
+        return result
+
+    series = area_series(buckets)
+    inventory_year_series = area_series(inventory_year_buckets)
     return {
         "kind": "observed_loaded_inventory",
         "state_code": int(state_code),
         "year": selected_year,
         "age_reference_year": selected_year - 1,
+        "reporting_date": "June 15",
+        "inventory_age_reference_year": selected_year,
         "population": population_key,
         "include_unknown": bool(include_unknown),
         "data_generation": data_generation,
@@ -559,6 +705,7 @@ def compute_age_condition_area(
         "definition_version": AGE_CONDITION_DEFINITION_VERSION,
         "measure_definition": DEFAULT_KPI_REGISTRY.get("deck_area_by_age_condition").as_dict(),
         "series": series,
+        "inventory_year_series": inventory_year_series,
         "excluded": {key: _rounded(value) if isinstance(value, float) else value for key, value in excluded.items()},
     }
 
@@ -595,40 +742,58 @@ def compute_age_condition_counts(
         key: {condition: 0 for condition in _DETAILED_CONDITION_ORDER}
         for key in _age_bin_order()
     }
+    inventory_year_buckets: dict[str, dict[str, int]] = {
+        key: {condition: 0 for condition in _DETAILED_CONDITION_ORDER}
+        for key in _age_bin_order()
+    }
     excluded = {
         "missing_or_invalid_age_count": 0,
         "missing_condition_count": 0,
     }
     for row in selected:
-        age = _age_for_inventory_cycle(selected_year, row.year_built)
-        if age is None:
+        reporting_age = _age_for_inventory_cycle(selected_year, row.year_built)
+        inventory_age = _age_at_inventory_year(selected_year, row.year_built)
+        if reporting_age is None:
             excluded["missing_or_invalid_age_count"] += 1
+        if reporting_age is None and inventory_age is None:
             continue
         condition = _detailed_condition_class(row.condition_rating)
         if condition not in _DETAILED_CONDITION_ORDER:
-            excluded["missing_condition_count"] += 1
+            if reporting_age is not None:
+                excluded["missing_condition_count"] += 1
             continue
-        buckets[_age_bin(age)][str(condition)] += 1
-    series = [
-        {
-            "age_bin": age_bin,
-            **buckets[age_bin],
-            "Fair": buckets[age_bin]["Upper Fair"] + buckets[age_bin]["Lower Fair"],
-            "total_bridges": sum(buckets[age_bin].values()),
-        }
-        for age_bin in _age_bin_order()
-    ]
+        if reporting_age is not None:
+            buckets[_age_bin(reporting_age)][str(condition)] += 1
+        if inventory_age is not None:
+            inventory_year_buckets[_age_bin(inventory_age)][str(condition)] += 1
+
+    def count_series(source: dict[str, dict[str, int]]) -> list[dict[str, object]]:
+        return [
+            {
+                "age_bin": age_bin,
+                **source[age_bin],
+                "Fair": source[age_bin]["Upper Fair"] + source[age_bin]["Lower Fair"],
+                "total_bridges": sum(source[age_bin].values()),
+            }
+            for age_bin in _age_bin_order()
+        ]
+
+    series = count_series(buckets)
+    inventory_year_series = count_series(inventory_year_buckets)
     return {
         "kind": "observed_loaded_inventory",
         "state_code": int(state_code),
         "year": selected_year,
         "age_reference_year": selected_year - 1,
+        "reporting_date": "June 15",
+        "inventory_age_reference_year": selected_year,
         "population": population_key,
         "data_generation": data_generation,
         "schema_generation": schema_generation,
         "revision_set_sha256": _revision_set(rows),
         "definition_version": AGE_CONDITION_DEFINITION_VERSION,
         "series": series,
+        "inventory_year_series": inventory_year_series,
         "excluded": excluded,
     }
 

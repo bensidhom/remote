@@ -288,6 +288,50 @@ def test_bridge_provider_rejects_unknown_treatment_effect_and_uses_reviewed_effe
     assert transition.action_id == "deck_seal"
 
 
+def test_protective_effect_slows_deterioration_temporarily_without_changing_model():
+    history = _fleet()[0]
+    model = build_annual_markov_model(
+        _fleet(),
+        through_year=2021,
+        config=ForecastModelConfig(minimum_cohort_exposure=1),
+    )
+    effect = TreatmentEffectModel.protective(
+        treatment_id="deck_seal",
+        component="deck",
+        duration_years=5,
+        deterioration_reduction=0.5,
+        evidence_class="configurable_preservation_assumption",
+    )
+    provider = BridgeAnnualForecastProvider(
+        model=model,
+        bridge_snapshot=history.snapshots[1],
+        evaluation_receipt_id="evaluation-v1",
+        qualification=ForecastQualification.RELEASED,
+        treatment_effects=(effect,),
+    )
+    state = ComponentState.certain("deck", 7)
+    baseline = provider.transition(
+        year=2022, component="deck", state=state, action_id=None
+    )
+    protected = provider.transition_with_active_treatments(
+        year=2022,
+        component="deck",
+        state=state,
+        active_actions=(("deck_seal", 2021),),
+    )
+    expired = provider.transition_with_active_treatments(
+        year=2027,
+        component="deck",
+        state=state,
+        active_actions=(("deck_seal", 2021),),
+    )
+    assert protected.state.expected_rating > baseline.state.expected_rating
+    assert expired.distribution == provider.transition(
+        year=2027, component="deck", state=state, action_id=None
+    ).distribution
+    assert model.model_id == provider.model_id
+
+
 def test_forecast_package_is_immutable_idempotent_and_round_trips(tmp_path):
     database_path = tmp_path / "forecast.sqlite3"
     ensure_workspace(str(database_path), "workspace-a", "Workspace A")
@@ -438,7 +482,7 @@ def test_bridge_forecast_run_is_annual_revision_bound_and_idempotent(tmp_path):
             real_discount_rate=Decimal("0.025"),
         ),
         action_costs={"full_replacement": Decimal("1000000")},
-        enable_research_effect_assumptions=True,
+        enable_effect_assumptions=True,
     )
     assert comparison.model_id == model.model_id
     assert [item.strategy_id for item in comparison.alternatives] == [
@@ -448,7 +492,23 @@ def test_bridge_forecast_run_is_annual_revision_bound_and_idempotent(tmp_path):
     replacement = comparison.alternatives[1]
     assert replacement.result.annual_ledger[0].year == snapshot.data_year
     assert replacement.result.annual_ledger[0].selected_action_ids == ("full_replacement",)
-    assert replacement.result.total_present_value_cost == Decimal("1000000")
+    assert replacement.result.gross_present_value_cost == Decimal("1000000")
+    assert replacement.result.remaining_service_life_credit > 0
+    assert replacement.result.total_present_value_cost < Decimal("1000000")
+    assert comparison.analysis_period_status == "limited"
+    assert comparison.alternatives[0].feasibility_status == "diagnostic"
+    assert comparison.alternatives[0].rankable is False
+    assert replacement.rankable is False
+    no_action = comparison.alternatives[0]
+    forecast_points = {
+        (point.year, point.component): point.post_action_distribution
+        for point in first.predictions
+    }
+    for row in no_action.result.annual_ledger:
+        for state in row.post_action_states:
+            assert state.distribution == pytest.approx(
+                forecast_points[(row.year, state.component)]
+            )
 
     scheduled = compare_bridge_lcca_strategies(
         database_path,
@@ -467,12 +527,24 @@ def test_bridge_forecast_run_is_annual_revision_bound_and_idempotent(tmp_path):
         },
         rehabilitation_year=snapshot.data_year + 1,
         replacement_year=snapshot.data_year + 2,
-        enable_research_effect_assumptions=True,
+        enable_effect_assumptions=True,
     )
     rehabilitation, future_replacement = scheduled.alternatives
+    assert all(
+        alternative.feasibility_status != "data_insufficient"
+        for alternative in scheduled.alternatives
+    )
     assert {action.year for action in rehabilitation.scheduled_actions} == {
-        snapshot.data_year + 1
+        snapshot.data_year + 1,
+        snapshot.data_year + 2,
     }
+    preventive_action = next(
+        action
+        for action in rehabilitation.scheduled_actions
+        if action.year == snapshot.data_year + 2
+    )
+    assert preventive_action.treatment_id == "bridge_cleaning"
+    assert preventive_action.included_in == "njdot_preservation_package"
     rehab_row = next(
         row
         for row in rehabilitation.result.annual_ledger
@@ -482,6 +554,9 @@ def test_bridge_forecast_run_is_annual_revision_bound_and_idempotent(tmp_path):
         "deck_replacement",
         "substructure_rehabilitation",
     )
+    assert [
+        action.treatment_id for action in future_replacement.scheduled_actions
+    ] == ["full_replacement"]
     assert future_replacement.scheduled_actions[0].year == snapshot.data_year + 2
     replacement_row = next(
         row

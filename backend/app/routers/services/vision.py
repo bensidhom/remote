@@ -10,6 +10,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import math
 import sqlite3
+import time
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
@@ -596,6 +597,11 @@ def _execute_legacy_context_sql(db_path: str, sql: str) -> dict:
     source/provenance, validation, migration, attachment, and audit tables are
     denied by SQLite itself even if a model hallucinates such a table name.
     """
+    if re.search(
+        r"(?i)(?<![A-Za-z0-9_])workspace_state(?![A-Za-z0-9_])",
+        sql,
+    ):
+        raise sqlite3.DatabaseError("direct access to internal snapshot state is denied")
     allowed_tables = _LEGACY_DB_CONTEXT_ALLOWED_TABLES | {"counties"}
     path = Path(db_path).resolve()
     connection = sqlite3.connect(
@@ -606,10 +612,28 @@ def _execute_legacy_context_sql(db_path: str, sql: str) -> dict:
     try:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
+        deadline = time.monotonic() + 15.0
+        progress_steps = 0
 
-        def authorize(action, arg1, _arg2, _db_name, _trigger):
-            if action == sqlite3.SQLITE_READ and str(arg1) not in allowed_tables:
-                return sqlite3.SQLITE_DENY
+        def check_progress():
+            nonlocal progress_steps
+            progress_steps += 1_000
+            return int(progress_steps > 20_000_000 or time.monotonic() > deadline)
+
+        connection.set_progress_handler(check_progress, 1_000)
+        def authorize(action, arg1, arg2, _db_name, trigger):
+            if action == sqlite3.SQLITE_READ:
+                table = str(arg1)
+                originating_view = str(trigger or "")
+                trusted_dependency_read = bool(
+                    table in _TRUSTED_VIEW_DEPENDENCIES
+                )
+                if (
+                    table not in allowed_tables
+                    and originating_view not in _TRUSTED_QUERY_VIEWS
+                    and not trusted_dependency_read
+                ):
+                    return sqlite3.SQLITE_DENY
             if action in {
                 sqlite3.SQLITE_ATTACH,
                 sqlite3.SQLITE_DETACH,
@@ -996,6 +1020,20 @@ def flatten_db_row_text(table: str, row: dict) -> str:
 
 
 _LEGACY_DB_CONTEXT_ALLOWED_TABLES = frozenset({
+    "v_published_bridge_snapshots",
+    "v_current_bridge_snapshots",
+    "v_county_bridge_inventory",
+    "v_current_county_bridge_inventory",
+    "v_bridge_condition",
+    "v_bridge_deck_material_summary",
+    "v_current_bridge_deck_material_summary",
+    "v_bridge_features",
+    "v_carried_highway_features",
+    "v_bridge_routes",
+    "v_bridge_span_sets",
+    "v_bridge_elements",
+    "v_bridge_works",
+    "v_bridge_posting_statuses",
     "bridges",
     "features",
     "routes",
@@ -1007,6 +1045,34 @@ _LEGACY_DB_CONTEXT_ALLOWED_TABLES = frozenset({
     "posting_statuses",
     "works",
     "ref_counties",
+})
+
+# These reviewed views expose bridge projections only. SQLite reports their
+# underlying table reads through the authorizer's trigger/view argument. Allow
+# those reads only while one of these views is expanding; direct model access
+# to workspace, publication, audit, chat, and source tables remains denied.
+_TRUSTED_QUERY_VIEWS = frozenset({
+    "v_published_bridge_snapshots",
+    "v_current_bridge_snapshots",
+    "v_county_bridge_inventory",
+    "v_current_county_bridge_inventory",
+    "v_bridge_condition",
+    "v_bridge_deck_material_summary",
+    "v_current_bridge_deck_material_summary",
+    "v_bridge_features",
+    "v_carried_highway_features",
+    "v_bridge_routes",
+    "v_bridge_span_sets",
+    "v_bridge_elements",
+    "v_bridge_works",
+    "v_bridge_posting_statuses",
+})
+_TRUSTED_VIEW_DEPENDENCIES = frozenset({
+    "workspace_state",
+    "v_published_bridge_snapshots",
+    "v_current_bridge_snapshots",
+    "v_county_bridge_inventory",
+    "v_current_county_bridge_inventory",
 })
 
 

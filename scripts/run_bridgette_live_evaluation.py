@@ -263,16 +263,31 @@ def _score_case(case: LiveCase, events: tuple[dict[str, object], ...]) -> dict[s
     scope_passed = True
     if case.expected_behavior == "answer":
         latest = evidence[-1] if evidence else {}
-        verification = latest.get("answer_verification")
-        evidence_verified = bool(
-            isinstance(verification, dict)
-            and verification.get("status") == "verified"
+        agentic_answer = bool(
+            latest.get("answer_mode") == "agentic_sql"
+            and latest.get("query_language") == "agentic_sql"
         )
-        database_evidence_passed = evidence_verified or bool(
-            latest.get("answer_mode") == "guarded_raw_sql_fallback"
-            and latest.get("answer_status") == "provisional"
-            and latest.get("query_language") == "guarded_raw_sql"
-        )
+        if agentic_answer:
+            evidence_verified = latest.get("answer_status") == "verified"
+            database_evidence_passed = latest.get("answer_status") in {
+                "verified", "provisional"
+            }
+            # Legacy banks name implementation-specific semantic resources and
+            # metric IDs that a free SQL query need not use. In agentic mode,
+            # the requirement manifest/completeness review replaces that plan
+            # shape check; forbidden semantics remain enforced.
+            semantic_passed = evidence_verified and not forbidden
+        else:
+            verification = latest.get("answer_verification")
+            evidence_verified = bool(
+                isinstance(verification, dict)
+                and verification.get("status") == "verified"
+            )
+            database_evidence_passed = evidence_verified or bool(
+                latest.get("answer_mode") == "guarded_raw_sql_fallback"
+                and latest.get("answer_status") == "provisional"
+                and latest.get("query_language") == "guarded_raw_sql"
+            )
         observed_scope = latest.get("scope")
         expected_scope = case.request_scope
         allowed_time_modes = {
@@ -329,6 +344,7 @@ def _score_case(case: LiveCase, events: tuple[dict[str, object], ...]) -> dict[s
             "semantic_retrieval_version": latest.get("semantic_retrieval_version"),
             "semantic_retrieval_sha256": latest.get("semantic_retrieval_sha256"),
             "answer_verification": latest.get("answer_verification"),
+            "agentic_review": latest.get("agentic_review"),
             "fallback": latest.get("fallback"),
             "sql_identifiers": sql_identifiers,
         }

@@ -581,8 +581,8 @@ def _unexpected_recovery_event(
         "request_id": stream_request.request_id,
         "code": "query_temporarily_unavailable",
         "message": (
-            "Bridgette could not safely finish this request on this attempt, so no "
-            "partial or unverified result was shown. Retry it, choose an editable "
+            "Bridgette could not finish this request on this attempt. No partial "
+            "or unverified result was shown. Retry it, choose an editable "
             "alternative below, or add the exact field, bridge/county, grouping, "
             "and inventory period you need."
         ),

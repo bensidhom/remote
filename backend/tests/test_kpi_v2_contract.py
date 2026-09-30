@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+from threading import Lock
+import time
 
+from app.services.kpis_v2 import repository as kpi_repository
 from app.services.kpis_v2.registry import (
     ACCEPTABLE_DEFINITION_VERSION,
     DEFAULT_KPI_REGISTRY,
@@ -187,6 +191,59 @@ def test_operational_deck_area_falls_back_to_approach_width(tmp_path):
         "derived_bg02_times_bg09": 1,
         "missing_or_invalid_geometry": 1,
     }
+
+
+def test_kpi_snapshot_load_is_shared_and_generation_aware(tmp_path, monkeypatch):
+    database = tmp_path / "kpis.db"
+    _fixture(str(database))
+    kpi_repository.clear_kpi_snapshot_cache()
+    uncached_load = kpi_repository._load_uncached
+    load_count = 0
+    load_count_lock = Lock()
+
+    def counted_load(*args, **kwargs):
+        nonlocal load_count
+        with load_count_lock:
+            load_count += 1
+        time.sleep(0.05)
+        return uncached_load(*args, **kwargs)
+
+    monkeypatch.setattr(kpi_repository, "_load_uncached", counted_load)
+    shared = {
+        "database_path": database,
+        "workspace_id": "workspace-a",
+        "state_code": 34,
+        "year": 2024,
+    }
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = (
+            executor.submit(compute_operational_kpis, **shared),
+            executor.submit(compute_age_condition_counts, **shared),
+            executor.submit(compute_age_condition_area, **shared),
+        )
+        for future in futures:
+            future.result()
+    assert load_count == 1
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE workspace_state SET data_generation=data_generation+1 "
+            "WHERE workspace_id='workspace-a'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    refreshed = compute_age_condition_area(
+        database_path=database,
+        workspace_id="workspace-a",
+        state_code=34,
+        year=2024,
+    )
+    assert refreshed["data_generation"] == 13
+    assert load_count == 2
+    kpi_repository.clear_kpi_snapshot_cache()
 
 
 def test_age_condition_area_uses_prior_calendar_year_and_reconciles_bins(tmp_path):

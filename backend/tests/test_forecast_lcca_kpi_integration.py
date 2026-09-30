@@ -185,12 +185,19 @@ def test_history_ui_uses_only_exact_revision_forecast_and_lcca_for_rehabilitatio
     assert "Planning/research comparison" not in lcca
     assert "Enable illustrative treatment effects" not in lcca
     assert "Run yearly simulation" not in lcca
-    assert "enable_research_effect_assumptions: true" in lcca
+    assert "enable_effect_assumptions: true" in lcca
     assert "rehabilitation_year: rehabilitationYear" in lcca
     assert "replacement_year: replacementYear" in lcca
     assert "Results update automatically" in lcca
     assert "NJDOT defaults · editable" in lcca
-    assert "No work is scheduled; the Markov model advances condition one year at a time." in lcca
+    assert "Minimum preventive maintenance" in lcca
+    assert "Condition-triggered rehabilitation" in lcca
+    assert "Scheduled major rehabilitation" in lcca
+    assert "Full reconstruction" in lcca
+    assert "No work is scheduled. This shows the condition baseline" not in lcca
+    assert "Lowest comparable agency cost" in lcca
+    assert "Component condition detail" in lcca
+    assert "Sensitivity" in lcca
     assert "Action details" in lcca
     assert "Condition, cost, and actions" in lcca
     assert "every strategy selected above" in lcca

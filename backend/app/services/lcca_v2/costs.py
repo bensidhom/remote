@@ -77,3 +77,81 @@ class CostLibrary:
             return self.by_action[str(action_id).strip().lower()]
         except KeyError as exc:
             raise KeyError(f"cost is unavailable for action: {action_id}") from exc
+
+
+NJDOT_TAMP_2022_URL = "https://dot.nj.gov/transportation/about/asset/pdf/NJTAMP.pdf"
+
+
+# Exhibit 5-6 reports project-level planning rates per square foot of deck area.
+# The $206 preservation value is a generic BrM preservation treatment, not a
+# bridge-cleaning unit rate and not a price for every activity in Exhibit 5-7.
+DEFAULT_NJDOT_PLANNING_COSTS = CostLibrary(
+    library_id="njdot_tamp_2022_bridge_planning_costs",
+    version="2022-exhibit-5-6-v1",
+    costs=(
+        ActionCost(
+            action_id="njdot_preservation_package",
+            unit="deck_area",
+            unit_cost=Decimal("206"),
+            currency="USD",
+            real_base_year=2022,
+            jurisdiction="New Jersey",
+            source_reference="NJDOT 2022 TAMP Exhibit 5-6 generic preservation treatment",
+            review_status="published_planning_rate",
+        ),
+        ActionCost(
+            action_id="deck_replacement",
+            unit="deck_area",
+            unit_cost=Decimal("511"),
+            currency="USD",
+            real_base_year=2022,
+            jurisdiction="New Jersey",
+            source_reference="NJDOT 2022 TAMP Exhibit 5-6 full deck replacement",
+            review_status="published_planning_rate",
+        ),
+        ActionCost(
+            action_id="superstructure_rehabilitation",
+            unit="deck_area",
+            unit_cost=Decimal("149"),
+            currency="USD",
+            real_base_year=2022,
+            jurisdiction="New Jersey",
+            source_reference="NJDOT 2022 TAMP Exhibit 5-6 superstructure rehabilitation",
+            review_status="published_planning_rate",
+        ),
+        ActionCost(
+            action_id="substructure_rehabilitation",
+            unit="deck_area",
+            unit_cost=Decimal("124"),
+            currency="USD",
+            real_base_year=2022,
+            jurisdiction="New Jersey",
+            source_reference="NJDOT 2022 TAMP Exhibit 5-6 substructure rehabilitation",
+            review_status="published_planning_rate",
+        ),
+        ActionCost(
+            action_id="full_replacement",
+            unit="deck_area",
+            unit_cost=Decimal("2556"),
+            currency="USD",
+            real_base_year=2022,
+            jurisdiction="New Jersey",
+            source_reference="NJDOT 2022 TAMP Exhibit 5-6 reconstruction",
+            review_status="published_planning_rate",
+        ),
+    ),
+)
+
+
+def default_total_action_costs(deck_area: float | None) -> dict[str, Decimal]:
+    """Return total event costs only when the deck-area quantity is available."""
+
+    if deck_area is None:
+        return {}
+    quantity = Decimal(str(deck_area))
+    if not quantity.is_finite() or quantity <= 0:
+        return {}
+    return {
+        item.action_id: (item.unit_cost * quantity).quantize(Decimal("1"))
+        for item in DEFAULT_NJDOT_PLANNING_COSTS.costs
+    }

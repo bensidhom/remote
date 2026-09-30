@@ -351,37 +351,27 @@ function buildPopupContent(
     };
     const bar = document.createElement('div');
     bar.style.cssText =
-      'display:flex;flex-direction:column;gap:6px;border-top:1px solid #eef1f5;padding-top:9px;margin-top:9px';
+      'border-top:1px solid #eef1f5;padding-top:9px;margin-top:9px';
 
-    const mkBtn = (label: string, action: BridgeAction, primary: boolean) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = label;
-      b.style.cssText = primary
-        ? 'flex:1;cursor:pointer;border:1px solid transparent;border-radius:9px;padding:7px 10px;' +
-          'font-size:12.5px;font-weight:600;color:#fff;background:#4f46e5;' +
-          'box-shadow:0 1px 2px rgba(79,70,229,.35);transition:background .15s'
-        : 'flex:1;min-width:0;cursor:pointer;border:1px solid #dde2ea;border-radius:9px;padding:6px 8px;' +
-          'font-size:11.5px;font-weight:600;color:#475569;background:#fff;transition:background .15s,border-color .15s';
-      b.addEventListener('mouseenter', () => {
-        if (primary) b.style.background = '#4338ca';
-        else { b.style.background = '#f4f6fb'; b.style.borderColor = '#c7cdd9'; }
-      });
-      b.addEventListener('mouseleave', () => {
-        b.style.background = primary ? '#4f46e5' : '#fff';
-        if (!primary) b.style.borderColor = '#dde2ea';
-      });
-      b.addEventListener('click', () => onAction(action, ref));
-      return b;
-    };
-
-    bar.appendChild(mkBtn('Open Bridge Details →', 'open', true));
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:6px';
-    row.appendChild(mkBtn('History', 'history', false));
-    row.appendChild(mkBtn('Point Cloud', 'pointcloud', false));
-    row.appendChild(mkBtn('LCCA', 'lcca', false));
-    bar.appendChild(row);
+    const detailsButton = document.createElement('button');
+    detailsButton.type = 'button';
+    detailsButton.textContent = 'Open Bridge Details';
+    detailsButton.style.cssText =
+      'width:100%;cursor:pointer;border:1px solid #c7d2fe;border-radius:10px;padding:8px 12px;' +
+      'font-size:12.5px;font-weight:650;color:#4338ca;background:#eef2ff;' +
+      'box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background .15s,border-color .15s,color .15s';
+    detailsButton.addEventListener('mouseenter', () => {
+      detailsButton.style.background = '#e0e7ff';
+      detailsButton.style.borderColor = '#a5b4fc';
+      detailsButton.style.color = '#3730a3';
+    });
+    detailsButton.addEventListener('mouseleave', () => {
+      detailsButton.style.background = '#eef2ff';
+      detailsButton.style.borderColor = '#c7d2fe';
+      detailsButton.style.color = '#4338ca';
+    });
+    detailsButton.addEventListener('click', () => onAction('open', ref));
+    bar.appendChild(detailsButton);
     wrap.appendChild(bar);
   }
 
@@ -666,6 +656,10 @@ const ArcgisMap: React.FC<ArcgisMapProps> = ({
         // Database strings are rendered only through DOM text nodes below.
         title: 'Bridge details',
         outFields: ['*'],
+        // The map has already centered and zoomed to this bridge. Keep the
+        // popup focused on the single Bridge Details entry point.
+        overwriteActions: true,
+        actions: [],
         content: (f: any) => buildPopupContent(f.graphic.attributes, onActionRef.current),
       },
     });

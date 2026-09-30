@@ -8,7 +8,7 @@ from typing import Literal
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from . import revision_api
@@ -47,14 +47,21 @@ class LccaSimulationBody(BaseModel):
     nominal_discount_rate: Decimal | None = Field(default=None, gt=Decimal("-1"), le=Decimal("1"))
     inflation_rate: Decimal | None = Field(default=None, gt=Decimal("-1"), le=Decimal("1"))
     condition_threshold: float = Field(default=4.5, ge=0, le=9)
+    minimum_service_rating: float = Field(default=3.0, ge=0, le=9)
     rehabilitation_year: int | None = Field(default=None, ge=1900, le=2200)
     replacement_year: int | None = Field(default=None, ge=1900, le=2200)
     action_costs: dict[str, Decimal] = Field(default_factory=dict)
     explicit_actions: list[ExplicitActionBody] = Field(default_factory=list, max_length=200)
-    enable_research_effect_assumptions: bool = False
+    enable_effect_assumptions: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "enable_effect_assumptions",
+            "enable_research_effect_assumptions",
+        ),
+    )
 
 
-def _commercial_required() -> bool:
+def _released_forecast_required() -> bool:
     return (
         os.getenv("BRIDGEGUARD_DEPLOYMENT_MODE", "research_shared").strip().lower()
         == "dedicated_customer"
@@ -76,10 +83,8 @@ def _comparison_payload(comparison: BridgeLccaComparison, history) -> dict[str, 
     facts = comparison.facts
     return {
         "scenario_receipt_sha256": comparison.scenario_receipt_sha256,
-        "status": "planning_research",
-        "planning_only": True,
+        "status": "complete",
         "identity": {
-            "workspace_id": facts.workspace_id,
             "state_code": facts.state_code,
             "bridge_number": facts.bridge_number,
             "data_year": facts.data_year,
@@ -107,7 +112,34 @@ def _comparison_payload(comparison: BridgeLccaComparison, history) -> dict[str, 
             "model_id": comparison.model_id,
             "evaluation_run_id": comparison.evaluation_run_id,
             "evaluation_receipt_id": comparison.evaluation_receipt_id,
-            "qualification": comparison.forecast_qualification.value,
+        },
+        "analysis": {
+            "period_status": comparison.analysis_period_status,
+            "minimum_comparable_years": 25,
+            "cost_scope": comparison.cost_scope,
+            "excluded_costs": [
+                "work_zone_user_delay",
+                "vehicle_operating_costs",
+                "crash_costs",
+            ],
+            "effect_assumptions": {
+                "preservation_deterioration_reduction": "0.20",
+                "duration_basis": "published treatment cycle",
+                "editable_in_future": True,
+            },
+            "condition_policy": {
+                "rehabilitation_trigger": comparison.rehabilitation_trigger,
+                "minimum_service_rating": comparison.minimum_service_rating,
+            },
+        },
+        "cost_assumptions": {
+            "library_id": comparison.cost_library_id,
+            "version": comparison.cost_library_version,
+            "resolved_action_costs": {
+                key: str(value)
+                for key, value in sorted(comparison.resolved_action_costs.items())
+            },
+            "preservation_cost_interpretation": "generic_project_package",
         },
         "treatment_library": {
             "library_id": comparison.treatment_library_id,
@@ -146,6 +178,15 @@ def _comparison_payload(comparison: BridgeLccaComparison, history) -> dict[str, 
         "alternatives": [
             {
                 "strategy_id": alternative.strategy_id,
+                "feasibility_status": alternative.feasibility_status,
+                "feasibility_reasons": list(alternative.feasibility_reasons),
+                "rankable": alternative.rankable,
+                "cost_complete": alternative.cost_complete,
+                "minimum_controlling_rating": alternative.minimum_controlling_rating,
+                "meets_service_threshold": alternative.meets_service_threshold,
+                "sensitivity": list(alternative.sensitivity),
+                "gross_present_value_cost": str(alternative.result.gross_present_value_cost),
+                "remaining_service_life_credit": str(alternative.result.remaining_service_life_credit),
                 "total_present_value_cost": str(alternative.result.total_present_value_cost),
                 "equivalent_annual_cost": str(alternative.result.equivalent_annual_cost),
                 "economic_mode": alternative.result.economic_mode,
@@ -156,6 +197,10 @@ def _comparison_payload(comparison: BridgeLccaComparison, history) -> dict[str, 
                         "present_cost": str(action.present_cost),
                         "quantity": str(action.quantity),
                         "cost_unit": action.cost_unit,
+                        "cost_status": action.cost_status,
+                        "cost_source": action.cost_source,
+                        "included_in": action.included_in,
+                        "service_life_years": action.service_life_years,
                     }
                     for action in alternative.scheduled_actions
                 ],
@@ -217,10 +262,11 @@ async def simulate_bridge_lcca(body: LccaSimulationBody):
                 for item in body.explicit_actions
             ),
             condition_threshold=body.condition_threshold,
+            minimum_service_rating=body.minimum_service_rating,
             rehabilitation_year=body.rehabilitation_year,
             replacement_year=body.replacement_year,
-            enable_research_effect_assumptions=body.enable_research_effect_assumptions,
-            require_released_forecast=_commercial_required(),
+            enable_effect_assumptions=body.enable_effect_assumptions,
+            require_released_forecast=_released_forecast_required(),
         )
         return JSONResponse(
             content=_comparison_payload(comparison, history),

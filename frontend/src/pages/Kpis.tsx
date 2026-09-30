@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -126,7 +126,7 @@ interface AgeAreaResponse {
   excluded: Record<string, number>;
 }
 interface FhwaResponse {
-  label: string; definition_version: string; data_generation: number; revision_set_sha256: string;
+  year: number; label: string; definition_version: string; data_generation: number; revision_set_sha256: string;
   profile: { area_rule: string; source_title: string; source_url: string };
   population: Record<string, number>; areas_ft2: Record<string, string>;
   bridge_counts: Record<string, number>; total_applicable_deck_area_ft2: string;
@@ -189,9 +189,12 @@ const Kpis: React.FC = () => {
   const [ageReport, setAgeReport] = useState<AgeCountResponse | null>(null);
   const [ageAreaReport, setAgeAreaReport] = useState<AgeAreaResponse | null>(null);
   const [ageMetric, setAgeMetric] = useState<'count' | 'deck_area'>('count');
+  const [ageCountLoading, setAgeCountLoading] = useState(false);
   const [ageAreaLoading, setAgeAreaLoading] = useState(false);
   const [ageAreaError, setAgeAreaError] = useState('');
   const [fhwaReport, setFhwaReport] = useState<FhwaResponse | null>(null);
+  const [fhwaLoading, setFhwaLoading] = useState(false);
+  const [fhwaError, setFhwaError] = useState('');
   const [futureReport, setFutureReport] = useState<FutureConditionResponse | null>(null);
   const [futureScenarioId, setFutureScenarioId] = useState<FutureConditionScenario['scenario_id']>('historical_trend');
   const [futureLoading, setFutureLoading] = useState(false);
@@ -201,6 +204,17 @@ const Kpis: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const dataGenerationEpoch = useDataGenerationEpoch();
+  const responseCache = useRef({
+    operational: new Map<string, OperationalResponse>(),
+    ageCount: new Map<string, AgeCountResponse>(),
+    ageArea: new Map<string, AgeAreaResponse>(),
+    fhwa: new Map<string, FhwaResponse>(),
+    future: new Map<string, FutureConditionResponse>(),
+  });
+
+  useEffect(() => {
+    Object.values(responseCache.current).forEach((cache) => cache.clear());
+  }, [dataGenerationEpoch]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -218,6 +232,18 @@ const Kpis: React.FC = () => {
 
   useEffect(() => {
     if (year == null) { setLoading(false); return; }
+    if (tab !== 'inventory' && tab !== 'acceptable') {
+      setLoading(false);
+      return;
+    }
+    const cacheKey = `${dataGenerationEpoch}:${year}`;
+    const cached = responseCache.current.operational.get(cacheKey);
+    if (cached) {
+      setReport(cached);
+      setError('');
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setLoading(true);
     setError('');
@@ -228,6 +254,7 @@ const Kpis: React.FC = () => {
       if (headerGeneration !== operational.data.data_generation) {
         throw new Error('KPI data changed while the dashboard was loading. Refresh and try again.');
       }
+      responseCache.current.operational.set(cacheKey, operational.data);
       setReport(operational.data);
     }).catch((reason) => {
       if (!controller.signal.aborted) {
@@ -236,28 +263,52 @@ const Kpis: React.FC = () => {
       }
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [year, dataGenerationEpoch]);
+  }, [year, tab, dataGenerationEpoch]);
 
   useEffect(() => {
-    if (year == null) return;
+    if (year == null || tab !== 'age-count' || ageMetric !== 'count') return;
+    const cacheKey = `${dataGenerationEpoch}:${year}:${agePopulation}`;
+    const cached = responseCache.current.ageCount.get(cacheKey);
+    if (cached) {
+      setAgeReport(cached);
+      setAgeCountLoading(false);
+      return;
+    }
     const controller = new AbortController();
+    setAgeReport(null);
+    setAgeCountLoading(true);
     axios.get<AgeCountResponse>('/api/analytics/kpis/age-condition-counts', {
       params: { state_code: NJ_STATE_CODE, year, population: agePopulation },
       signal: controller.signal,
-    }).then((ages) => setAgeReport(ages.data))
-      .catch(() => { if (!controller.signal.aborted) setAgeReport(null); });
+    }).then((ages) => {
+      responseCache.current.ageCount.set(cacheKey, ages.data);
+      setAgeReport(ages.data);
+    }).catch(() => { if (!controller.signal.aborted) setAgeReport(null); })
+      .finally(() => { if (!controller.signal.aborted) setAgeCountLoading(false); });
     return () => controller.abort();
-  }, [year, agePopulation, dataGenerationEpoch]);
+  }, [year, tab, ageMetric, agePopulation, dataGenerationEpoch]);
 
   useEffect(() => {
-    if (year == null) return;
+    if (year == null || tab !== 'age-count' || ageMetric !== 'deck_area') return;
+    const cacheKey = `${dataGenerationEpoch}:${year}:${agePopulation}:without-unknown`;
+    const cached = responseCache.current.ageArea.get(cacheKey);
+    if (cached) {
+      setAgeAreaReport(cached);
+      setAgeAreaError('');
+      setAgeAreaLoading(false);
+      return;
+    }
     const controller = new AbortController();
+    setAgeAreaReport(null);
     setAgeAreaLoading(true);
     setAgeAreaError('');
     axios.get<AgeAreaResponse>('/api/analytics/kpis/age-condition-area', {
       params: { state_code: NJ_STATE_CODE, year, population: agePopulation, include_unknown: false },
       signal: controller.signal,
-    }).then((ages) => setAgeAreaReport(ages.data))
+    }).then((ages) => {
+      responseCache.current.ageArea.set(cacheKey, ages.data);
+      setAgeAreaReport(ages.data);
+    })
       .catch(() => {
         if (!controller.signal.aborted) {
           setAgeAreaReport(null);
@@ -266,27 +317,56 @@ const Kpis: React.FC = () => {
       })
       .finally(() => { if (!controller.signal.aborted) setAgeAreaLoading(false); });
     return () => controller.abort();
-  }, [year, agePopulation, dataGenerationEpoch]);
+  }, [year, tab, ageMetric, agePopulation, dataGenerationEpoch]);
 
   useEffect(() => {
-    if (year == null) return;
+    if (year == null || tab !== 'fhwa') return;
+    const cacheKey = `${dataGenerationEpoch}:${year}`;
+    const cached = responseCache.current.fhwa.get(cacheKey);
+    if (cached) {
+      setFhwaReport(cached);
+      setFhwaError('');
+      setFhwaLoading(false);
+      return;
+    }
     const controller = new AbortController();
+    setFhwaReport(null);
+    setFhwaError('');
+    setFhwaLoading(true);
     axios.get<FhwaResponse>('/api/analytics/kpis/fhwa-tpm', {
       params: { state_code: NJ_STATE_CODE, year }, signal: controller.signal,
-    }).then((response) => setFhwaReport(response.data))
-      .catch(() => { if (!controller.signal.aborted) setFhwaReport(null); });
+    }).then((response) => {
+      responseCache.current.fhwa.set(cacheKey, response.data);
+      setFhwaReport(response.data);
+    }).catch(() => {
+      if (!controller.signal.aborted) {
+        setFhwaReport(null);
+        setFhwaError('NHS condition values could not be loaded.');
+      }
+    }).finally(() => { if (!controller.signal.aborted) setFhwaLoading(false); });
     return () => controller.abort();
-  }, [year, dataGenerationEpoch]);
+  }, [year, tab, dataGenerationEpoch]);
 
   useEffect(() => {
     if (year == null || tab !== 'scenario') return;
+    const cacheKey = `${dataGenerationEpoch}:${year}:10`;
+    const cached = responseCache.current.future.get(cacheKey);
+    if (cached) {
+      setFutureReport(cached);
+      setFutureError('');
+      setFutureLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setFutureLoading(true);
     setFutureError('');
     axios.get<FutureConditionResponse>('/api/analytics/kpis/future-condition', {
       params: { state_code: NJ_STATE_CODE, year, horizon_years: 10 },
       signal: controller.signal,
-    }).then((response) => setFutureReport(response.data))
+    }).then((response) => {
+      responseCache.current.future.set(cacheKey, response.data);
+      setFutureReport(response.data);
+    })
       .catch((reason) => {
         if (!controller.signal.aborted) {
           setFutureReport(null);
@@ -368,17 +448,17 @@ const Kpis: React.FC = () => {
         </div>
       </div>
 
-      {loading ? (
+      {(tab === 'inventory' || tab === 'acceptable') && loading ? (
         <div className="py-24 text-center text-slate-500"><Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin text-brand-600" />Loading exact inventory KPIs…</div>
-      ) : error ? (
+      ) : (tab === 'inventory' || tab === 'acceptable') && error ? (
         <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6 text-amber-900">
           <p className="font-semibold">Inventory KPI population is unavailable</p><p className="mt-1 text-sm">{error}</p>
         </div>
-      ) : !report ? (
+      ) : (tab === 'inventory' || tab === 'acceptable') && !report ? (
         <div className="py-24 text-center text-slate-500">Load bridge inventory rows before calculating observed KPIs.</div>
       ) : (
         <>
-          {tab === 'inventory' && (
+          {tab === 'inventory' && report && (
             <div className="space-y-6">
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 {[
@@ -438,7 +518,7 @@ const Kpis: React.FC = () => {
             </div>
           )}
 
-          {tab === 'acceptable' && (
+          {tab === 'acceptable' && report && (
             <div className="space-y-5">
               <p className="text-sm text-slate-600">State-maintained bridges (B.CL.02 = S01), using the controlling SNBI condition rating.</p>
               <div className="grid gap-5 lg:grid-cols-2">
@@ -481,7 +561,9 @@ const Kpis: React.FC = () => {
                   <button type="button" aria-pressed={ageMetric === 'deck_area'} onClick={() => setAgeMetric('deck_area')} className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${ageMetric === 'deck_area' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:text-slate-900'}`}>Deck area (ft²)</button>
                 </div>
               </div>
-              {ageMetric === 'deck_area' && ageAreaLoading ? (
+              {ageMetric === 'count' && ageCountLoading ? (
+                <div className="py-20 text-center text-slate-500"><Loader2 className="mx-auto mb-3 h-7 w-7 animate-spin text-brand-600" />Loading bridge count by age…</div>
+              ) : ageMetric === 'deck_area' && ageAreaLoading ? (
                 <div className="py-20 text-center text-slate-500"><Loader2 className="mx-auto mb-3 h-7 w-7 animate-spin text-brand-600" />Loading deck area by age…</div>
               ) : ageMetric === 'deck_area' && ageAreaError ? (
                 <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6 text-amber-900">{ageAreaError}</div>
@@ -516,6 +598,8 @@ const Kpis: React.FC = () => {
           )}
 
           {tab === 'fhwa' && (
+            fhwaLoading ? <div className="py-20 text-center text-slate-500"><Loader2 className="mx-auto mb-3 h-7 w-7 animate-spin text-brand-600" />Loading NHS deck condition…</div> :
+            fhwaError ? <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6 text-amber-900">{fhwaError}</div> :
             !fhwaReport ? <div className="py-20 text-center text-slate-500">NHS condition values are not available for this inventory year.</div> :
             <div className="space-y-5">
               <p className="text-sm text-slate-600">NHS deck area condition calculated directly from the selected SNBI inventory.</p>

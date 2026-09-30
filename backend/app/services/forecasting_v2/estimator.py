@@ -404,6 +404,8 @@ class TreatmentEffectModel:
     component: str
     transition_matrix: tuple[tuple[float, ...], ...]
     evidence_class: str
+    duration_years: int = 0
+    deterioration_reduction: float = 0.0
 
     @classmethod
     def deterministic_gain(
@@ -428,9 +430,35 @@ class TreatmentEffectModel:
             evidence_class=str(evidence_class).strip(),
         )
 
+    @classmethod
+    def protective(
+        cls,
+        *,
+        treatment_id: str,
+        component: str,
+        duration_years: int,
+        deterioration_reduction: float,
+        evidence_class: str,
+    ) -> "TreatmentEffectModel":
+        return cls(
+            treatment_id=str(treatment_id).strip().lower(),
+            component=str(component).strip().lower(),
+            transition_matrix=tuple(
+                tuple(1.0 if target == source else 0.0 for target in range(10))
+                for source in range(10)
+            ),
+            evidence_class=str(evidence_class).strip(),
+            duration_years=int(duration_years),
+            deterioration_reduction=float(deterioration_reduction),
+        )
+
     def __post_init__(self) -> None:
         if not self.treatment_id or not self.component or not self.evidence_class:
             raise ValueError("treatment effect identity and evidence are required")
+        if int(self.duration_years) < 0:
+            raise ValueError("treatment effect duration cannot be negative")
+        if not 0 <= float(self.deterioration_reduction) <= 1:
+            raise ValueError("deterioration reduction must be between zero and one")
         if len(self.transition_matrix) != 10:
             raise ValueError("treatment transition matrix must have ten rows")
         for row in self.transition_matrix:
@@ -445,6 +473,13 @@ class TreatmentEffectModel:
             for target, probability in enumerate(self.transition_matrix[source]):
                 result[target] += weight * probability
         return tuple(result)
+
+    def protects(self, *, action_year: int, forecast_year: int) -> bool:
+        return (
+            self.duration_years > 0
+            and int(action_year) < int(forecast_year)
+            and int(forecast_year) <= int(action_year) + self.duration_years
+        )
 
 
 class BridgeAnnualForecastProvider:
@@ -535,4 +570,60 @@ class BridgeAnnualForecastProvider:
             model_id=self.model_id,
             evaluation_receipt_id=self.evaluation_receipt_id,
             fallback_level=fallback,
+        )
+
+    def transition_with_active_treatments(
+        self,
+        *,
+        year: int,
+        component: str,
+        state: ComponentState,
+        active_actions: Iterable[tuple[str, int]],
+    ) -> ForecastTransition:
+        """Apply preservation as a temporary reduction in deterioration mass.
+
+        The baseline Markov model remains unchanged. Protective actions blend
+        part of the one-year deterioration distribution back toward the
+        pre-transition state for their documented duration.
+        """
+
+        baseline = self.transition(
+            year=year,
+            component=component,
+            state=state,
+            action_id=None,
+        )
+        reductions: list[float] = []
+        evidence: list[str] = []
+        for action_id, action_year in active_actions:
+            effect = self._effects.get((str(action_id).strip().lower(), component))
+            if effect is None or not effect.protects(
+                action_year=int(action_year), forecast_year=int(year)
+            ):
+                continue
+            reductions.append(effect.deterioration_reduction)
+            evidence.append(effect.evidence_class)
+        if not reductions:
+            return baseline
+        retained_share = 1.0
+        for reduction in reductions:
+            retained_share *= 1.0 - reduction
+        combined_reduction = 1.0 - retained_share
+        distribution = tuple(
+            (1.0 - combined_reduction) * baseline.distribution[index]
+            + combined_reduction * state.distribution[index]
+            for index in range(10)
+        )
+        return ForecastTransition(
+            component=baseline.component,
+            year=baseline.year,
+            action_id=None,
+            distribution=distribution,
+            model_id=baseline.model_id,
+            evaluation_receipt_id=baseline.evaluation_receipt_id,
+            fallback_level=(
+                baseline.fallback_level
+                + "+protected:"
+                + "+".join(sorted(set(evidence)))
+            ),
         )

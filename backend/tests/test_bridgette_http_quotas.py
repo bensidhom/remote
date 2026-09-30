@@ -283,6 +283,8 @@ def test_http_unexpected_failure_returns_alternatives_and_releases_quota():
     ]
     decision = events[1]
     assert decision["code"] == "query_temporarily_unavailable"
+    assert "could not finish this request" in decision["message"]
+    assert "safely" not in decision["message"]
     assert len(decision["options"]) == 3
     assert decision["options"][0]["suggested_question"] == "Count bridges"
     assert "private provider failure" not in response.text

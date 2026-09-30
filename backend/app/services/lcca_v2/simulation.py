@@ -39,6 +39,10 @@ class ScheduledAction:
     present_cost: Decimal = Decimal("0")
     quantity: Decimal = Decimal("1")
     cost_unit: str = "lump_sum"
+    cost_status: str = "provided"
+    cost_source: str = "request"
+    included_in: str | None = None
+    service_life_years: int | None = None
 
     def __post_init__(self) -> None:
         treatment = str(self.treatment_id).strip().lower()
@@ -47,15 +51,32 @@ class ScheduledAction:
         cost = Decimal(self.present_cost)
         quantity = Decimal(self.quantity)
         unit = str(self.cost_unit).strip()
+        cost_status = str(self.cost_status).strip().lower()
+        cost_source = str(self.cost_source).strip()
         if not cost.is_finite() or cost < 0 or not quantity.is_finite() or quantity < 0:
             raise ValueError("scheduled action cost and quantity must be finite and non-negative")
         if not unit:
             raise ValueError("cost_unit is required")
+        if cost_status not in {"provided", "default", "included", "unavailable"}:
+            raise ValueError("scheduled action cost_status is invalid")
+        if not cost_source:
+            raise ValueError("scheduled action cost_source is required")
+        if self.service_life_years is not None and int(self.service_life_years) <= 0:
+            raise ValueError("service_life_years must be positive")
         object.__setattr__(self, "year", int(self.year))
         object.__setattr__(self, "treatment_id", treatment)
         object.__setattr__(self, "present_cost", cost)
         object.__setattr__(self, "quantity", quantity)
         object.__setattr__(self, "cost_unit", unit)
+        object.__setattr__(self, "cost_status", cost_status)
+        object.__setattr__(self, "cost_source", cost_source)
+        object.__setattr__(
+            self,
+            "included_in",
+            str(self.included_in).strip().lower() if self.included_in else None,
+        )
+        if self.service_life_years is not None:
+            object.__setattr__(self, "service_life_years", int(self.service_life_years))
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +165,8 @@ class AnnualLccaResult:
     treatment_library_id: str
     treatment_library_sha256: str
     annual_ledger: tuple[AnnualLedgerRow, ...]
+    gross_present_value_cost: Decimal
+    remaining_service_life_credit: Decimal
     total_present_value_cost: Decimal
     equivalent_annual_cost: Decimal
     economic_mode: str
@@ -315,13 +338,29 @@ def simulate_annual_lcca(
 
     for year in range(request.start_year + 1, request.start_year + request.horizon_years + 1):
         pre_action: dict[str, ComponentState] = {}
+        active_actions = tuple(
+            (action.treatment_id, action.year)
+            for action in request.alternative.scheduled_actions
+            if action.year < year
+        )
         for component in sorted(current):
-            transition = forecast.transition(
-                year=year,
-                component=component,
-                state=current[component],
-                action_id=None,
+            protected_transition = getattr(
+                forecast, "transition_with_active_treatments", None
             )
+            if callable(protected_transition):
+                transition = protected_transition(
+                    year=year,
+                    component=component,
+                    state=current[component],
+                    active_actions=active_actions,
+                )
+            else:
+                transition = forecast.transition(
+                    year=year,
+                    component=component,
+                    state=current[component],
+                    action_id=None,
+                )
             pre_action[component] = _validated_transition(
                 transition,
                 year=year,
@@ -360,6 +399,30 @@ def simulate_annual_lcca(
         (row.present_value_cost for row in ledger),
         start=Decimal("0"),
     )
+    end_year = request.start_year + request.horizon_years
+    latest_service_actions: dict[str, ScheduledAction] = {}
+    for action in request.alternative.scheduled_actions:
+        if action.service_life_years is not None and action.cost_status in {"provided", "default"}:
+            latest_service_actions[action.treatment_id] = action
+    remaining_service_life_credit = Decimal("0")
+    for action in latest_service_actions.values():
+        assert action.service_life_years is not None
+        used_years = max(0, end_year - action.year)
+        remaining_years = max(0, action.service_life_years - used_years)
+        if remaining_years <= 0:
+            continue
+        undiscounted_credit = (
+            action.present_cost
+            * action.quantity
+            * Decimal(remaining_years)
+            / Decimal(action.service_life_years)
+        )
+        remaining_service_life_credit += discount_cost(
+            undiscounted_credit,
+            funding_year=end_year,
+            assumptions=assumptions,
+        ).present_value
+    net_present_value_cost = total_present_value_cost - remaining_service_life_credit
     return AnnualLccaResult(
         identity=request.identity,
         bridge_id=request.bridge_id,
@@ -369,9 +432,11 @@ def simulate_annual_lcca(
         treatment_library_id=treatments.library_id,
         treatment_library_sha256=treatments.library_sha256,
         annual_ledger=tuple(ledger),
-        total_present_value_cost=total_present_value_cost,
+        gross_present_value_cost=total_present_value_cost,
+        remaining_service_life_credit=remaining_service_life_credit,
+        total_present_value_cost=net_present_value_cost,
         equivalent_annual_cost=equivalent_annual_cost(
-            total_present_value_cost,
+            net_present_value_cost,
             assumptions.real_discount_rate,
             request.horizon_years,
         ),

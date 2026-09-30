@@ -369,6 +369,8 @@ body {
   border-radius: 16px !important;
   width: 300px !important;
   max-width: 320px !important;
+  max-height: none !important;
+  height: auto !important;
   box-shadow: 0 12px 40px -10px rgba(2, 6, 23, 0.30) !important;
   border: 1px solid rgb(var(--border)) !important;
   overflow: hidden !important;
@@ -386,10 +388,12 @@ body {
 }
 /* The card sizes to its content — kill ArcGIS's internal scroll areas. */
 .esri-features,
+.esri-features__container,
 .esri-features__content-feature,
 .esri-popup__feature-menu { max-height: none !important; overflow: visible !important; }
 /* Keep it put: hide dock button + the multi-feature pager (one bridge only). */
 .esri-popup__button--dock,
+.esri-popup__footer,
 .esri-popup__feature-menu,
 .esri-popup__navigation .esri-popup__pagination,
 .esri-popup__pagination-page-text { display: none !important; }

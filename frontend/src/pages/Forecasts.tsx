@@ -310,7 +310,7 @@ const Forecasts: React.FC = () => {
               <p><span className="text-gray-500">Candidate MAE:</span> {evaluation?.candidate_mae.toFixed(3)}</p>
               <p><span className="text-gray-500">Persistence MAE:</span> {evaluation?.persistence_mae.toFixed(3)}</p>
               <p><span className="text-gray-500">MAE skill:</span> {evaluation ? `${(evaluation.mae_skill * 100).toFixed(1)}%` : '—'}</p>
-              {!summary.latest_package.release_qualified && <p className="text-amber-700">Research-unvalidated: LCCA commercial release remains blocked.</p>}
+              {!summary.latest_package.release_qualified && <p className="text-amber-700">Model validation is incomplete; review the forecast before using it for cost-ranking decisions.</p>}
             </div>
           ) : <p className="text-sm text-gray-500">No v2 model package has been fitted.</p>}
           <button onClick={trainAndEvaluate} disabled={loading || !summary?.available_years?.length} className="mt-5 w-full rounded-2xl bg-indigo-600 text-white px-4 py-3 font-semibold disabled:opacity-50">

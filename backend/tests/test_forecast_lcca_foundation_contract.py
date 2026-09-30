@@ -33,6 +33,10 @@ from app.services.lcca_v2.economics import (
     discount_cost,
     equivalent_annual_cost,
 )
+from app.services.lcca_v2.costs import (
+    DEFAULT_NJDOT_PLANNING_COSTS,
+    default_total_action_costs,
+)
 
 
 def _identity() -> AnalysisSnapshotIdentity:
@@ -145,6 +149,15 @@ def test_njdot_treatment_profile_has_published_cycles_and_component_scope():
     assert library.get("substructure_concrete_repair").cycle_years == 10
     assert library.get("scour_repair").cycle_years is None
     assert library.get("scour_repair").trigger_kind.value == "as_needed"
+
+
+def test_njdot_generic_preservation_cost_is_not_mislabeled_as_cleaning():
+    costs = default_total_action_costs(Decimal("1000"))
+    assert costs["njdot_preservation_package"] == Decimal("206000")
+    assert "bridge_cleaning" not in costs
+    source = DEFAULT_NJDOT_PLANNING_COSTS.get("njdot_preservation_package")
+    assert source.unit_cost == Decimal("206")
+    assert "generic preservation" in source.source_reference.lower()
 
 
 def test_treatment_compatibility_fails_closed_for_wrong_material_or_missing_evidence():

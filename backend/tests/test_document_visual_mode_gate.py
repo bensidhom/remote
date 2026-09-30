@@ -218,6 +218,17 @@ def test_legacy_db_context_never_enumerates_private_or_evidence_tables(tmp_path)
             connection.execute(
                 "INSERT INTO query_response_audit VALUES ('audit', 'SECRET RECEIPT')"
             )
+            connection.execute(
+                "CREATE TABLE workspace_state (workspace_id TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO workspace_state VALUES ('shared-research-workspace')"
+            )
+            connection.execute(
+                "CREATE VIEW v_bridge_condition AS "
+                "SELECT w.workspace_id, b.state_code, b.bridge_number, "
+                "'Good' AS condition_class FROM workspace_state w CROSS JOIN bridges b"
+            )
 
     with patch.object(vision, "USER_DB", database):
         context, metadata = vision.get_db_context(
@@ -243,3 +254,15 @@ def test_legacy_db_context_never_enumerates_private_or_evidence_tables(tmp_path)
         "SELECT COUNT(*) AS count FROM bridges WHERE state_code=34",
     )
     assert allowed["rows"] == [{"count": 1}]
+    trusted_view = vision._execute_legacy_context_sql(
+        str(database),
+        "SELECT bridge_number, condition_class FROM v_bridge_condition "
+        "WHERE state_code=34",
+    )
+    assert trusted_view["rows"] == [
+        {"bridge_number": "SAFE-1", "condition_class": "Good"}
+    ]
+    with pytest.raises(sqlite3.DatabaseError):
+        vision._execute_legacy_context_sql(
+            str(database), "SELECT workspace_id FROM workspace_state",
+        )

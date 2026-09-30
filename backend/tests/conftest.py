@@ -45,6 +45,9 @@ os.environ.update(
         "RAG_WORKING_DIR": str(TEST_DATA_ROOT / "rag_storage"),
         "SNBI_TEMP_DIR": str(TEST_DATA_ROOT / "temp"),
         "BRIDGEGUARD_ENV": "test",
+        # Individual agentic-router tests opt in explicitly. The rest of the
+        # suite continues to exercise the compatibility path it was written for.
+        "BRIDGETTE_QUERY_ENGINE": "legacy",
         "CEREBRAS_API_KEY": "",
         "TEI_EMBED_API_KEY": "",
         "TZ": "UTC",

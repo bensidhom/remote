@@ -50,6 +50,35 @@ export const BridgetteAnswerStatus: React.FC<{
   compact?: boolean;
 }> = ({ evidence, compact = false }) => {
   const mode = text(evidence?.answer_mode);
+  if (mode === 'verified_kpi') {
+    return (
+      <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700/70 dark:bg-emerald-950/40 dark:text-emerald-200`}>
+        <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span><strong>Verified KPI answer.</strong> Bridgette used the same governed definition and computation as the KPI dashboard.</span>
+      </div>
+    );
+  }
+  if (mode === 'agentic_sql') {
+    const verified = text(evidence?.answer_status) === 'verified';
+    const warnings = Array.isArray(evidence?.warnings)
+      ? evidence.warnings.filter((warning): warning is string => typeof warning === 'string')
+      : [];
+    const completenessNote = warnings.find((warning) => warning.includes('completeness review'));
+    if (verified) {
+      return (
+        <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700/70 dark:bg-emerald-950/40 dark:text-emerald-200`}>
+          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span><strong>Complete database answer.</strong> Bridgette used the full SNBI schema and code context, executed a bounded read-only query, and confirmed the requested outputs were present.</span>
+        </div>
+      );
+    }
+    return (
+      <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/70 dark:bg-amber-950/40 dark:text-amber-100`}>
+        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span><strong>Provisional database answer.</strong> {completenessNote ?? 'The query ran safely, but Bridgette could not confirm that every requested part is present. Review the result and SQL shown below.'}</span>
+      </div>
+    );
+  }
   if (mode === 'verified_semantic_plan') {
     return (
       <div className={`${compact ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-xs'} flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700/70 dark:bg-emerald-950/40 dark:text-emerald-200`}>

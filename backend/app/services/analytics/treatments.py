@@ -247,6 +247,15 @@ DEFAULT_NJDOT_TREATMENT_LIBRARY = TreatmentLibrary(
     source_title=_NJDOT_TAMP_SOURCE,
     source_url=_NJDOT_TAMP_URL,
     treatments=(
+        _treatment(
+            "njdot_preservation_package",
+            "Generic preventive-preservation project",
+            "bridge",
+            cycle=None,
+            trigger=TreatmentTriggerKind.AS_NEEDED,
+            cost_unit="deck_area",
+            residual_life_rule="reviewed_service_life",
+        ),
         _treatment("bridge_cleaning", "Bridge cleaning, washing, and sweeping", "bridge", cycle=2),
         _treatment("wearing_surface_crack_seal", "Seal asphalt wearing-surface cracks", "deck", cycle=2),
         _treatment("deck_crack_seal", "Seal concrete deck cracks", "deck", cycle=2, materials=_CONCRETE_DECK_CODES, elements=True),
