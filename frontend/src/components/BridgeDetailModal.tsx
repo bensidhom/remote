@@ -3,7 +3,7 @@
 // history+forecast, life-cycle cost, and a bridge-scoped RAG chat.
 import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Edit3, FileText, Box, History, Coins, Bot, Send, Loader2, Square, Table2, Plus, Trash2, ScanSearch, ZoomIn, ZoomOut, X } from 'lucide-react';
+import { Edit3, FileText, Box, History, Coins, Bot, Send, Loader2, Square, Table2, Plus, Trash2, ScanSearch, ZoomIn, ZoomOut, X, MapPinned } from 'lucide-react';
 import type { PopupBridgeRef } from './ArcgisMap';
 import { Modal, Button } from './ui';
 import BridgeHistoryModal from './BridgeHistoryModal';
@@ -12,8 +12,9 @@ import BridgeLCCAModal from './BridgeLCCAModal';
 import Editor from '../pages/Editor';
 
 const PointCloud = lazy(() => import('../pages/PointCloud'));
+const BridgeSiteIntelligence = lazy(() => import('./BridgeSiteIntelligence'));
 
-type Tab = 'history' | 'files' | 'pointcloud' | 'lcca' | 'rag' | 'custom' | 'edit';
+type Tab = 'history' | 'site' | 'files' | 'pointcloud' | 'lcca' | 'rag' | 'custom' | 'edit';
 type ReportImage = { data: string; mime: string; label?: string; filename?: string; detections?: { label?: string; confidence?: number; bbox?: number[] }[] };
 type PrivateSession = { id: string; title: string };
 type PrivateTurn = {
@@ -35,6 +36,7 @@ type AskEvidence = {
 };
 const TABS: { id: Tab; label: string; Icon: typeof History }[] = [
   { id: 'history', label: 'History', Icon: History },
+  { id: 'site', label: 'Site Intelligence', Icon: MapPinned },
   { id: 'files', label: 'Files', Icon: FileText },
   { id: 'pointcloud', label: 'Point Cloud', Icon: Box },
   { id: 'lcca', label: 'LCCA', Icon: Coins },
@@ -57,18 +59,20 @@ const BridgeDetailModal: React.FC<{ bridge: PopupBridgeRef; onClose: () => void 
         </p>
 
         {/* Tab bar */}
-        <div className="px-4 flex gap-1 border-b border-slate-200/70 dark:border-slate-700/70 overflow-x-auto">
+        <div className="px-4 flex gap-1 border-b border-slate-200/70 dark:border-slate-700/70 overflow-hidden">
           {TABS.map(({ id, label, Icon }) => (
             <button
               key={id}
+              aria-label={label}
+              title={label}
               onClick={() => setTab(id)}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+              className={`inline-flex items-center justify-center gap-2 px-3 lg:px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
                 tab === id
                   ? 'border-brand-500 text-brand-600 dark:text-brand-300'
                   : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
               }`}
             >
-              <Icon className="w-4 h-4" /> {label}
+              <Icon className="w-4 h-4" /> <span className={tab === id ? 'hidden sm:inline' : 'hidden lg:inline'}>{label}</span>
             </button>
           ))}
         </div>
@@ -76,6 +80,11 @@ const BridgeDetailModal: React.FC<{ bridge: PopupBridgeRef; onClose: () => void 
         {/* Tab body */}
         <div className="flex-1 overflow-auto ui-scroll p-4">
           {tab === 'history' && <BridgeHistoryModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} dataYear={bridge.data_year} onClose={noop} />}
+          {tab === 'site' && (
+            <Suspense fallback={<div className="p-8 text-center text-slate-500">Loading site intelligence…</div>}>
+              <BridgeSiteIntelligence stateCode={sc} bridgeNumber={bn} dataYear={bridge.data_year} />
+            </Suspense>
+          )}
           {tab === 'files' && <BridgeReportsModal embedded stateCode={sc} bridgeNumber={bn} bridgeName={bridge.bridge_name} onClose={noop} />}
           {tab === 'pointcloud' && (
             <div className="-m-4 h-[calc(100%+2rem)] min-h-[620px]">

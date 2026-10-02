@@ -184,6 +184,11 @@ try:
 except ImportError:
     from map_api import router as map_router
 
+try:
+    from .site_intelligence_api import router as site_intelligence_router
+except ImportError:
+    from site_intelligence_api import router as site_intelligence_router
+
 # Point-cloud storage/size settings are read while its router imports, so load
 # backend/.env first just like the other environment-backed services below.
 try:
@@ -1035,10 +1040,12 @@ app.include_router(forecast_v2_router)
 app.include_router(lcca_v2_router)
 app.include_router(kpi_v2_router)
 app.include_router(map_router)
+app.include_router(site_intelligence_router)
 # FastAPI 0.116+ keeps included routes behind a lazy wrapper in this runtime;
 # expose this security-sensitive endpoint directly so the SPA catch-all cannot
 # mask it (the Bridgette/AI adapters use the same reviewed pattern below).
 app.router.routes.extend(map_router.routes)
+app.router.routes.extend(site_intelligence_router.routes)
 # Keep the durable import lifecycle ahead of the SPA catch-all as concrete
 # routes as well.  This runtime represents include_router entries lazily; the
 # explicit entries make multipart/status/commit endpoints directly routable

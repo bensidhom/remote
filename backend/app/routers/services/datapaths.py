@@ -37,6 +37,7 @@ DATA_DIR = Path(os.getenv('BRIDGEGUARD_DATA_DIR', str(_BACKEND_DIR / 'data')))
 
 USER_DB = str(DATA_DIR / 'snbi_bridges.db')          # main bridge inventory DB
 FORECAST_DB = str(DATA_DIR / 'snbi_forecasts.db')    # forecasting runs
+SITE_INTELLIGENCE_CACHE_DB = str(DATA_DIR / 'site_intelligence_cache.sqlite3')  # refreshable external data only
 ATTACHMENTS_DIR = str(DATA_DIR / 'attachments')      # reports/ + point_clouds/ per bridge
 SAVE_DIR = str(DATA_DIR / 'exports')                 # SNBI/NBI export output
 RAG_WORKING_DIR = os.getenv('RAG_WORKING_DIR', str(DATA_DIR / 'rag_storage'))  # embeddings, images, KG
