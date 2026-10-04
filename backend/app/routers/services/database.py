@@ -2735,10 +2735,20 @@ def get_loaded_bridge_snbi_snapshot(
     exporting the full state inventory and never mixes child rows across years.
     """
 
-    ensure_schema(db_path)
-    conn = get_connection(db_path)
+    try:
+        resolved_path = Path(db_path).resolve(strict=True)
+    except (OSError, TypeError, ValueError):
+        return None
+    if not resolved_path.is_file():
+        return None
+    conn = sqlite3.connect(
+        f"file:{resolved_path.as_posix()}?mode=ro", uri=True, timeout=2.0
+    )
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA trusted_schema=OFF")
+        conn.execute("PRAGMA busy_timeout=2000")
         if year is None:
             selected = conn.execute(
                 "SELECT MAX(data_year) AS data_year FROM bridges "
@@ -2752,9 +2762,15 @@ def get_loaded_bridge_snbi_snapshot(
             return None
 
         def fetch(table: str) -> List[Dict[str, Any]]:
+            columns = {
+                str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')
+            }
+            if not columns:
+                return []
+            order_column = "id" if "id" in columns else "rowid"
             rows = conn.execute(
                 f'SELECT * FROM "{table}" WHERE state_code=? AND bridge_number=? '
-                'AND data_year=? ORDER BY rowid',
+                f'AND data_year=? ORDER BY "{order_column}"',
                 (int(state_code), str(bridge_number), int(effective_year)),
             ).fetchall()
             return [dict(row) for row in rows]
@@ -2778,15 +2794,26 @@ def get_loaded_bridge_snbi_snapshot(
         if not bridge_rows:
             return None
         document = dict(bridge_rows[0])
-        for table, container in (
-            ("features", "Features"),
-            ("span_sets", "SpanSets"),
-            ("substructure_sets", "SubstructureSets"),
-            ("elements", "Elements"),
-        ):
+        document["BL01"] = int(state_code)
+        document["BID01"] = str(bridge_number)
+        for container in ALL_NESTED_ARRAY_NAMES:
+            table = _LOAD_SECTION_TABLES[container]
             rows = remap(fetch(table), set(NESTED_ARRAY_SPECS[container]["fields"]))
             if rows:
                 document[container] = rows
+
+        # Routes are stored separately but are canonically nested below their
+        # owning feature. Reattach them without mixing bridge years.
+        routes_by_feature: Dict[str, List[Dict[str, Any]]] = {}
+        for route in fetch("routes"):
+            feature_type = str(route.get("feature_type") or "").strip()
+            mapped = remap([route], set(NESTED_ARRAY_SPECS["Routes"]["fields"]))
+            if feature_type and mapped:
+                routes_by_feature.setdefault(feature_type, []).append(mapped[0])
+        for feature in document.get("Features", []):
+            routes = routes_by_feature.get(str(feature.get("BF01") or ""), [])
+            if routes:
+                feature["Routes"] = routes
         return {"data_year": int(effective_year), "document": document}
     finally:
         conn.close()

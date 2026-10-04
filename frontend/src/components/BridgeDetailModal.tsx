@@ -33,6 +33,8 @@ type AskEvidence = {
   evidence_receipt_sha256?: string;
   provenance_status?: 'unverified_model_output' | 'verified_answer';
   cited_revision?: string;
+  indexed_image_description?: boolean;
+  evidence_notice?: string;
 };
 const TABS: { id: Tab; label: string; Icon: typeof History }[] = [
   { id: 'history', label: 'History', Icon: History },
@@ -420,14 +422,21 @@ const BridgeRagTab: React.FC<{
             citedRevision = evt.bridge_snapshot?.identity?.snapshot_revision_id;
             continue;
           } else if (evt.type === 'evidence') {
+            const indexedImageDescription = Boolean(
+              evt.image_description_evidence?.included_in_answer_context
+            );
             update({
               loading: false,
               sources: evt.reports_used || [],
               images: evt.images || [],
-              evidence: sessionId ? {
+              evidence: (sessionId || indexedImageDescription) ? {
                 analysis_mode: 'text',
+                visual_processing_ran: false,
                 provenance_status: 'unverified_model_output',
                 cited_revision: citedRevision,
+                indexed_image_description: indexedImageDescription,
+                evidence_notice: evt.evidence_notice
+                  || evt.image_description_evidence?.notice,
               } : undefined,
             });
           } else if (evt.type === 'token') {
@@ -528,13 +537,13 @@ const BridgeRagTab: React.FC<{
           <span className="text-xs text-slate-500">
             {useVisual
               ? 'One request only: up to 8 likely images; raw images may be sent to the configured model; estimated cap $0.25.'
-              : 'Unchecked: uses database and report text only.'}
+              : 'Unchecked: uses database, report text/tables, and previously indexed image descriptions only; no new image inspection.'}
           </span>
         </div>
       </div>
 
       <div className="flex-1 overflow-auto ui-scroll space-y-3">
-        {history.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">Ask about this bridge, its database record, and report text or tables. To inspect cracks or other visible defects, check Use visual investigation first. You can still request “show all images” or “show page 3” without running an inspection.</p>}
+        {history.length === 0 && <p className="text-sm text-slate-500 dark:text-slate-400">Ask about this bridge, its database record, report text or tables, and previously indexed image descriptions. When an indexed description is included in the answer context, its evidence image is shown without a new visual inspection. To inspect pixels for cracks or other visible defects, check Use visual investigation first.</p>}
         {history.map((t, i) => (
           <div key={i} className="space-y-1.5">
             <div className="text-right"><span className="inline-block rounded-2xl bg-brand-600 text-white px-3.5 py-2 text-sm">{t.q}</span></div>
@@ -547,6 +556,11 @@ const BridgeRagTab: React.FC<{
                     {img.label && <figcaption className="px-1.5 py-1 text-[10px] text-slate-500 dark:text-slate-400 truncate" title={img.label}>{img.label}</figcaption>}
                   </figure>
                 ))}
+              </div>
+            )}
+            {t.evidence?.indexed_image_description && t.evidence.evidence_notice && (
+              <div className="mt-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-2 text-[11px] text-sky-800 dark:border-sky-800/70 dark:bg-sky-950/30 dark:text-sky-200">
+                {t.evidence.evidence_notice}
               </div>
             )}
             {t.sources && t.sources.length > 0 && (

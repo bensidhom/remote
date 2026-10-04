@@ -354,10 +354,10 @@ def test_exact_revision_source_and_profile_tampering_fail_closed(tmp_path):
     queued = _queued_visual(jobs)
     with patch.object(
         visual_jobs,
-        "resolve_published_bridge_identity",
+        "resolve_bridge_inventory_identity",
         return_value=_identity(revision="revision-2", generation=8),
     ):
-        with pytest.raises(VisualJobError, match="published_bridge_snapshot_changed"):
+        with pytest.raises(VisualJobError, match="bridge_inventory_snapshot_changed"):
             visual_jobs._verify_exact_identity(tmp_path / "bridges.db", queued)
 
     with patch.object(

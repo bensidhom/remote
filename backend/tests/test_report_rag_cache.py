@@ -297,7 +297,7 @@ def test_incomplete_stage_manifest_never_reports_ready(tmp_path: Path):
     assert store.status(identity)["ready"] is False
 
 
-def test_embedding_failure_is_recorded_and_retry_reuses_parsed_stage(
+def test_embedding_failure_uses_complete_lexical_fallback_and_reuses_parsed_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("TEI_EMBED_DIM", "2")
@@ -315,14 +315,14 @@ def test_embedding_failure_is_recorded_and_retry_reuses_parsed_stage(
     with patch.object(vision, "_extract_file_assets", side_effect=extract), patch.object(
         rag_engine, "_compute_embeddings", return_value=None
     ):
-        with pytest.raises(ReportRagCacheIncomplete, match="Embedding provider"):
-            vision._ingest_bridge_reports_impl(
-                34, "BR-001", files=files, identity=identity, store=store
-            )
+        first = vision._ingest_bridge_reports_impl(
+            34, "BR-001", files=files, identity=identity, store=store
+        )
     manifest = store.load_manifest(identity)
-    assert manifest["complete"] is False
+    assert manifest["complete"] is True
     assert manifest["stages"]["parsed"]["status"] == "complete"
-    assert manifest["stages"]["embeddings"]["status"] == "error"
+    assert manifest["stages"]["embeddings"]["status"] == "complete"
+    assert first["embeddings"] is None
     with patch.object(vision, "_extract_file_assets", side_effect=extract), patch.object(
         rag_engine, "_compute_embeddings", side_effect=_vectors
     ):
@@ -330,6 +330,7 @@ def test_embedding_failure_is_recorded_and_retry_reuses_parsed_stage(
             34, "BR-001", files=files, identity=identity, store=store
         )
     assert result["rag_manifest"]["complete"] is True
+    assert result["embeddings"] is None
     assert parse_calls == 1
 
 
@@ -511,6 +512,35 @@ def test_public_ingestion_uses_published_identity_and_content_receipts(
     assert scope["snapshot_revision_id"] == "revision-a"
     assert scope["data_generation"] == 7
     assert result["rag_manifest"]["sources"][0]["sha256"] == source_identities(files)[0].sha256
+
+
+def test_report_index_remains_queryable_with_lexical_evidence_when_embeddings_are_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("TEI_EMBED_DIM", "2")
+    files, _ = _file(tmp_path, "rust was observed on the steel girder")
+    identity = _identity(files)
+    store = ReportRagCacheStore(tmp_path / "cache")
+
+    with patch.object(rag_engine, "_compute_embeddings", return_value=None):
+        result = vision._ingest_bridge_reports_impl(
+            34, "BR-001", files=files, identity=identity, store=store
+        )
+
+    assert result["embeddings"] is None
+    assert result["rag_manifest"]["complete"] is True
+    matches = hybrid_retrieve(
+        "is there rust",
+        result["chunks"],
+        embeddings=None,
+        lexical_index=result["lexical_index"],
+        profile=result["retrieval_profile"],
+        query_embedding=None,
+        limit=3,
+    )
+    assert len(matches) == 1
+    assert "rust" in matches[0]["text"]
+    assert matches[0]["retrieval"]["dense_cosine"] is None
 
 
 def test_bm25_dense_fusion_is_deterministic_and_weak_queries_abstain():

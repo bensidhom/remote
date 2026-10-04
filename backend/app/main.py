@@ -1157,7 +1157,7 @@ try:
     from .services.bridge_identity import (
         BridgeIdentityError,
         BridgeSnapshotIdentity,
-        resolve_published_bridge_identity,
+        resolve_bridge_inventory_identity,
     )
     from .services.ai.sessions import (
         MAX_TURN_CHARACTERS,
@@ -1180,7 +1180,7 @@ except ImportError:
     from services.bridge_identity import (
         BridgeIdentityError,
         BridgeSnapshotIdentity,
-        resolve_published_bridge_identity,
+        resolve_bridge_inventory_identity,
     )
     from services.ai.sessions import (
         MAX_TURN_CHARACTERS,
@@ -1410,7 +1410,7 @@ def _published_identity_evidence(
     if state_code is None or bridge_number is None:
         return {"status": "not_bridge_scoped"}, None, None
     try:
-        identity = resolve_published_bridge_identity(
+        identity = resolve_bridge_inventory_identity(
             USER_DB,
             workspace_id=SHARED_WORKSPACE_ID,
             state_code=state_code,
@@ -1420,7 +1420,7 @@ def _published_identity_evidence(
         expected_revision = str(expected_snapshot_revision_id or "").strip()
         if expected_revision and identity.snapshot_revision_id != expected_revision:
             return {
-                "status": "published_identity_mismatch",
+                "status": "bridge_inventory_identity_mismatch",
                 "identity": None,
             }, None, None
         return (
@@ -1429,9 +1429,7 @@ def _published_identity_evidence(
             identity,
         )
     except BridgeIdentityError:
-        # Legacy projection rows may not yet have a published canonical
-        # revision. State that gap explicitly; never invent a revision ID.
-        return {"status": "published_identity_unavailable", "identity": None}, None, None
+        return {"status": "bridge_inventory_identity_unavailable", "identity": None}, None, None
 
 
 def _append_conversation_user_turn(
@@ -1469,7 +1467,7 @@ def _append_conversation_assistant_turn(
 ) -> None:
     """Persist model output with honest, explicitly unverified provenance.
 
-    A published revision may be cited as the inventory scope used, but this
+    A request-pinned inventory snapshot may be cited as the scope used, but this
     helper never calls the verified-answer append path: ordinary Ask output has
     not passed the separate deterministic answer-verification workflow.
     """
@@ -1756,6 +1754,34 @@ def bridge_reports_status(state_code: str, bridge_number: str):
             "status": "status_unavailable",
             "error": "Report index status is unavailable",
         }
+    if st.get("file_count") and not st.get("ready"):
+        # The status endpoint is called when a bridge is opened. Queue the exact
+        # current report+inventory identity so an earlier completed job for the
+        # same filenames cannot suppress rebuilding after the inventory scope
+        # or report-index profile changes.
+        identity_sha256 = str(st.get("identity_sha256") or "unresolved")
+        internal_owner = (
+            "system+"
+            + hashlib.sha256(
+                f"{state_code}:{bridge_number}".encode("utf-8")
+            ).hexdigest()[:20]
+            + "@bridgeguard"
+        )
+        try:
+            job = _queue_report_index(
+                state_code,
+                bridge_number,
+                owner_id=internal_owner,
+                idempotency_key=(
+                    f"status:{state_code}:{bridge_number}:{identity_sha256}"
+                ),
+            )
+            st["indexing"] = True
+            st["job_status"] = job.status
+        except JobStoreError as exc:
+            st["queue_error"] = exc.code
+        except Exception:
+            st["queue_error"] = "report_index_queue_failed"
     return st
 
 
@@ -2976,7 +3002,7 @@ async def db_rag(
     if bridge_number and bridge_identity is None:
         raise HTTPException(
             status_code=409,
-            detail="Bridge Ask requires the exact published bridge revision.",
+            detail="Bridge Ask could not resolve the selected inventory snapshot.",
         )
     context = _register_ai_request(
         request,
@@ -3906,7 +3932,7 @@ async def db_rag_stream(
     if bridge_number and bridge_identity is None:
         raise HTTPException(
             status_code=409,
-            detail="Bridge Ask requires the exact published bridge revision.",
+            detail="Bridge Ask could not resolve the selected inventory snapshot.",
         )
     context = _register_ai_request(
         request,
@@ -4132,7 +4158,7 @@ async def bridge_visual_investigation(
     if bridge_identity is None:
         raise HTTPException(
             status_code=409,
-            detail="Visual investigation requires a published bridge revision.",
+            detail="Visual investigation could not resolve the selected inventory snapshot.",
         )
 
     deployment_mode = os.getenv(

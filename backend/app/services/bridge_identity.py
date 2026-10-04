@@ -1,9 +1,10 @@
-"""One immutable published bridge/snapshot identity shared across tools.
+"""One stable bridge/snapshot identity shared across tools.
 
 Map, Ask, report RAG, visual analysis, history, and engineering screens must not
 silently resolve different years or revisions for the same bridge.  This
 module is a deliberately small, read-only boundary over the canonical revision
-store.  It never falls back to staged revisions or the legacy projection.
+store. Bridge Ask and report retrieval may additionally use a deterministic
+identity for the exact loaded-inventory row when no published revision exists.
 """
 
 from __future__ import annotations
@@ -115,6 +116,7 @@ class BridgeSnapshotIdentity:
         )
 
     def public_payload(self) -> dict[str, object]:
+        loaded_inventory = self.snapshot_revision_id.startswith("loaded-inventory:")
         return {
             "workspace_id": self.workspace_id,
             "state_code": self.state_code,
@@ -128,7 +130,7 @@ class BridgeSnapshotIdentity:
             "published_at": self.published_at,
             "data_generation": self.data_generation,
             "schema_generation": self.schema_generation,
-            "snapshot_status": "published",
+            "snapshot_status": "loaded_inventory" if loaded_inventory else "published",
         }
 
 
@@ -216,11 +218,143 @@ def resolve_published_bridge_identity(
             connection.close()
 
 
+_LOADED_INVENTORY_RULE_BUNDLE_SHA256 = canonical_sha256(
+    {
+        "identity_profile": "bridgeguard-loaded-inventory-v1",
+        "scope": "exact-state-bridge-year",
+        "content": "canonical-relational-projection",
+    }
+)
+
+
+def resolve_loaded_bridge_identity(
+    database_path: str | os.PathLike[str],
+    *,
+    workspace_id: str,
+    state_code: int,
+    bridge_number: str,
+    data_year: int | None = None,
+) -> BridgeSnapshotIdentity:
+    """Resolve one exact loaded-inventory row without writing to the database."""
+
+    workspace = _token(workspace_id, "workspace_id")
+    state = _integer(state_code, "state_code", minimum=1, maximum=99)
+    bridge = _token(bridge_number, "bridge_number")
+    year = (
+        _integer(data_year, "data_year", minimum=1900, maximum=2200)
+        if data_year is not None
+        else None
+    )
+    try:
+        path = Path(os.fspath(database_path)).resolve(strict=True)
+    except (OSError, TypeError, ValueError) as exc:
+        raise BridgeIdentityStoreUnavailable("Bridge identity store is unavailable.") from exc
+    if not path.is_file():
+        raise BridgeIdentityStoreUnavailable("Bridge identity store is unavailable.")
+
+    # The loader is deliberately imported lazily so the shared identity module
+    # remains usable by schema/bootstrap code without creating an import cycle.
+    try:
+        from app.routers.services.database import get_loaded_bridge_snbi_snapshot
+    except ImportError:  # pragma: no cover - direct package execution compatibility
+        from routers.services.database import get_loaded_bridge_snbi_snapshot
+
+    try:
+        snapshot = get_loaded_bridge_snbi_snapshot(
+            str(path), state, bridge, year=year
+        )
+    except sqlite3.Error as exc:
+        raise BridgeIdentityStoreUnavailable("Bridge identity store is unavailable.") from exc
+    if not snapshot:
+        raise BridgeSnapshotNotFound("No matching loaded bridge snapshot was found.")
+
+    selected_year = _integer(
+        snapshot.get("data_year"), "data_year", minimum=1900, maximum=2200
+    )
+    document = snapshot.get("document")
+    if not isinstance(document, dict):
+        raise BridgeIdentityStoreUnavailable(
+            "Loaded bridge snapshot failed its canonical integrity check."
+        )
+
+    data_generation = 0
+    schema_generation = 0
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2.0
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        generation = connection.execute(
+            "SELECT data_generation,schema_generation FROM workspace_state "
+            "WHERE workspace_id=? LIMIT 1",
+            (workspace,),
+        ).fetchone()
+        if generation is not None:
+            data_generation = max(0, int(generation["data_generation"] or 0))
+            schema_generation = max(0, int(generation["schema_generation"] or 0))
+    except sqlite3.Error:
+        # The exact content hash still protects cache identity in older loaded
+        # databases that predate workspace generation counters.
+        data_generation = 0
+        schema_generation = 0
+    finally:
+        if connection is not None:
+            connection.close()
+
+    return BridgeSnapshotIdentity(
+        workspace_id=workspace,
+        state_code=state,
+        bridge_number=bridge,
+        data_year=selected_year,
+        snapshot_revision_id=f"loaded-inventory:{state}:{bridge}:{selected_year}",
+        revision_number=1,
+        canonical_sha256=canonical_sha256(document),
+        profile_id="bridgeguard-loaded-inventory-v1",
+        rule_bundle_sha256=_LOADED_INVENTORY_RULE_BUNDLE_SHA256,
+        published_at="loaded-inventory",
+        data_generation=data_generation,
+        schema_generation=schema_generation,
+    )
+
+
+def resolve_bridge_inventory_identity(
+    database_path: str | os.PathLike[str],
+    *,
+    workspace_id: str,
+    state_code: int,
+    bridge_number: str,
+    data_year: int | None = None,
+) -> BridgeSnapshotIdentity:
+    """Pin the active loaded inventory, with published-only compatibility."""
+
+    try:
+        return resolve_loaded_bridge_identity(
+            database_path,
+            workspace_id=workspace_id,
+            state_code=state_code,
+            bridge_number=bridge_number,
+            data_year=data_year,
+        )
+    except (BridgeSnapshotNotFound, BridgeIdentityStoreUnavailable):
+        return resolve_published_bridge_identity(
+            database_path,
+            workspace_id=workspace_id,
+            state_code=state_code,
+            bridge_number=bridge_number,
+            data_year=data_year,
+        )
+
+
 __all__ = [
     "BridgeIdentityError",
     "BridgeIdentityStoreUnavailable",
     "BridgeSnapshotIdentity",
     "BridgeSnapshotNotFound",
     "InvalidBridgeIdentity",
+    "resolve_bridge_inventory_identity",
+    "resolve_loaded_bridge_identity",
     "resolve_published_bridge_identity",
 ]

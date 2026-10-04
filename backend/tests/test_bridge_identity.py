@@ -12,6 +12,7 @@ from app.services.bridge_identity import (
     BridgeIdentityStoreUnavailable,
     BridgeSnapshotNotFound,
     InvalidBridgeIdentity,
+    resolve_bridge_inventory_identity,
     resolve_published_bridge_identity,
 )
 
@@ -98,6 +99,33 @@ def test_exact_year_never_falls_back(identity_database):
             bridge_number="0102151",
             data_year=2023,
         )
+
+
+def test_bridge_inventory_identity_falls_back_to_exact_loaded_snapshot(identity_database):
+    connection = sqlite3.connect(identity_database)
+    try:
+        connection.execute(
+            "INSERT INTO bridges "
+            "(state_code,bridge_number,bridge_name,data_year,year_built) "
+            "VALUES (?,?,?,?,?)",
+            (34, "LOADED-1", "Loaded bridge", 2025, 1970),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    identity = resolve_bridge_inventory_identity(
+        identity_database,
+        workspace_id=WORKSPACE,
+        state_code=34,
+        bridge_number="LOADED-1",
+        data_year=2025,
+    )
+
+    assert identity.snapshot_revision_id == "loaded-inventory:34:LOADED-1:2025"
+    assert identity.public_payload()["snapshot_status"] == "loaded_inventory"
+    assert identity.published_at == "loaded-inventory"
+    assert len(identity.canonical_sha256) == 64
 
 
 def test_workspace_isolation_is_non_enumerating(identity_database):

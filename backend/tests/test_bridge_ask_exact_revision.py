@@ -163,8 +163,8 @@ def test_bridge_ask_never_calls_legacy_prompt_scoped_sql_or_projection():
     exact_context.assert_called_once()
 
 
-def test_bridge_database_evidence_requires_owned_published_identity():
-    with pytest.raises(RuntimeError, match="published revision"):
+def test_bridge_database_evidence_requires_owned_inventory_identity():
+    with pytest.raises(RuntimeError, match="inventory snapshot"):
         asyncio.run(
             vision.process_bridge_ask(
                 "What is the deck rating?",

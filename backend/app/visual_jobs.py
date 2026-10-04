@@ -31,7 +31,7 @@ from .services.ai.context import (
 from .services.bridge_identity import (
     BridgeIdentityError,
     BridgeSnapshotIdentity,
-    resolve_published_bridge_identity,
+    resolve_bridge_inventory_identity,
 )
 from .services.conversion.source_artifacts import (
     SourceArtifactError,
@@ -329,7 +329,7 @@ def _verify_exact_identity(database_path: str | Path, job: OperationJob) -> Brid
     if identity.workspace_id != job.workspace_id:
         raise VisualJobError("visual_job_scope_mismatch", status=500)
     try:
-        current = resolve_published_bridge_identity(
+        current = resolve_bridge_inventory_identity(
             database_path,
             workspace_id=identity.workspace_id,
             state_code=identity.state_code,
@@ -337,9 +337,9 @@ def _verify_exact_identity(database_path: str | Path, job: OperationJob) -> Brid
             data_year=identity.data_year,
         )
     except BridgeIdentityError as exc:
-        raise VisualJobError("published_bridge_snapshot_unavailable", status=409) from exc
+        raise VisualJobError("bridge_inventory_snapshot_unavailable", status=409) from exc
     if current.public_payload() != identity.public_payload():
-        raise VisualJobError("published_bridge_snapshot_changed", status=409)
+        raise VisualJobError("bridge_inventory_snapshot_changed", status=409)
     return identity
 
 

@@ -545,15 +545,33 @@ def _release_advisory_lock(stream) -> None:
     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _native_path(path: Path) -> str:
+    """Return an absolute filesystem path that supports long Windows names."""
+
+    resolved = str(path.resolve())
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
+def _path_exists(path: Path) -> bool:
+    return os.path.exists(_native_path(path))
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    # Keep the same-directory temporary filename short. Repeating the 64-byte
+    # content-addressed target name here exceeded the traditional Windows path
+    # limit in local workspaces even though the final artifact path was valid.
+    temporary = path.parent / f".{uuid4().hex}.tmp"
     try:
-        with temporary.open("xb") as stream:
+        with open(_native_path(temporary), "xb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        os.replace(_native_path(temporary), _native_path(path))
         if os.name != "nt":
             descriptor = os.open(path.parent, os.O_RDONLY)
             try:
@@ -561,7 +579,10 @@ def _atomic_write(path: Path, data: bytes) -> None:
             finally:
                 os.close(descriptor)
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            os.unlink(_native_path(temporary))
+        except FileNotFoundError:
+            pass
 
 
 class ReportRagCacheStore:
@@ -615,18 +636,22 @@ class ReportRagCacheStore:
             self.root
             / "manifests"
             / self._scope_prefix(identity)
-            / identity.sha256
+            # The full identity remains verified inside current.json and the
+            # immutable manifest. A 96-bit directory prefix keeps Windows
+            # development paths below MAX_PATH without weakening validation.
+            / identity.sha256[:24]
             / "current.json"
         )
 
     def _read_bytes(self, path: Path, *, maximum: int, label: str) -> bytes:
         try:
-            stat = path.stat()
+            stat = os.stat(_native_path(path))
         except FileNotFoundError as exc:
             raise ReportRagCacheMiss(f"missing {label}") from exc
         if stat.st_size <= 0 or stat.st_size > maximum:
             raise ReportRagCacheIntegrityError(f"{label} has an invalid byte size")
-        data = path.read_bytes()
+        with open(_native_path(path), "rb") as stream:
+            data = stream.read(maximum + 1)
         if len(data) != stat.st_size:
             raise ReportRagCacheIntegrityError(f"{label} changed while it was read")
         return data
@@ -701,9 +726,9 @@ class ReportRagCacheStore:
         if not data or len(data) > _MAX_ARTIFACT_BYTES:
             raise ReportRagCacheError("report RAG stage artifact exceeds its byte limit")
         digest = sha256(data).hexdigest()
-        relative = f"stages/{stage}/{stage_key}/{digest}.json"
+        relative = f"stages/{stage}/{stage_key[:24]}/{digest[:24]}.json"
         path = self._within_root(relative)
-        if path.exists():
+        if _path_exists(path):
             existing = self._read_bytes(
                 path, maximum=_MAX_ARTIFACT_BYTES, label=f"{stage} artifact"
             )
@@ -755,7 +780,12 @@ class ReportRagCacheStore:
         if not receipt.complete or not receipt.artifact_path or not receipt.artifact_sha256:
             raise ReportRagCacheIncomplete(f"{receipt.stage} stage is incomplete")
         path = self._within_root(receipt.artifact_path)
-        if path.name != f"{receipt.artifact_sha256}.json":
+        if path.name not in {
+            f"{receipt.artifact_sha256[:24]}.json",
+            # Backward-compatible read for v2/v3 artifacts written before the
+            # Windows-safe abbreviated on-disk layout was introduced.
+            f"{receipt.artifact_sha256}.json",
+        }:
             raise ReportRagCacheIntegrityError(
                 f"{receipt.stage} artifact filename and hash receipt disagree"
             )
@@ -778,7 +808,7 @@ class ReportRagCacheStore:
 
     def find_reusable_stage(self, *, stage: str, stage_key: str) -> tuple[StageReceipt, Mapping[str, Any]]:
         stage_key = _require_sha256(stage_key, "stage_key")
-        directory = self.root / "stages" / stage / stage_key
+        directory = self.root / "stages" / stage / stage_key[:24]
         if not directory.is_dir():
             raise ReportRagCacheMiss(f"no reusable {stage} stage")
         candidates = sorted(directory.glob("*.json"))
@@ -787,13 +817,15 @@ class ReportRagCacheStore:
             # alternatives.  Refuse ambiguity rather than selecting arbitrarily.
             raise ReportRagCacheIntegrityError(f"too many immutable {stage} artifacts")
         for path in candidates:
-            digest = path.stem.lower()
+            digest_prefix = path.stem.lower()
             try:
-                _require_sha256(digest, "artifact filename")
+                if not re.fullmatch(r"[0-9a-f]{24}", digest_prefix):
+                    raise ValueError("artifact filename is invalid")
                 data = self._read_bytes(
                     path, maximum=_MAX_ARTIFACT_BYTES, label=f"{stage} artifact"
                 )
-                if sha256(data).hexdigest() != digest:
+                digest = sha256(data).hexdigest()
+                if not digest.startswith(digest_prefix):
                     continue
                 envelope = _decode_json(data, label=f"{stage} artifact")
                 if not isinstance(envelope, Mapping):
@@ -861,7 +893,7 @@ class ReportRagCacheStore:
         digest = sha256(data).hexdigest()
         directory = self._current_pointer(identity).parent
         immutable = directory / f"manifest-{digest}.json"
-        if immutable.exists():
+        if _path_exists(immutable):
             existing = self._read_bytes(
                 immutable, maximum=_MAX_MANIFEST_BYTES, label="immutable manifest"
             )
