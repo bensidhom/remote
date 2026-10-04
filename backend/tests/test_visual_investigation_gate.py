@@ -1,6 +1,7 @@
 import unittest
 import hashlib
 import json
+import numpy as np
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -41,6 +42,133 @@ class VisualInvestigationGateTests(unittest.IsolatedAsyncioTestCase):
             ),
             "rust",
         )
+
+    def test_visual_retrieval_recovers_a_typo_from_report_vocabulary(self):
+        profile = dict(vision._active_report_rag_profiles("visual").retrieval)
+        chunks = [{
+            "chunk_id": "1" * 64,
+            "kind": "image",
+            "source": "inspection.pdf",
+            "text": "Priority repair: major superstructure defects.",
+            "path": "defect.png",
+            "page": 87,
+        }]
+        ingested = {
+            "chunks": chunks,
+            "embeddings": None,
+            "lexical_index": vision._build_report_bm25_index(chunks, profile),
+            "retrieval_profile": profile,
+        }
+        with patch.object(
+            vision.llm_providers,
+            "embed_query",
+            side_effect=RuntimeError("embedding service unavailable"),
+        ):
+            ranked, evidence = vision._retrieve_visual_candidate_chunks(
+                "is there any defcts?",
+                ingested,
+                limit=8,
+            )
+
+        self.assertEqual([chunk["page"] for chunk in ranked], [87])
+        self.assertEqual(
+            evidence["spelling_expansions"],
+            [{"term": "defcts", "matches": ["defects"]}],
+        )
+        self.assertIn("typo_tolerant_lexical", evidence["channels"])
+        self.assertFalse(evidence["fallback_used"])
+
+    def test_visual_retrieval_accepts_semantic_candidates_without_word_overlap(self):
+        chunks = [
+            {
+                "chunk_id": "1" * 64,
+                "kind": "image",
+                "source": "inspection.pdf",
+                "text": "Brown oxidation is visible on the steel girder.",
+                "path": "rust.png",
+                "page": 7,
+            },
+            {
+                "chunk_id": "2" * 64,
+                "kind": "image",
+                "source": "inspection.pdf",
+                "text": "A clean concrete abutment is shown.",
+                "path": "abutment.png",
+                "page": 9,
+            },
+        ]
+        profile = dict(vision._active_report_rag_profiles("visual").retrieval)
+        profile["minimum_dense_cosine"] = 0.5
+        ingested = {
+            "chunks": chunks,
+            "embeddings": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+            "lexical_index": vision._build_report_bm25_index(chunks, profile),
+            "retrieval_profile": profile,
+        }
+        with (
+            patch.object(vision, "_retrieve_report_chunks", return_value=[]),
+            patch.object(
+                vision.llm_providers,
+                "embed_query",
+                return_value=np.asarray([[0.95, 0.05]], dtype=np.float32),
+            ),
+        ):
+            ranked, evidence = vision._retrieve_visual_candidate_chunks(
+                "Does the steel show deterioration?",
+                ingested,
+                limit=2,
+            )
+
+        self.assertEqual([chunk["page"] for chunk in ranked], [7])
+        self.assertIn("dense_semantic", evidence["channels"])
+        self.assertTrue(
+            ranked[0]["retrieval"]["semantic_candidate_without_lexical_gate"]
+        )
+
+    def test_visual_retrieval_falls_back_to_a_bounded_diverse_scan(self):
+        chunks = [
+            {
+                "kind": "image",
+                "source": "inspection.pdf",
+                "text": f"Photo {page}",
+                "path": f"image-{page}.png",
+                "page": page,
+            }
+            for page in range(1, 11)
+        ]
+        with patch.object(vision, "_retrieve_report_chunks", return_value=[]):
+            ranked, evidence = vision._retrieve_visual_candidate_chunks(
+                "look for an unusual visible issue",
+                {"chunks": chunks, "embeddings": None},
+                limit=3,
+            )
+
+        self.assertEqual([chunk["page"] for chunk in ranked], [1, 5, 10])
+        self.assertEqual(evidence["channels"], ["bounded_diverse_visual_scan"])
+        self.assertTrue(evidence["fallback_used"])
+
+    def test_strict_visual_detection_surfaces_provider_failure(self):
+        with (
+            patch.object(rag_engine, "_resize_image_b64", return_value="encoded"),
+            patch.object(
+                rag_engine.llm_providers,
+                "generate",
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+        ):
+            self.assertEqual(
+                rag_engine._detect_defects_with_bboxes("image.png", "rust"),
+                [],
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "visual_detection_provider_failed",
+            ):
+                rag_engine._detect_defects_with_bboxes(
+                    "image.png",
+                    "rust",
+                    raise_on_provider_error=True,
+                )
 
     def test_verified_legacy_image_descriptions_bind_to_current_report_hash(self):
         with TemporaryDirectory() as directory:
@@ -460,7 +588,11 @@ class VisualInvestigationGateTests(unittest.IsolatedAsyncioTestCase):
                 request_context=context,
             )
 
-        detect.assert_called_once_with(str(image_path), "find cracks")
+        detect.assert_called_once_with(
+            str(image_path),
+            "find cracks",
+            raise_on_provider_error=True,
+        )
         self.assertEqual(result["checked_images"], 1)
         self.assertEqual(len(result["images"]), 1)
         self.assertEqual(result["detections"][0]["detections"], detections)
@@ -538,7 +670,7 @@ class VisualInvestigationGateTests(unittest.IsolatedAsyncioTestCase):
         opened = MagicMock()
         opened.__enter__.return_value.read.side_effect = [b"image", b""]
 
-        def cancel_during_detection(_path, _query):
+        def cancel_during_detection(_path, _query, **_kwargs):
             context.cancellation_token.set()
             return []
 

@@ -721,7 +721,7 @@ def test_production_text_ask_uses_thresholded_hybrid_and_abstains_on_weak_eviden
     assert len(prompts) == 1
 
 
-def test_production_visual_hybrid_retrieval_provenance_and_weak_abstention(
+def test_production_visual_hybrid_retrieval_provenance_and_bounded_fallback(
     tmp_path: Path,
 ):
     image_path = tmp_path / "deck.png"
@@ -793,11 +793,12 @@ def test_production_visual_hybrid_retrieval_provenance_and_weak_abstention(
             )
         )
 
-    assert detector.call_count == 1
+    assert detector.call_count == 2
     assert strong["status"] == "success"
     assert strong["citations"] == [chunk["citation"]]
     assert strong["inspected_images"][0]["citation"] == chunk["citation"]
     assert strong["visual_evidence"]["report_rag_provenance"] == ingested["rag_manifest"]
-    assert weak["status"] == "abstention"
-    assert weak["checked_images"] == 0
-    assert weak["citations"] == []
+    assert weak["status"] == "success"
+    assert weak["checked_images"] == 1
+    assert weak["citations"] == [chunk["citation"]]
+    assert weak["visual_evidence"]["candidate_retrieval"]["fallback_used"] is True

@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -37,6 +38,7 @@ from .report_rag_cache import (
     ReportRagScope,
     ReportSourceIdentity,
     StageReceipt,
+    BoundedTTLCache,
     bm25_tokens as _report_bm25_tokens,
     build_bm25_index as _build_report_bm25_index,
     canonical_sha256 as _report_canonical_sha256,
@@ -1438,6 +1440,10 @@ _IMAGE_DESCRIPTION_QUERY_FILLER = frozenset({
     "picture", "pictures", "please", "report", "reports", "see", "show",
     "tell", "there", "would",
 })
+_VISUAL_DESCRIPTION_EMBEDDING_CACHE = BoundedTTLCache(
+    maximum=16,
+    ttl_seconds=30 * 60,
+)
 
 
 def _image_description_retrieval_question(question: str) -> str:
@@ -1447,6 +1453,54 @@ def _image_description_retrieval_question(question: str) -> str:
         token for token in tokens if token not in _IMAGE_DESCRIPTION_QUERY_FILLER
     ]
     return " ".join(meaningful) if meaningful else str(question)
+
+
+def _expand_image_description_query(
+    question: str,
+    lexical_index: Mapping | None,
+) -> tuple[str, list[dict]]:
+    """Expand likely misspellings using only the indexed report vocabulary.
+
+    Original terms are retained.  This keeps exact lexical behavior intact and
+    adds recall for ordinary typing mistakes without maintaining a brittle list
+    of defect phrases or silently changing the user's request.
+    """
+    normalized = _image_description_retrieval_question(question)
+    tokens = list(dict.fromkeys(_report_bm25_tokens(normalized)))
+    postings = (
+        lexical_index.get("postings")
+        if isinstance(lexical_index, Mapping)
+        and isinstance(lexical_index.get("postings"), Mapping)
+        else {}
+    )
+    vocabulary = tuple(
+        token for token in postings
+        if isinstance(token, str) and len(token) >= 4
+    )
+    expanded = list(tokens)
+    corrections: list[dict] = []
+    for token in tokens:
+        if token in postings or len(token) < 4:
+            continue
+        candidates: list[tuple[float, int, str]] = []
+        for candidate in vocabulary:
+            if token[:1] != candidate[:1]:
+                continue
+            length_delta = abs(len(token) - len(candidate))
+            if length_delta > 2:
+                continue
+            ratio = SequenceMatcher(None, token, candidate).ratio()
+            threshold = 0.80 if len(token) >= 5 else 0.86
+            if ratio >= threshold:
+                document_frequency = len(postings.get(candidate) or [])
+                candidates.append((ratio, document_frequency, candidate))
+        candidates.sort(key=lambda row: (-row[0], -row[1], row[2]))
+        selected = [candidate for _ratio, _frequency, candidate in candidates[:2]]
+        if not selected:
+            continue
+        expanded.extend(candidate for candidate in selected if candidate not in expanded)
+        corrections.append({"term": token, "matches": selected})
+    return " ".join(expanded) if expanded else normalized, corrections
 
 
 def _visual_image_estimated_tokens(path: Path) -> int:
@@ -2654,6 +2708,268 @@ def _retrieve_report_chunks(
         limit=limit,
         allowed_chunk_ids=allowed_ids,
     )
+
+
+def _with_visual_description_embeddings(
+    ingest_result: dict,
+    *,
+    cancellation=None,
+) -> tuple[dict, str]:
+    """Attach cached dense vectors to a verified legacy description adapter.
+
+    Legacy image descriptions predate the immutable report-RAG embedding stage.
+    They are safe to embed after the adapter has rebound every description and
+    image to the current report hash.  Vectors stay in a bounded process cache;
+    this path does not change the database or the on-disk report artifacts.
+    """
+    import numpy as np
+
+    chunks = ingest_result.get("chunks") or []
+    matrix = ingest_result.get("embeddings")
+    profile = llm_providers.embedding_profile()
+    expected_dimension = int(profile["dimension"])
+    if matrix is not None:
+        try:
+            candidate = np.asarray(matrix, dtype=np.float32)
+        except (TypeError, ValueError):
+            candidate = None
+        if (
+            candidate is not None
+            and candidate.ndim == 2
+            and candidate.shape == (len(chunks), expected_dimension)
+            and np.isfinite(candidate).all()
+        ):
+            return ingest_result, "persisted_dense_embeddings"
+
+    manifest = ingest_result.get("rag_manifest")
+    if (
+        not chunks
+        or not isinstance(manifest, Mapping)
+        or manifest.get("evidence_type") != "previously_indexed_image_description"
+        or not isinstance(ingest_result.get("lexical_index"), Mapping)
+    ):
+        return ingest_result, "dense_embeddings_unavailable"
+
+    identity_sha256 = str(manifest.get("identity_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", identity_sha256):
+        return ingest_result, "dense_embeddings_unavailable"
+    cache_key = _report_canonical_sha256({
+        "report_rag_identity_sha256": identity_sha256,
+        "embedding_profile": profile,
+        "chunk_ids": [str(chunk.get("chunk_id") or "") for chunk in chunks],
+    })
+    cached = _VISUAL_DESCRIPTION_EMBEDDING_CACHE.get(cache_key)
+    if cached is not None:
+        result = dict(ingest_result)
+        result["embeddings"] = cached
+        result["embedding_profile"] = profile
+        return result, "cached_dense_embeddings"
+
+    _check_report_cancelled(cancellation)
+    try:
+        embedded = llm_providers.embed_passages(
+            [str(chunk.get("text") or "") for chunk in chunks]
+        )
+        embedded = np.asarray(embedded, dtype=np.float32)
+    except Exception:
+        return ingest_result, "dense_embeddings_unavailable"
+    _check_report_cancelled(cancellation)
+    if (
+        embedded.ndim != 2
+        or embedded.shape != (len(chunks), expected_dimension)
+        or not np.isfinite(embedded).all()
+    ):
+        return ingest_result, "dense_embeddings_unavailable"
+    _VISUAL_DESCRIPTION_EMBEDDING_CACHE.put(cache_key, embedded)
+    result = dict(ingest_result)
+    result["embeddings"] = embedded
+    result["embedding_profile"] = profile
+    return result, "generated_dense_embeddings"
+
+
+def _visual_chunk_key(chunk: Mapping) -> str:
+    chunk_id = str(chunk.get("chunk_id") or "")
+    if chunk_id:
+        return chunk_id
+    return _report_canonical_sha256({
+        "source": chunk.get("source"),
+        "path": str(chunk.get("path") or ""),
+        "page": chunk.get("page"),
+        "photo_number": chunk.get("photo_number"),
+        "text": str(chunk.get("text") or ""),
+    })
+
+
+def _dense_visual_candidates(
+    question: str,
+    ingest_result: dict,
+    *,
+    limit: int,
+    selected_sources: Optional[list] = None,
+) -> list[dict]:
+    """Return thresholded semantic image candidates without a lexical gate."""
+    import numpy as np
+
+    chunks = ingest_result.get("chunks") or []
+    embeddings = ingest_result.get("embeddings")
+    if not chunks or embeddings is None:
+        return []
+    try:
+        matrix = np.asarray(embeddings, dtype=np.float32)
+        query = np.asarray(llm_providers.embed_query(question), dtype=np.float32)
+        if query.ndim == 2 and query.shape[0] == 1:
+            query = query[0]
+        if (
+            matrix.ndim != 2
+            or matrix.shape[0] != len(chunks)
+            or query.ndim != 1
+            or query.shape[0] != matrix.shape[1]
+            or not np.isfinite(matrix).all()
+            or not np.isfinite(query).all()
+        ):
+            return []
+    except Exception:
+        return []
+
+    selected = set(selected_sources) if selected_sources is not None else None
+    allowed = [
+        index for index, chunk in enumerate(chunks)
+        if chunk.get("kind") == "image"
+        and (selected is None or chunk.get("source") in selected)
+    ]
+    if not allowed:
+        return []
+    query_norm = float(np.linalg.norm(query))
+    if query_norm <= 0:
+        return []
+    row_norms = np.linalg.norm(matrix, axis=1)
+    scores = (matrix @ query) / (row_norms * query_norm + 1e-10)
+    profile = ingest_result.get("retrieval_profile") or {}
+    try:
+        minimum_dense = float(profile.get("minimum_dense_cosine", 0.25))
+    except (TypeError, ValueError):
+        minimum_dense = 0.25
+    minimum_dense = max(-1.0, min(minimum_dense, 1.0))
+    ordered = sorted(
+        (index for index in allowed if float(scores[index]) >= minimum_dense),
+        key=lambda index: (
+            -float(scores[index]),
+            _visual_chunk_key(chunks[index]),
+        ),
+    )[:limit]
+    output: list[dict] = []
+    for index in ordered:
+        item = dict(chunks[index])
+        item["retrieval"] = {
+            **(item.get("retrieval") or {}),
+            "dense_cosine": float(scores[index]),
+            "semantic_candidate_without_lexical_gate": True,
+            "passed_relevance_gate": True,
+        }
+        output.append(item)
+    return output
+
+
+def _diverse_visual_candidates(
+    chunks: list[dict],
+    *,
+    limit: int,
+    selected_sources: Optional[list] = None,
+) -> list[dict]:
+    """Select a deterministic spread of images for the bounded VLM fallback."""
+    selected = set(selected_sources) if selected_sources is not None else None
+    images = [
+        chunk for chunk in chunks
+        if chunk.get("kind") == "image"
+        and (selected is None or chunk.get("source") in selected)
+    ]
+    if len(images) <= limit:
+        chosen = images
+    elif limit == 1:
+        chosen = [images[len(images) // 2]]
+    else:
+        positions = [
+            round(index * (len(images) - 1) / (limit - 1))
+            for index in range(limit)
+        ]
+        chosen = [images[position] for position in positions]
+    return [
+        {
+            **chunk,
+            "retrieval": {
+                **(chunk.get("retrieval") or {}),
+                "bounded_diverse_visual_scan": True,
+                "passed_relevance_gate": True,
+            },
+        }
+        for chunk in chosen
+    ]
+
+
+def _retrieve_visual_candidate_chunks(
+    question: str,
+    ingest_result: dict,
+    *,
+    limit: int,
+    selected_sources: Optional[list] = None,
+) -> tuple[list[dict], dict]:
+    """Fuse typo-tolerant lexical and true semantic visual discovery."""
+    expanded_question, corrections = _expand_image_description_query(
+        question,
+        ingest_result.get("lexical_index"),
+    )
+    lexical = _retrieve_report_chunks(
+        expanded_question,
+        ingest_result,
+        limit=limit,
+        selected_sources=selected_sources,
+        allowed_kinds={"image"},
+    )
+    semantic = _dense_visual_candidates(
+        _image_description_retrieval_question(question),
+        ingest_result,
+        limit=limit,
+        selected_sources=selected_sources,
+    )
+
+    by_key: dict[str, dict] = {}
+    ranks: dict[str, float] = {}
+    for channel_weight, rows in ((1.0, lexical), (1.0, semantic)):
+        for rank, chunk in enumerate(rows, start=1):
+            key = _visual_chunk_key(chunk)
+            ranks[key] = ranks.get(key, 0.0) + channel_weight / (60.0 + rank)
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = dict(chunk)
+            else:
+                existing_retrieval = dict(existing.get("retrieval") or {})
+                existing_retrieval.update(chunk.get("retrieval") or {})
+                existing["retrieval"] = existing_retrieval
+    ranked = sorted(
+        by_key.values(),
+        key=lambda chunk: (-ranks[_visual_chunk_key(chunk)], _visual_chunk_key(chunk)),
+    )[:limit]
+    channels = []
+    if lexical:
+        channels.append("typo_tolerant_lexical")
+    if semantic:
+        channels.append("dense_semantic")
+    fallback = False
+    if not ranked:
+        ranked = _diverse_visual_candidates(
+            ingest_result.get("chunks") or [],
+            limit=limit,
+            selected_sources=selected_sources,
+        )
+        if ranked:
+            channels.append("bounded_diverse_visual_scan")
+            fallback = True
+    return ranked, {
+        "strategy": "+".join(channels) if channels else "none",
+        "channels": channels,
+        "spelling_expansions": corrections,
+        "fallback_used": fallback,
+    }
 
 
 def point_cloud_segmentation_report_evidence(
@@ -4104,19 +4420,25 @@ async def process_bridge_visual_investigation(
                 'usage': _usage(),
             },
         }
-    ranked = _retrieve_report_chunks(
-        _image_description_retrieval_question(query),
+    ing, dense_embedding_source = await asyncio.to_thread(
+        _with_visual_description_embeddings,
+        ing,
+        cancellation=request_context.cancellation_token,
+    )
+    ranked, candidate_retrieval = await asyncio.to_thread(
+        _retrieve_visual_candidate_chunks,
+        query,
         ing,
         limit=candidate_limit,
         selected_sources=selected_sources,
-        allowed_kinds={"image"},
-    )[:candidate_limit]
-    candidate_strategy = 'thresholded_bm25_dense_rrf'
+    )
+    ranked = ranked[:candidate_limit]
+    candidate_strategy = candidate_retrieval["strategy"]
     if not ranked:
         return {
             'status': 'abstention',
             'query': query,
-            'answer': 'No report image cleared the reviewed relevance threshold.',
+            'answer': 'No usable report image was available for visual inspection.',
             'images': [],
             'detections': [],
             'checked_images': 0,
@@ -4129,6 +4451,8 @@ async def process_bridge_visual_investigation(
                 'visual_processing_ran': _usage()['model_image_call_attempts'] > 0,
                 'report_rag_provenance': ing.get('rag_manifest'),
                 'candidate_description_source': candidate_description_source,
+                'dense_embedding_source': dense_embedding_source,
+                'candidate_retrieval': candidate_retrieval,
                 'usage': _usage(),
             },
         }
@@ -4180,6 +4504,7 @@ async def process_bridge_visual_investigation(
                 _detect_defects_with_bboxes,
                 str(path_obj),
                 query,
+                raise_on_provider_error=True,
             )
             if dets:
                 dets = await asyncio.to_thread(
@@ -4226,15 +4551,33 @@ async def process_bridge_visual_investigation(
         receipt["citation"] for receipt in inspected_images
         if isinstance(receipt.get("citation"), dict)
     ]
+    detector_failures = sum(
+        1 for error in visual_errors if error.get("code") == "detector_failed"
+    )
+    successful_inspections = max(0, checked_images - detector_failures)
+    response_status = "success"
     if detected_count:
         answer = (
             f"Checked {checked_images} report image(s) for '{query}' and found "
             f"{detected_count} detection(s) in {len(images)} image(s)."
         )
+    elif detector_failures and successful_inspections == 0:
+        response_status = "partial"
+        answer = (
+            f"Selected {checked_images} relevant report image(s) for '{query}', "
+            "but the configured visual model could not inspect them. Please retry."
+        )
+    elif detector_failures:
+        response_status = "partial"
+        answer = (
+            f"Inspected {successful_inspections} of {checked_images} selected report "
+            f"image(s) for '{query}' and found no visible match; "
+            f"{detector_failures} image(s) could not be inspected."
+        )
     else:
         answer = f"Checked {checked_images} report image(s) for '{query}' and found no visible match."
     return {
-        'status': 'success',
+        'status': response_status,
         'query': query,
         'answer': answer,
         'images': images,
@@ -4250,6 +4593,8 @@ async def process_bridge_visual_investigation(
             'visual_processing_ran': _usage()['model_image_call_attempts'] > 0,
             'report_rag_provenance': ing.get('rag_manifest'),
             'candidate_description_source': candidate_description_source,
+            'dense_embedding_source': dense_embedding_source,
+            'candidate_retrieval': candidate_retrieval,
             'usage': _usage(),
         },
     }

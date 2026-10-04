@@ -276,7 +276,7 @@ def test_caption_and_detector_calls_share_one_total_image_cap(tmp_path: Path):
     assert usage["estimated_images"] == 4
 
 
-def test_caption_usage_remains_truthful_when_retrieval_abstains(tmp_path: Path):
+def test_caption_usage_remains_truthful_when_retrieval_uses_visual_fallback(tmp_path: Path):
     caption_path = tmp_path / "captioned.png"
     caption_path.write_bytes(b"captioned-image")
 
@@ -307,7 +307,7 @@ def test_caption_usage_remains_truthful_when_retrieval_abstains(tmp_path: Path):
         patch.object(
             rag_engine,
             "_detect_defects_with_bboxes",
-            side_effect=AssertionError("abstention reached detector"),
+            return_value=[],
         ) as detector,
     ):
         result = asyncio.run(vision.process_bridge_visual_investigation(
@@ -319,10 +319,11 @@ def test_caption_usage_remains_truthful_when_retrieval_abstains(tmp_path: Path):
         ))
 
     usage = result["visual_evidence"]["usage"]
-    assert result["status"] == "abstention"
+    assert result["status"] == "success"
+    assert result["visual_evidence"]["candidate_retrieval"]["fallback_used"] is True
     assert result["visual_evidence"]["visual_processing_ran"] is True
-    assert usage["model_image_call_attempts"] == 1
+    assert usage["model_image_call_attempts"] == 2
     assert usage["caption_image_call_attempts"] == 1
-    assert usage["detector_image_call_attempts"] == 0
+    assert usage["detector_image_call_attempts"] == 1
     assert usage["provider_call_receipts"][0]["source"] == "selected.pdf"
-    detector.assert_not_called()
+    detector.assert_called_once()

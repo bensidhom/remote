@@ -1086,7 +1086,12 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return None
 
 
-def _detect_defects_with_bboxes(image_path: str, defect_query: str) -> List[dict]:
+def _detect_defects_with_bboxes(
+    image_path: str,
+    defect_query: str,
+    *,
+    raise_on_provider_error: bool = False,
+) -> List[dict]:
     """Ask vision model for defect detections with normalized bounding boxes."""
     img_b64 = _resize_image_b64(image_path)
     prompt = (
@@ -1126,6 +1131,8 @@ def _detect_defects_with_bboxes(image_path: str, defect_query: str) -> List[dict
         return clean
     except Exception as exc:
         print(f"  [vision] Defect bbox detection failed: {exc}")
+        if raise_on_provider_error:
+            raise RuntimeError("visual_detection_provider_failed") from exc
         return []
 
 
